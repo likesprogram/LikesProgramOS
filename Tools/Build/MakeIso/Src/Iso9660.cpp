@@ -1,3 +1,6 @@
+// Iso9660.cpp
+// ISO9660 写入器的实现：卷描述符、路径表、目录记录与 Rock Ridge/El Torito 结构
+
 #include "Iso9660.h"
 
 #include "Image.h"
@@ -12,58 +15,67 @@
 
 namespace makeiso {
     namespace {
-        constexpr uint32_t kBlock = 2048;
-        constexpr uint32_t kPvdLba = 16;
-        constexpr uint32_t kBootRecordLba = 17;
-        constexpr uint32_t kTerminatorLba = 18;
-        constexpr uint32_t kBootCatalogLba = 19;
-        constexpr uint32_t kFirstPathTableLba = 20;
-        constexpr std::size_t kMaxIdentifier = 31;
+        constexpr uint32_t kBlock = 2048;            // 逻辑块大小（字节）
+        constexpr uint32_t kPvdLba = 16;             // 主卷描述符所在 LBA
+        constexpr uint32_t kBootRecordLba = 17;      // El Torito 引导记录卷描述符所在 LBA
+        constexpr uint32_t kTerminatorLba = 18;      // 卷描述符集结束符所在 LBA
+        constexpr uint32_t kBootCatalogLba = 19;     // 引导目录扇区所在 LBA
+        constexpr uint32_t kFirstPathTableLba = 20;  // 小端路径表的起始 LBA
+        constexpr std::size_t kMaxIdentifier = 31;   // ISO 标识符的最大长度（字节）
 
+        // 32 位无符号数按 align 向上取整
         uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 
+        // 64 位无符号数按 align 向上取整
         uint64_t AlignUp64(uint64_t value, uint64_t align) { return (value + align - 1) / align * align; }
 
+        // 按小端序写入 16 位整数
         void Put16Le(uint8_t* p, uint16_t v) {
             p[0] = static_cast<uint8_t>(v & 0xFF);
             p[1] = static_cast<uint8_t>(v >> 8);
         }
 
+        // 按大端序写入 16 位整数
         void Put16Be(uint8_t* p, uint16_t v) {
             p[0] = static_cast<uint8_t>(v >> 8);
             p[1] = static_cast<uint8_t>(v & 0xFF);
         }
 
+        // 按小端序写入 32 位整数
         void Put32Le(uint8_t* p, uint32_t v) {
             for (int i = 0; i < 4; ++i) p[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
         }
 
+        // 按大端序写入 32 位整数
         void Put32Be(uint8_t* p, uint32_t v) {
             for (int i = 0; i < 4; ++i) p[i] = static_cast<uint8_t>((v >> (8 * (3 - i))) & 0xFF);
         }
 
+        // 同时按小端与大端写入 16 位整数（ISO9660 双端序字段）
         void PutBoth16(uint8_t* p, uint16_t v) {
             Put16Le(p, v);
             Put16Be(p + 2, v);
         }
 
+        // 同时按小端与大端写入 32 位整数（ISO9660 双端序字段）
         void PutBoth32(uint8_t* p, uint32_t v) {
             Put32Le(p, v);
             Put32Be(p + 4, v);
         }
 
+        // 把 Unix 秒转成 UTC 的 std::tm，失败返回 false
         bool ToUtc(uint64_t timestamp, std::tm& out) {
             const std::time_t t = static_cast<std::time_t>(timestamp);
             return gmtime_r(&t, &out) != nullptr;
         }
 
-        // 17 字节卷描述符日期：'YYYYMMDDHHMMSSCC' + 时区字节（0 = UTC）。0 = 不指定，写全零。
+        // 17 字节卷描述符日期：'YYYYMMDDHHMMSSCC' + 时区字节（0 = UTC）；0 表示不指定，写全零
         void PutVolumeDate(uint8_t* p, uint64_t timestamp) {
             std::memset(p, 0, 17);
             if (timestamp == 0) return;
             std::tm tm{};
             if (!ToUtc(timestamp, tm)) return;
-            // 先夹到合法范围，保证 17 字节字段刚好放得下。
+            // 先夹到合法范围，保证 17 字节字段刚好放得下
             const int year = std::clamp(tm.tm_year + 1900, 0, 9999);
             const int month = std::clamp(tm.tm_mon + 1, 1, 12);
             const int day = std::clamp(tm.tm_mday, 1, 31);
@@ -76,7 +88,7 @@ namespace makeiso {
             p[16] = 0;
         }
 
-        // 7 字节目录记录日期：年（自 1900）、月、日、时、分、秒、时区（0 = UTC）。
+        // 7 字节目录记录日期：年（自 1900）、月、日、时、分、秒、时区（0 = UTC）
         void PutRecordDate(uint8_t* p, uint64_t timestamp) {
             std::memset(p, 0, 7);
             if (timestamp == 0) return;
@@ -91,6 +103,7 @@ namespace makeiso {
             p[6] = 0;
         }
 
+        // 规约名字为 ISO 可用字符：小写字母转大写，数字与下划线保留，其余换成下划线
         std::string SanitizeChars(std::string_view name) {
             std::string out;
             out.reserve(name.size());
@@ -103,9 +116,9 @@ namespace makeiso {
             return out;
         }
 
-        // ISO 标识符：目录不超 31 字符；文件按 8.3 收敛，真实名字由 Rock Ridge 的 NM 保留。
-        std::string IsoIdentifier(std::string_view name, bool is_dir) {
-            if (is_dir) {
+        // ISO 标识符：目录不超 31 字符；文件按 8.3 收敛，真实名字由 Rock Ridge 的 NM 保留
+        std::string IsoIdentifier(std::string_view name, bool isDir) {
+            if (isDir) {
                 std::string id = SanitizeChars(name);
                 if (id.empty()) id = "_";
                 if (id.size() > kMaxIdentifier) id.resize(kMaxIdentifier);
@@ -126,6 +139,7 @@ namespace makeiso {
             return e.empty() ? b : b + "." + e;
         }
 
+        // 在已用标识符集合里消解冲突：重名时追加数字后缀，过长则截断
         std::string MakeUnique(std::set<std::string>& used, std::string id) {
             if (used.insert(id).second) return id;
             for (int n = 1; n < 100000; ++n) {
@@ -138,6 +152,7 @@ namespace makeiso {
             throw std::runtime_error("ISO 标识符冲突无法消解：" + id);
         }
 
+        // 写一个 RRIP 项：签名、数据长度、版本 1 与数据
         void AppendRr(std::vector<uint8_t>& out, const char* signature, std::span<const uint8_t> data) {
             out.push_back(static_cast<uint8_t>(signature[0]));
             out.push_back(static_cast<uint8_t>(signature[1]));
@@ -146,8 +161,9 @@ namespace makeiso {
             out.insert(out.end(), data.begin(), data.end());
         }
 
+        // 写 PX 项：权限、链接数、uid、gid
         void AppendRrPx(std::vector<uint8_t>& out, uint32_t mode, uint32_t links) {
-            // RRIP_1991A 的 PX：mode、links、uid、gid，各 8 字节双端序，共 32 字节数据。
+            // RRIP_1991A 的 PX：mode、links、uid、gid，各 8 字节双端序，共 32 字节数据
             uint8_t data[32];
             PutBoth32(data + 0, mode);
             PutBoth32(data + 8, links);
@@ -156,12 +172,14 @@ namespace makeiso {
             AppendRr(out, "PX", data);
         }
 
+        // 写 TF 项：只带修改时间
         void AppendRrTf(std::vector<uint8_t>& out, uint64_t timestamp) {
             uint8_t data[8] = {0x02, 0, 0, 0, 0, 0, 0, 0};  // 只带修改时间
             PutRecordDate(data + 1, timestamp);
             AppendRr(out, "TF", data);
         }
 
+        // 写 NM 项：真实名字
         void AppendRrNm(std::vector<uint8_t>& out, std::string_view name) {
             std::vector<uint8_t> data;
             data.reserve(name.size() + 1);
@@ -170,13 +188,17 @@ namespace makeiso {
             AppendRr(out, "NM", data);
         }
 
+        // 写 ER 项：RRIP_1991A 标识、描述与来源
         void AppendRrEr(std::vector<uint8_t>& out) {
             // ER 的标识串是读取方识别 RRIP 的依据；描述与来源只是说明文字，取短值以便整条记录
-            // 留在 255 字节以内（本写入器不生成 CE 续接项）。
+            // 留在 255 字节以内（本写入器不生成 CE 续接项）
+            // 扩展标识：读取方按它识别 RRIP
             static constexpr std::string_view kId = "RRIP_1991A";
+            // 扩展描述：说明文字，取短值以控制记录长度
             static constexpr std::string_view kDesc = "THE ROCK RIDGE INTERCHANGE PROTOCOL";
+            // 扩展来源：本写入器名
             static constexpr std::string_view kSource = "MAKEISO";
-            // ER：标识长度、描述长度、来源长度、扩展版本四个字段在前，三个字符串依次在后。
+            // ER：标识长度、描述长度、来源长度、扩展版本四个字段在前，三个字符串依次在后
             std::vector<uint8_t> data;
             data.push_back(static_cast<uint8_t>(kId.size()));
             data.push_back(static_cast<uint8_t>(kDesc.size()));
@@ -188,17 +210,19 @@ namespace makeiso {
             AppendRr(out, "ER", data);
         }
 
-        // RR 项的标志位：如实声明记录里带了哪些 RRIP 字段，读取方按它决定是否采用 NM 等项。
-        constexpr uint8_t kRrFlagPx = 0x01;
-        constexpr uint8_t kRrFlagNm = 0x08;
-        constexpr uint8_t kRrFlagTf = 0x80;
+        // RR 项的标志位：如实声明记录里带了哪些 RRIP 字段，读取方按它决定是否采用 NM 等项
+        constexpr uint8_t kRrFlagPx = 0x01;  // 带 PX 项（权限、链接数、uid、gid）
+        constexpr uint8_t kRrFlagNm = 0x08;  // 带 NM 项（真实名字）
+        constexpr uint8_t kRrFlagTf = 0x80;  // 带 TF 项（时间戳）
 
-        std::size_t RecordLength(std::size_t id_len, std::size_t su_len) {
-            std::size_t len = 33 + id_len + (id_len % 2 == 0 ? 1 : 0) + su_len;
+        // 算一条目录记录的总长（含标识符填充与系统用区）
+        std::size_t RecordLength(std::size_t idLen, std::size_t suLen) {
+            std::size_t len = 33 + idLen + (idLen % 2 == 0 ? 1 : 0) + suLen;
             if (len % 2 != 0) ++len;
             return len;
         }
 
+        // 在 size 字节的定长字段里写文本，不足补空格
         void PutText(uint8_t* p, std::size_t size, std::string_view text) {
             std::memset(p, ' ', size);
             const std::size_t n = std::min(size, text.size());
@@ -206,19 +230,20 @@ namespace makeiso {
         }
     }
 
+    // ISO9660 目录树节点：真实名字、ISO 标识符、父子关系与子节点列表
     struct Iso9660::Node {
-        std::string name;    // 真实名字，写进 Rock Ridge 的 NM
-        std::string iso_id;  // ISO 标识符；文件在记录里补 ";1"
-        bool is_dir = false;
-        std::string host_path;
-        uint64_t size = 0;      // 文件字节数
-        uint32_t extent = 0;    // 目录与文件共用
-        uint32_t data_len = 0;  // 目录数据长度（扇区整数倍）
-        uint16_t dir_number = 0;
-        uint16_t parent_number = 0;
-        Node* parent = nullptr;
-        std::vector<std::unique_ptr<Node>> children;
-        std::set<std::string> used_ids;
+        std::string name;                             // 真实名字，写进 Rock Ridge 的 NM
+        std::string iso_id;                           // ISO 标识符；文件在记录里补 ";1"
+        bool is_dir = false;                          // 是否为目录
+        std::string host_path;                        // 文件对应的宿主路径（目录为空）
+        uint64_t size = 0;                            // 文件字节数（目录为 0）
+        uint32_t extent = 0;                          // 起始 LBA（目录与文件共用）
+        uint32_t data_len = 0;                        // 目录数据长度（扇区整数倍）
+        uint16_t dir_number = 0;                      // 路径表里的目录号（根为 1）
+        uint16_t parent_number = 0;                   // 父目录的目录号
+        Node* parent = nullptr;                       // 父节点（根为 nullptr）
+        std::vector<std::unique_ptr<Node>> children;  // 子节点，按创建顺序排列
+        std::set<std::string> used_ids;               // 本目录已用的 ISO 标识符，用于消解冲突
     };
 
     Iso9660::Iso9660(Image& image, IsoVolume volume) : m_image(image), m_volume(std::move(volume)) {
@@ -231,20 +256,19 @@ namespace makeiso {
 
     Iso9660::~Iso9660() = default;
 
-    std::string Iso9660::AddFile(std::string_view iso_path, std::string_view host_path, uint64_t size) {
+    std::string Iso9660::AddFile(std::string_view isoPath, std::string_view hostPath, uint64_t size) {
         std::vector<std::string> components;
         std::string current;
-        for (const char c : iso_path) {
-            if (c == '/') {
-                if (!current.empty()) {
-                    components.push_back(current);
-                    current.clear();
-                }
-            } else current.push_back(c);
+        for (const char c : isoPath) {
+            if (c != '/') current.push_back(c);
+            else if (!current.empty()) {
+                components.push_back(current);
+                current.clear();
+            }
         }
         if (!current.empty()) components.push_back(current);
         if (components.empty()) throw std::runtime_error("ISO 路径为空");
-        for (const std::string& part : components) if (part == "." || part == "..") throw std::runtime_error("ISO 路径不接受 . 或 ..：" + std::string(iso_path));
+        for (const std::string& part : components) if (part == "." || part == "..") throw std::runtime_error("ISO 路径不接受 . 或 ..：" + std::string(isoPath));
 
         Node* dir = m_root.get();
         for (std::size_t i = 0; i + 1 < components.size(); ++i) {
@@ -267,15 +291,15 @@ namespace makeiso {
             dir = next;
         }
 
-        for (const auto& child : dir->children) if (child->name == components.back()) throw std::runtime_error("ISO 路径重复：" + std::string(iso_path));
+        for (const auto& child : dir->children) if (child->name == components.back()) throw std::runtime_error("ISO 路径重复：" + std::string(isoPath));
 
         auto node = std::make_unique<Node>();
         node->name = components.back();
-        node->host_path = std::string(host_path);
+        node->host_path = std::string(hostPath);
         node->size = size;
         node->parent = dir;
         node->iso_id = MakeUnique(dir->used_ids, IsoIdentifier(node->name, false));
-        Node* file_node = node.get();
+        Node* fileNode = node.get();
         dir->children.push_back(std::move(node));
 
         std::string normalized;
@@ -283,8 +307,8 @@ namespace makeiso {
             if (!normalized.empty()) normalized.push_back('/');
             normalized += part;
         }
-        m_files.push_back(IsoFile{normalized, std::string(host_path), size});
-        m_file_nodes[normalized] = file_node;
+        m_files.push_back(IsoFile{normalized, std::string(hostPath), size});
+        m_file_nodes[normalized] = fileNode;
         return normalized;
     }
 
@@ -296,7 +320,7 @@ namespace makeiso {
         ComputeDirectorySizes();
 
         m_path_table_bytes = PathTableBytes();
-        const uint32_t path_sectors = AlignUp(m_path_table_bytes, kBlock) / kBlock;
+        const uint32_t pathSectors = AlignUp(m_path_table_bytes, kBlock) / kBlock;
 
         IsoLayout layout;
         layout.pvd_lba = kPvdLba;
@@ -304,10 +328,10 @@ namespace makeiso {
         layout.terminator_lba = kTerminatorLba;
         layout.boot_catalog_lba = kBootCatalogLba;
         layout.l_path_table_lba = kFirstPathTableLba;
-        layout.m_path_table_lba = kFirstPathTableLba + path_sectors;
-        layout.path_table_sectors = path_sectors;
+        layout.m_path_table_lba = kFirstPathTableLba + pathSectors;
+        layout.path_table_sectors = pathSectors;
 
-        uint32_t next = layout.m_path_table_lba + path_sectors;
+        uint32_t next = layout.m_path_table_lba + pathSectors;
         for (Node* dir : m_dirs) {
             dir->extent = next;
             next += dir->data_len / kBlock;
@@ -350,21 +374,21 @@ namespace makeiso {
         m_root->dir_number = 1;
         m_root->parent_number = 1;
 
-        uint16_t next_number = 2;
+        uint16_t nextNumber = 2;
         std::vector<Node*> level{m_root.get()};
         while (!level.empty()) {
-            std::vector<Node*> next_level;
+            std::vector<Node*> nextLevel;
             for (Node* dir : level) {
                 for (const Node* child : SortedChildren(*dir)) {
                     if (!child->is_dir) continue;
                     auto* node = const_cast<Node*>(child);
-                    node->dir_number = next_number++;
+                    node->dir_number = nextNumber++;
                     node->parent_number = dir->dir_number;
                     m_dirs.push_back(node);
-                    next_level.push_back(node);
+                    nextLevel.push_back(node);
                 }
             }
-            level = std::move(next_level);
+            level = std::move(nextLevel);
         }
         if (m_dirs.size() > 0xFFFF) throw std::runtime_error("目录数量超过路径表上限");
     }
@@ -374,9 +398,9 @@ namespace makeiso {
         children.reserve(dir.children.size());
         for (const auto& child : dir.children) children.push_back(child.get());
         std::sort(children.begin(), children.end(), [](const Node* a, const Node* b) {
-            const std::string a_id = a->is_dir ? a->iso_id : a->iso_id + ";1";
-            const std::string b_id = b->is_dir ? b->iso_id : b->iso_id + ";1";
-            return a_id < b_id;
+            const std::string aId = a->is_dir ? a->iso_id : a->iso_id + ";1";
+            const std::string bId = b->is_dir ? b->iso_id : b->iso_id + ";1";
+            return aId < bId;
         });
         return children;
     }
@@ -392,8 +416,8 @@ namespace makeiso {
             account(RecordLength(1, SystemUseFor(*dir, true).size()));
             account(RecordLength(1, SystemUseFor(*dir, false).size()));
             for (const Node* child : SortedChildren(*dir)) {
-                const std::size_t id_len = (child->is_dir ? child->iso_id : child->iso_id + ";1").size();
-                account(RecordLength(id_len, ChildSystemUse(*child).size()));
+                const std::size_t idLen = (child->is_dir ? child->iso_id : child->iso_id + ";1").size();
+                account(RecordLength(idLen, ChildSystemUse(*child).size()));
             }
             dir->data_len = static_cast<uint32_t>(AlignUp64(consumed, kBlock));
         }
@@ -402,22 +426,22 @@ namespace makeiso {
     uint32_t Iso9660::PathTableBytes() const {
         uint32_t total = 0;
         for (const Node* dir : m_dirs) {
-            const std::size_t id_len = (dir == m_root.get()) ? 1 : dir->iso_id.size();
-            total += static_cast<uint32_t>(8 + id_len + (id_len % 2 != 0 ? 1 : 0));
+            const std::size_t idLen = (dir == m_root.get()) ? 1 : dir->iso_id.size();
+            total += static_cast<uint32_t>(8 + idLen + (idLen % 2 != 0 ? 1 : 0));
         }
         return total;
     }
 
-    std::vector<uint8_t> Iso9660::BuildPathTable(bool big_endian) const {
+    std::vector<uint8_t> Iso9660::BuildPathTable(bool bigEndian) const {
         std::vector<uint8_t> table;
         table.reserve(m_path_table_bytes);
         for (const Node* dir : m_dirs) {
-            const bool is_root = dir == m_root.get();
-            const std::string id = is_root ? std::string(1, '\0') : dir->iso_id;
+            const bool isRoot = dir == m_root.get();
+            const std::string id = isRoot ? std::string(1, '\0') : dir->iso_id;
             table.push_back(static_cast<uint8_t>(id.size()));
             table.push_back(0);
             uint8_t buf[4];
-            if (big_endian) {
+            if (bigEndian) {
                 Put32Be(buf, dir->extent);
                 table.insert(table.end(), buf, buf + 4);
                 Put16Be(buf, dir->parent_number);
@@ -437,47 +461,47 @@ namespace makeiso {
 
     std::vector<uint8_t> Iso9660::SystemUseFor(const Node& node, bool self) const {
         std::vector<uint8_t> su;
-        const bool is_root_dot = self && &node == m_root.get();
-        if (is_root_dot) {
-            // SP 必须是主目录 "." 的第一个 SUSP 项；0xBE 0xEF 是 SUSP 的识别字节。
+        const bool isRootDot = self && &node == m_root.get();
+        if (isRootDot) {
+            // SP 必须是主目录 "." 的第一个 SUSP 项；0xBE 0xEF 是 SUSP 的识别字节
             static constexpr std::array<uint8_t, 7> kSp{'S', 'P', 7, 1, 0xBE, 0xEF, 0};
             su.insert(su.end(), kSp.begin(), kSp.end());
         }
-        // RR 项的标志位要如实声明本记录里带了哪些 RRIP 字段，读取方按它决定是否采用。
-        const uint8_t rr_flags = kRrFlagPx | kRrFlagTf;
-        AppendRr(su, "RR", std::span<const uint8_t>(&rr_flags, 1));
+        // RR 项的标志位要如实声明本记录里带了哪些 RRIP 字段，读取方按它决定是否采用
+        const uint8_t rrFlags = kRrFlagPx | kRrFlagTf;
+        AppendRr(su, "RR", std::span<const uint8_t>(&rrFlags, 1));
         AppendRrPx(su, node.is_dir ? 0040755u : 0100444u, node.is_dir ? 2u : 1u);
         AppendRrTf(su, m_volume.timestamp);
-        if (is_root_dot) AppendRrEr(su);
+        if (isRootDot) AppendRrEr(su);
         return su;
     }
 
     std::vector<uint8_t> Iso9660::ChildSystemUse(const Node& child) const {
         std::vector<uint8_t> su;
-        const uint8_t rr_flags = kRrFlagPx | kRrFlagNm | kRrFlagTf;
-        AppendRr(su, "RR", std::span<const uint8_t>(&rr_flags, 1));
+        const uint8_t rrFlags = kRrFlagPx | kRrFlagNm | kRrFlagTf;
+        AppendRr(su, "RR", std::span<const uint8_t>(&rrFlags, 1));
         AppendRrNm(su, child.name);
         AppendRrPx(su, child.is_dir ? 0040755u : 0100444u, child.is_dir ? 2u : 1u);
         AppendRrTf(su, m_volume.timestamp);
         return su;
     }
 
-    std::vector<uint8_t> Iso9660::BuildRecord(const std::string& id, uint32_t extent, uint32_t data_len, uint8_t flags, const std::vector<uint8_t>& system_use) const {
-        const std::size_t id_len = id.size();
-        const std::size_t len = RecordLength(id_len, system_use.size());
+    std::vector<uint8_t> Iso9660::BuildRecord(const std::string& id, uint32_t extent, uint32_t dataLen, uint8_t flags, const std::vector<uint8_t>& systemUse) const {
+        const std::size_t idLen = id.size();
+        const std::size_t len = RecordLength(idLen, systemUse.size());
         if (len > 255) throw std::runtime_error("目录记录超过 255 字节，需要 CE 续接项：" + id);
         std::vector<uint8_t> record(len, 0);
         record[0] = static_cast<uint8_t>(len);
         record[1] = 0;
         PutBoth32(record.data() + 2, extent);
-        PutBoth32(record.data() + 10, data_len);
+        PutBoth32(record.data() + 10, dataLen);
         PutRecordDate(record.data() + 18, m_volume.timestamp);
         record[25] = flags;
         PutBoth16(record.data() + 28, 1);
-        record[32] = static_cast<uint8_t>(id_len);
-        std::memcpy(record.data() + 33, id.data(), id_len);
-        const std::size_t su_offset = 33 + id_len + (id_len % 2 == 0 ? 1 : 0);
-        std::memcpy(record.data() + su_offset, system_use.data(), system_use.size());
+        record[32] = static_cast<uint8_t>(idLen);
+        std::memcpy(record.data() + 33, id.data(), idLen);
+        const std::size_t suOffset = 33 + idLen + (idLen % 2 == 0 ? 1 : 0);
+        std::memcpy(record.data() + suOffset, systemUse.data(), systemUse.size());
         return record;
     }
 
@@ -488,8 +512,8 @@ namespace makeiso {
         records.push_back(BuildRecord(std::string(1, '\1'), parent.extent, parent.data_len, 0x02, SystemUseFor(dir, false)));
         for (const Node* child : SortedChildren(dir)) {
             const std::string id = child->is_dir ? child->iso_id : child->iso_id + ";1";
-            const uint32_t data_len = static_cast<uint32_t>(child->is_dir ? child->data_len : child->size);
-            records.push_back(BuildRecord(id, child->extent, data_len, static_cast<uint8_t>(child->is_dir ? 0x02 : 0x00), ChildSystemUse(*child)));
+            const uint32_t dataLen = static_cast<uint32_t>(child->is_dir ? child->data_len : child->size);
+            records.push_back(BuildRecord(id, child->extent, dataLen, static_cast<uint8_t>(child->is_dir ? 0x02 : 0x00), ChildSystemUse(*child)));
         }
 
         std::vector<uint8_t> data;
@@ -515,13 +539,14 @@ namespace makeiso {
         p[33] = 0x00;
     }
 
-    void Iso9660::WriteVolumeDescriptors(uint32_t total_sectors) {
-        std::vector<uint8_t> pvd(kBlock, 0);    pvd[0] = 1;
+    void Iso9660::WriteVolumeDescriptors(uint32_t totalSectors) {
+        std::vector<uint8_t> pvd(kBlock, 0);
+        pvd[0] = 1;
         std::memcpy(pvd.data() + 1, "CD001", 5);
         pvd[6] = 1;
         PutText(pvd.data() + 8, 32, m_volume.system_id);
         PutText(pvd.data() + 40, 32, SanitizeChars(m_volume.volume_id));
-        PutBoth32(pvd.data() + 80, total_sectors);
+        PutBoth32(pvd.data() + 80, totalSectors);
         PutBoth16(pvd.data() + 120, 1);  // 卷集大小
         PutBoth16(pvd.data() + 124, 1);  // 卷顺序号
         PutBoth16(pvd.data() + 128, kBlock);
@@ -545,14 +570,14 @@ namespace makeiso {
         pvd[881] = 1;                        // 文件结构版本
         m_image.Write(static_cast<uint64_t>(kPvdLba) * kBlock, pvd);
 
-        std::vector<uint8_t> boot_record(kBlock, 0);
-        boot_record[0] = 0;
-        std::memcpy(boot_record.data() + 1, "CD001", 5);
-        boot_record[6] = 1;
-        std::memcpy(boot_record.data() + 7, "EL TORITO SPECIFICATION", 23);
-        PutText(boot_record.data() + 39, 32, m_volume.volume_id);
-        Put32Le(boot_record.data() + 71, m_layout.boot_catalog_lba);
-        m_image.Write(static_cast<uint64_t>(kBootRecordLba) * kBlock, boot_record);
+        std::vector<uint8_t> bootRecord(kBlock, 0);
+        bootRecord[0] = 0;
+        std::memcpy(bootRecord.data() + 1, "CD001", 5);
+        bootRecord[6] = 1;
+        std::memcpy(bootRecord.data() + 7, "EL TORITO SPECIFICATION", 23);
+        PutText(bootRecord.data() + 39, 32, m_volume.volume_id);
+        Put32Le(bootRecord.data() + 71, m_layout.boot_catalog_lba);
+        m_image.Write(static_cast<uint64_t>(kBootRecordLba) * kBlock, bootRecord);
 
         std::vector<uint8_t> terminator(kBlock, 0);
         terminator[0] = 255;
@@ -566,10 +591,10 @@ namespace makeiso {
         if (m_total_bytes / kBlock > 0xFFFFFFFFull) throw std::runtime_error("镜像超过 ISO9660 的 32 位卷空间上限");
         WriteVolumeDescriptors(static_cast<uint32_t>(m_total_bytes / kBlock));
 
-        const std::vector<uint8_t> l_table = BuildPathTable(false);
-        const std::vector<uint8_t> m_table = BuildPathTable(true);
-        m_image.Write(static_cast<uint64_t>(m_layout.l_path_table_lba) * kBlock, l_table);
-        m_image.Write(static_cast<uint64_t>(m_layout.m_path_table_lba) * kBlock, m_table);
+        const std::vector<uint8_t> lTable = BuildPathTable(false);
+        const std::vector<uint8_t> mTable = BuildPathTable(true);
+        m_image.Write(static_cast<uint64_t>(m_layout.l_path_table_lba) * kBlock, lTable);
+        m_image.Write(static_cast<uint64_t>(m_layout.m_path_table_lba) * kBlock, mTable);
 
         for (const Node* dir : m_dirs) {
             const std::vector<uint8_t> data = BuildDirectoryData(*dir);

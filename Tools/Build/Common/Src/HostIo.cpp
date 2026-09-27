@@ -1,3 +1,6 @@
+// HostIo.cpp
+// 宿主文件读写、布局记账与构建清单实现
+
 #include "HostIo.h"
 
 #include <filesystem>
@@ -5,7 +8,6 @@
 #include <stdexcept>
 
 namespace makeiso {
-    // 宿主文件与路径
     uint64_t FileSize(const std::string& path) {
         std::error_code error;
         const uint64_t size = std::filesystem::file_size(path, error);
@@ -13,14 +15,12 @@ namespace makeiso {
         return size;
     }
 
-    // 读取整个文件到内存
     std::vector<uint8_t> ReadFile(const std::string& path) {
         std::ifstream in(path, std::ios::binary);
         if (!in) throw std::runtime_error("无法读取文件：" + path);
         return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }
 
-    // 只读文件开头 bytes 字节（文件更短时返回实际长度）；供结构头校验用，避免整份读入
     std::vector<uint8_t> ReadHead(const std::string& path, uint64_t bytes) {
         std::ifstream in(path, std::ios::binary);
         if (!in) throw std::runtime_error("无法读取文件：" + path);
@@ -30,10 +30,8 @@ namespace makeiso {
         return head;
     }
 
-    // 返回路径的基本名（去掉目录前缀）
     std::string BaseName(const std::string& path) { return std::filesystem::path(path).filename().string(); }
 
-    // 解析十进制或 0x 前缀的整数；失败时按 what 报错
     uint64_t ParseNumber(const std::string& text, const std::string& what) {
         try {
             std::size_t pos = 0;
@@ -51,7 +49,6 @@ namespace makeiso {
         m_ranges.push_back(Range{name, offset, end});
     }
 
-    // 构建清单
     std::string JsonEscape(const std::string& text) {
         std::string out;
         out.reserve(text.size() + 2);
@@ -67,9 +64,8 @@ namespace makeiso {
         return out;
     }
 
-    // 构建清单里的一段载荷
     std::string JsonPlaced(const Placed* placed) {
-        if (placed == nullptr) return "null"; // 空指针写 null
+        if (placed == nullptr) return "null";
         return "{\"offset\": " + std::to_string(placed->offset) + ", \"bytes\": " + std::to_string(placed->bytes) + "}";
     }
 }

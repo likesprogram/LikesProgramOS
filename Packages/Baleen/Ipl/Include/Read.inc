@@ -1,94 +1,106 @@
-; 按本地扇区单位读盘（INT 13h AH=0x42 DAP）。入口：EAX=LBA，CX=扇区数，ES:BX=缓冲
-; DL 以 [_Saved_Dl] 为准（DS 由本例程切到 CS）。成功 CF=0；失败 CF=1
-; 主路径整批读：真机上命令开销是主体，stage2a 只有十几扇区，一批（上限 127 块）就够；
-; 整批失败才退回逐扇区，逐扇区路径里还有无 EDD 机器的 AH=02 回退
+; Read.inc
+; EDD 读盘、有限 HDD CHS 回退、复位与有界重试、请求状态保护
 
-%IFNDEF SECT_SHIFT
-%DEFINE SECT_SHIFT 9
-%ENDIF
-
-; 读 CX 个扇区到 ES:BX。整批（一次 AH=42 读 min(剩余,127) 块）读不完才逐扇区
+; EAX=LBA、CX=块数、ES:BX=缓冲；只允许描述符或已限长的 Stub
+; 一次 EDD 批量读取；失败则从原始 LBA/缓冲开始逐扇区重读
 _Read_Sectors:
     MOV BP, CX
-.Rs_Loop:
-    TEST BP, BP
-    JZ .Rs_Ok
-    ; 一次 EDD 多块读 min(剩余,127) 块（EDD 上限，Phoenix 007Fh）
-    MOV CX, BP
-    CMP CX, 127
-    JBE .Rs_Batch
-    MOV CX, 127
-.Rs_Batch:
     CALL Read_Range
-    JNC .Rs_Advance
-.Rs_One:
+    JNC .Ok
+.One:
     MOV CX, 1
     CALL Read_Range
-    JC .Rs_Fail
+    JC .Fail
     INC EAX
     ADD BX, (1 << SECT_SHIFT)
     DEC BP
-    JNZ .Rs_One
-.Rs_Ok:
-    RET
-.Rs_Advance:
-    MOVZX EDX, CX               ; 本批块数（Read_Range 不改 CX）
-    ADD EAX, EDX                ; LBA 前进
-    SHL EDX, SECT_SHIFT
-    ADD BX, DX                  ; 缓冲前进
-    SUB BP, CX                  ; 剩余减少
-    JMP .Rs_Loop
-.Rs_Fail:
-    STC
+    JNZ .One
+.Ok:
+    CLC                         ; 最后一次 ADD BX 可能刚好回绕到 0
+.Fail:
     RET
 
-; 读 CX 个连续扇区到当前 ES:BX（EAX=LBA）。成功 CF=0，失败 CF=1；入口寄存器不改
-; 多块走 AH=42；单块失败且落第 0 道内时按 AH=02 重试
+; 每个请求至多尝试三次，中间复位；所有 BIOS 调用恢复通用和段寄存器
 Read_Range:
-    PUSH SI
-    PUSH DS
-    PUSH EAX
-    PUSH BX
-    PUSH CS
-    POP DS                      ; DAP 在 IPL 镜像内
-    MOV SI, _Dap
-    MOV WORD [SI], 16           ; 部分 BIOS 会改 DAP 头，每次重写
-    MOV [SI + 2], CX            ; 块数
-    MOV [SI + 4], BX            ; 缓冲偏移
-    MOV [SI + 6], ES            ; 缓冲段
-    MOV [SI + 8], EAX           ; LBA 低 32 位
-    MOV DWORD [SI + 12], 0      ; LBA 高 32 位
-    MOV DL, [_Saved_Dl]
-    STI
-    MOV AH, 0x42
-    INT 0x13
-    JNC .Ok
-%IF SECT_SHIFT = 9
-    ; 单块、且在第 63 扇区以内：用 C=0 H=0 的 AH=02。无 INT 13h 扩展时 AH=42 会失败
+    PUSH DI
+    MOV DI, 3
+.Retry:
+    CALL Read_Edd
+    JNC .Done
+%IFNDEF IPL_CD
     CMP CX, 1
-    JNE .Fail
+    JNE .Reset
     CMP EAX, 63
-    JAE .Fail
-    MOV CL, AL
-    INC CL                      ; S = LBA+1
-    XOR CH, CH
-    XOR DH, DH
-    MOV DL, [_Saved_Dl]
-    MOV AL, 1
-    MOV AH, 0x02
-    INT 0x13
-    JC .Fail
+    JAE .Reset
+    CALL Read_Chs
+    JNC .Done
 %ENDIF
-.Ok:
-    POP BX
-    POP EAX
-    POP DS
-    POP SI
-    RET
-.Fail:
+.Reset:
+    DEC DI
+    JZ .Failed
+    CALL _Disk_Reset
+    JMP .Retry
+.Failed:
     STC
-    POP BX
-    POP EAX
-    POP DS
-    POP SI
+.Done:
+    POP DI
     RET
+
+; 一次 EDD 批量读取（INT 13h/AH=42h）；CF 表示结果
+Read_Edd:
+    PUSHAD
+    PUSH DS
+    PUSH ES
+    PUSH CS
+    POP DS
+    MOV SI, Dap
+    MOV WORD [SI], 16
+    MOV [SI + 2], CX
+    MOV [SI + 4], BX
+    MOV [SI + 6], ES
+    MOV [SI + 8], EAX
+    MOV DWORD [SI + 12], 0
+    MOV AH, 0x42
+    JMP Disk_Int
+
+%IFNDEF IPL_CD
+; 单扇区 CHS 读取：只在 CX=1、LBA<63 时使用，固定 C=0、H=0、S=LBA+1
+; AH=42 的 AH 是返回状态，必须由保存的原始 EAX 恢复 LBA 后才能走 CHS
+Read_Chs:
+    PUSHAD
+    PUSH DS
+    PUSH ES
+    MOV CX, AX
+    INC CX
+    XOR DH, DH
+    MOV AX, 0x0201
+    JMP Disk_Int
+%ENDIF
+
+; 复位磁盘系统（INT 13h/AH=00h），驱动器号取保存的固件值
+_Disk_Reset:
+    PUSHAD
+    PUSH DS
+    PUSH ES
+    XOR AX, AX
+; 所有 INT 13h 的公共出口：装载 DL、开中断、预置 CF，返回前恢复寄存器
+Disk_Int:
+    MOV DL, [CS:_Saved_Dl]
+    STI
+    STC
+    INT 0x13
+    POP ES
+    POP DS
+    POPAD
+    RET
+
+    ALIGN 16
+; 16 字节 EDD 磁盘地址包（DAP）：缓冲段:偏移与 LBA 由调用方填
+Dap:
+    DB 16, 0
+    DW 1
+    DW 0, 0
+    DQ 0
+; 固件给的驱动器号，所有 INT 13h 调用都用它；CD 候选探测会改写
+_Saved_Dl:
+    DB 0

@@ -1,18 +1,17 @@
 # MakeHdd — 磁盘镜像组装器
 
-MakeHdd 是宿主侧的构建期工具：把磁盘一级引导（MBR）、实模式服务层（Stub）、核心阶段（BaleenCore）、ESP 的 FAT 镜像与 Ext4 系统卷组装成可写入内部硬盘、U 盘或移动硬盘的磁盘镜像。它就是 `Packages/Baleen/Ipl/Src/Mbr.asm` 注释里的"写盘工具（MKDISK）"，对应[用户空间与常驻服务](../../../Docs/Specs/用户空间与常驻服务.md)第五节「布局计算与镜像组装」中的磁盘形态那一段。
+MakeHdd 是宿主侧的构建期工具：把磁盘一级引导（MBR）、实模式服务层（Stub）、核心阶段（BaleenCore）、ESP 的 FAT 镜像与 Ext4 系统卷组装成可写入内部硬盘、U 盘或移动硬盘的磁盘镜像。它对应[用户空间与常驻服务](../../../Docs/Specs/用户空间与常驻服务.md)第五节「布局计算与镜像组装」中的磁盘形态那一段。
 
 光盘与 U 盘混合镜像由 [MakeIso](../MakeIso/README.md) 产出；两个工具共用 `../Common` 里的 BootDescriptor、El Torito 与 MBR 分区代码，保证 U 盘混合镜像与磁盘镜像的引导结构只有一份实现。
 
-## 一、构建与自测
+## 一、构建
 
 ```
 make            # 产出 ../../Bin/MakeHdd（中间产物在 Obj/；g++，C++20，共享代码在 ../Common）
-make test       # 合成载荷组装镜像，校验分区表、描述符、ESP 的 FAT32、分区内容与可复现性
 make clean      # 删除 Obj/ 与本工具的可执行文件（Bin 与 MakeIso 共用，不删别人的）
 ```
 
-`make test` 覆盖：MBR 引导代码原样保留且 `0xAA55` 在位、0/1 号分区项的类型与起止 LBA 和实际字节偏移一致、2 号槽留空、BootDescriptor 字段与 Stub 对齐、Stub/Core/`--raw` 内容逐字节一致、两个分区内容与源镜像逐字节一致且不越界、`fdisk` 能读出两类分区，以及可复现性与失败路径（坏 MBR、非 512 字节 MBR、超长 Stub、未对齐或落在 MBR 区的 `--raw`、非法 `--pad-to`）；有权限时把两个分区切出来分别按 FAT 与 Ext4 挂载验证。
+正常构建只依赖正式 C++ 源码，不依赖未交付的本地回归夹具。本地回归覆盖：MBR 引导代码原样保留且 `0xAA55` 在位、0/1 号分区项的类型与起止 LBA 和实际字节偏移一致、2 号槽留空、BootDescriptor 字段与 Stub 对齐、Stub/Core/`--raw` 内容逐字节一致、两个分区内容与源镜像逐字节一致且不越界、`fdisk` 能读出两类分区，以及可复现性与失败路径（坏 MBR、非 512 字节 MBR、超长 Stub、未对齐或落在 MBR 区的 `--raw`、非法 `--pad-to`）；有权限时把两个分区切出来分别按 FAT 与 Ext4 挂载验证。
 
 ## 二、用法
 
@@ -59,14 +58,14 @@ ESP 的 1 MiB 起点与 `Mbr.asm` 里分区项 0 的占位 LBA 2048（512 字节
 
 **MBR 分区表**：四个槽位先清空再写有内容的槽位——0 号 = ESP（类型 `0xEF`），1 号 = Ext4 系统卷（类型 `0x83`），2、3 号留空。起点与长度按实际字节偏移换算成 512 字节 LBA，CHS 字段写 `FE FF FF`，强制读取方按 LBA 访问。缺 `--esp` 或 `--system-volume` 时对应槽位保持为空并在标准错误上提示（UEFI 起不来 / 引导链没有系统卷可读）。
 
-**BootDescriptor**（物理 `0x300`，小端，与 `Packages/Baleen/Ipl/Include/Const.inc`、`Body.inc` 的常量一致）：
+**BootDescriptor**（介质绝对偏移 `0x300`，小端，与 `Packages/Baleen/Ipl/Include/Const.inc`、`Body.inc` 的常量一致）：
 
 | 偏移 | 宽度 | 字段 | 值 |
 | --- | --- | --- | --- |
 | 0 | 4 | magic | `0x52445342`（`BSDR`） |
-| 4 | 2 | version | `1` |
+| 4 | 2 | version | 当前格式标记 `1`，尚未发布，开发阶段可直接调整 |
 | 6 | 2 | header | `32` |
-| 8 | 8 | Stub 偏移 | 字节偏移，2048 对齐 |
+| 8 | 8 | Stub 偏移 | 低 32 位字节偏移，至少 `0x800`，2048 对齐，偏移加文件长度不得产生 32 位进位 |
 | 16 | 8 | Stub 字节数 | 非 0，且不超过 `0x10000 - 0x7E00` |
 | 24 | 8 | 保留 | 全 0 |
 
@@ -80,7 +79,7 @@ ESP 的 1 MiB 起点与 `Mbr.asm` 里分区项 0 的占位 LBA 2048（512 字节
 
 ## 七、边界与待定项
 
-- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；`BaleenLayout.bin` 与 Stub 读的超级块（`loaderLba` / `loaderSectors` / `systemFs`，见 `Const.inc` 的 `SB_*`）字段与落点规格尚未确定，工具只把偏移写进清单，或由 `--raw` 指定位置。
+- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；`BaleenLayout.bin` 与 Stub 装载 Core 所需元数据的字段和落点仍待后续阶段设计，工具只把偏移写进清单，或由 `--raw` 指定位置。IPL 只消费 BootDescriptor，不解析这些内容。
 - **不写 GPT**：只有 MBR 分区表（UEFI 固件按 MBR 里的 ESP 分区项启动），保护性 MBR + GPT 是否加入尚未决定。
 - **不做** 物理设备写入（由 `dd` 等外部工具负责）、签名与信任锚、坏块与磨损处理。
 - **不擦除**：镜像大小由内容决定，写到更大的介质上时其余空间保持介质原状，需要擦除由写盘步骤自行决定。

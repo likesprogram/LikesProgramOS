@@ -1,106 +1,85 @@
 # Ipl — 一级引导
 
-Ipl 是 Baleen 引导链的第一段代码：固件装入它，它读 `BootDescriptor`，把实模式服务层 Stub 读进内存并交权。它不解析文件系统、不读 Superblock、不做引导选择——那些属于 Stub 与 BootCore；引导模式、介质与交接契约以 [Baleen 引导器](../../../Docs/Specs/Baleen引导器.md) 为准，本文只描述本目录的源码、产物与构建。
+IPL 是 Baleen BIOS 引导链的第一阶段：固件装入它，它校验 `BootDescriptor`、把 Stub 读到内存并交权。完整 BIOS 链是 **IPL → Stub → BaleenCore**。一级引导的完成标准是这段装载与交接可靠，不以第二、三阶段是否实现来判定。
 
-上级说明见 [Baleen](../README.md)。
+职责、介质布局、机器状态及失败语义以 [Baleen 一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 为准；整体流程见 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md)。当前仍在设计与实现阶段，BootDescriptor 的格式识别字段不代表已发布版本，首发前可以直接调整定义。
 
-## 一、产物
+## 一、产物与空间约束
 
-| 产物 | 大小 | 介质与载入方 |
-| --- | --- | --- |
-| `Out/Bin/BaleenIPL.bin` | 512 B | 硬盘 / U 盘（USB-HDD）：BIOS 装入 `0x7C00`，前 446 字节为引导代码，其后是分区表与 `0xAA55` |
-| `Out/Bin/BaleenIPLCd.bin` | 2048 B | El Torito 无仿真：引导目录把整个文件作为引导镜像装入 `0x7C00`，LoadSize 记为 4（512 字节单位） |
+| 产物 | 形态 | 文件长度 | 首段限制 |
+| --- | --- | --- | --- |
+| `Out/Bin/BaleenIPL.bin` | 硬盘、U 盘、移动硬盘的 USB-HDD 固件入口 | 512 B | 代码与数据不超过 446 B，后接 MBR 分区表 |
+| `Out/Bin/BaleenIPLCd.bin` | El Torito 无仿真光盘入口 | 2048 B | 代码与数据全部在首 510 B，偏移 8..63 保留给 Boot Info Table |
 
-两种形态的字节不同（本地扇区大小、驱动器探测、描述符所在扇区都不一样），必须分开产出。规格第八节把一级引导记作 `BaleenIPL.bin`，光盘形态在此名字上加 `Cd` 区分。
+两种产物的偏移 510 均为 `55 AA`。光盘引导目录使用 LoadSize=4（512 B 单位）；即便完整 2048 B 已被固件装入，IPL 的后续读取也会覆盖 `0x7E00` 起的区域，因此可执行代码和持久数据仍必须留在首 512 B。
 
-- 硬盘形态的分区表只写死分区项 0 的 ESP 占位与起始 LBA；分区项 1..3 和 ESP 大小由写盘工具（Mbr.asm 注释中的 MKDISK）在组装镜像时填写。
-- 光盘形态的偏移 8..63 留给 XORRISO `-BOOT-INFO-TABLE`，IPL 自身不读该区。
+MBR 分区项由 `MakeHdd` / `MakeIso` 按镜像实际布局写实。光盘按 2048 B、磁盘按 512 B 逻辑扇区读取；其他逻辑块大小不是当前 BIOS IPL 的能力承诺。混合 ISO 写入 USB 存储时走 MBR 入口，挂成光盘时走 CD 入口。
 
-## 二、源码
+NASM 汇编期检查 MBR 的 446 B 上限、CD 的 510 B 上限和至少 16 B 的 CD 尾部余量。`Code_End` 标签明确标出代码与数据末端；DAP 的对齐填充不等于任意位置都能使用的空闲空间。
+
+## 二、源码划分
 
 | 文件 | 职责 |
 | --- | --- |
-| `Src/Mbr.asm` | 硬盘 / USB-HDD 入口：`SECT_SHIFT=9`、`IPL_MEDIA=MEDIA_HDD`；446 字节上限检查、分区表、`0xAA55` |
-| `Src/Cdrom.asm` | 光盘入口：`SECT_SHIFT=11`、`IPL_MEDIA=MEDIA_CDROM`、`IPL_CD`；510 字节上限检查，补零到 2048 |
-| `Include/Body.inc` | 两形态共用主体：实模式初始化、读并校验 `BootDescriptor`、按扇区读 Stub、跳转交权、单字符诊断 |
-| `Include/Read.inc` | `_Read_Sectors` / `Read_Range`：INT 13h EDD（AH=42）批量读，失败退回逐扇区，无 EDD 时用 AH=02 |
-| `Include/Const.inc` | 装入地址、栈顶、BootDescriptor / Superblock 偏移与魔数、介质编号；数值与 `BootInfo.hpp`、`Superblock.hpp` 一致 |
+| `Src/Mbr.asm`、`Include/Hdd.inc` | 磁盘形态入口、描述符读取、MBR 布局 |
+| `Src/Cdrom.asm`、`Include/Cd.inc` | 光盘形态入口、固件驱动器号及 E0/E1 探测、CD 布局 |
+| `Include/Init.inc` | 统一 CS、段寄存器、栈、方向标志和初始驱动器号 |
+| `Include/Body.inc` | 共享的描述符字段及范围校验、Stub 装载和交接 |
+| `Include/Read.inc` | EDD、逐扇区回退、有限复位重试；仅磁盘形态编入 CHS 回退 |
+| `Include/Error.inc` | D/R/S/L 单字符输出与关闭中断后的停机 |
+| `Include/Const.inc` | IPL 实际使用的装入地址、介质编号和描述符常量 |
 
-入口源各自定义 `SECT_SHIFT` 与 `IPL_MEDIA`，其余开关在源内有默认值，可由构建期覆盖：
+介质专用流程分别汇编，共享逻辑保留一份。IPL 的一次合法请求最多为 65 个磁盘扇区或 16 个光盘扇区，低于 EDD 127 块上限，因此不保留通用的大请求分批循环；此约束也有汇编期断言。
 
-- `ENABLE_E9`：默认 1，0xE9 调试口开；`make ENABLE_E9=0` 关闭（Body.inc 注释中的 BR-21）。
+读盘优先一次 EDD `AH=42h`，失败后从原始位置逐扇区重读。每个读取请求最多尝试三次，失败之间复位；每次重建 DAP，并保存、恢复 BIOS 调用前的通用寄存器及 DS/ES。磁盘单扇区请求在 `LBA<63` 时保留 `AH=02h`、C=0/H=0 的回退，使用恢复后的原始 LBA。它只覆盖固件几何允许的首道范围，不能表述为任意无 EDD 设备都能启动；光盘形态只有 EDD 路径。
 
-## 三、构建
+## 三、构建与校验
 
-需要 NASM 3.x 与 GNU make（本目录在 NASM 3.01 下验证），在目录内或 `make -C Packages/Baleen/Ipl` 执行：
+在本目录执行，或使用 `make -C Packages/Baleen/Ipl`：
 
+```sh
+make                # 构建两种形态并生成 Out/Obj/*.lst
+make check          # 校验 512/2048 B 长度与偏移 510 的签名
+make list           # 生成或补齐汇编清单
+make ENABLE_E9=0    # 禁用 0xE9，保留 VGA 报错
+make clean          # 删除本目录 Out/
 ```
-make                # 产出 Out/Bin/ 下两个镜像（默认目标）
-make check          # 构建并校验大小与 0xAA55 签名
-make list           # 生成 NASM 汇编清单到 Out/Obj/
-make clean          # 删除 Out/
-make ENABLE_E9=0    # 关闭 0xE9 调试输出
-```
 
-- **必须用 `-Ox`**（多趟优化）让短跳转收敛到最短：实测 `-O0` / `-O1` 会把 Mbr 或 Cdrom 撑过 446 / 510 字节上限，被汇编期 `%ERROR` 拦下。Makefile 已固定该参数。
-- `OUT_DIR=` 可重定向输出根目录（默认 `Out`），供顶层构建汇总产物。
-- 源码里还有尺寸硬约束：`Src/Mbr.asm` 与 `Src/Cdrom.asm` 用 `%IF ($ - $$) > 446 / > 510` 在汇编期报错，不靠人工检查。
+需要 NASM 与 GNU make，已在 NASM 3.01 下验证。默认 `-Ox`；`OUT_DIR`、`NASM`、`NASMFLAGS` 可覆盖。汇编选项写入构建配置戳，切换 `ENABLE_E9` 会重新生成产物，避免旧二进制被误当成新配置。
 
-## 四、运行期契约
+**Makefile 不依赖未交付的本地回归夹具，正常构建不执行测试。** 必需的布局约束在汇编源和 C++ 镜像组装器中校验。完整的宿主验证工具由 [CheckIpl](../../../Tools/Build/CheckIpl/README.md) 提供：C++ 源码编译到 `Tools/Bin/CheckIpl`，手工执行，可检查代码预算、正常装载、错误停机和 BIOS 故障回退；其运行不依赖不上传的测试目录。
 
-### 4.1 内存布局
+## 四、装载与交接
 
-| 物理地址 | 内容 |
+BootDescriptor 位于**介质绝对字节偏移 `0x300`**。磁盘入口读取 LBA 1 的偏移 `0x100`；光盘入口读取 CD LBA 0 的偏移 `0x300`。混合 ISO 的 CD 引导镜像放在 LBA 1，不能把描述符放到该引导镜像内部的 `0x300`。
+
+描述符读取缓冲为 `0x7E00`，所以字段临时位于磁盘形态的 `0x7F00` 或光盘形态的 `0x8100`，随后被 Stub 覆盖。**物理内存 `0x0300` 属于 IVT，IPL 不把描述符放在那里。**
+
+| 区域 | 用途 |
 | --- | --- |
-| `0x0300` | `BootDescriptor`：写盘 / 镜像组装工具写入，IPL 只读 |
-| `0x7C00` | 固件装入的 IPL；两种形态都留在原地，不搬移 |
-| `0x7E00` | Stub 装入点（`LOAD_TOP`）；Stub 镜像含 BSS 不得越过 `0x10000` |
-| `0x7C00` 以下 | 16 位栈（`SS=0`、`SP=0x7C00`，向下增长） |
+| `0x7C00` 以下 | SS=0、SP=`0x7C00` 的向下增长栈 |
+| `[0x7C00, 0x7E00)` | 留在原处的 IPL |
+| `[0x7E00, 0x10000)` | Stub 的装载与内存预算 |
 
-### 4.2 BootDescriptor
+原始文件长度必须非零、可用低 32 位表示，且按本地扇区上取整后不越界：磁盘最多 `0x8200` B，光盘最多 `0x8000` B。大小先校验后取整，避免 32 位溢出绕过检查。偏移须按本地扇区对齐、位于描述符扇区之后，文件范围相加不得产生 32 位进位；实际读不到的地址按 I/O 失败处理。
 
-小端字段；硬盘形态（512 B 扇区）位于 LBA 1 偏移 `0x100`，光盘形态（2048 B 扇区）位于引导镜像偏移 `0x300`：
+IPL 无法从原始文件长度推知未物化的 BSS；Stub 的文件头、打包约束和自身入口必须约束其完整内存占用，不得超过 `0x10000`。
 
-| 偏移 | 宽度 | 字段 | 要求 |
-| --- | --- | --- | --- |
-| 0 | 4 | magic | `0x52445342`（`BSDR`） |
-| 4 | 2 | version | `1` |
-| 6 | 2 | header | `32` |
-| 8 | 8 | Stub 偏移 | 字节偏移，高 32 位为 0，按本地扇区对齐 |
-| 16 | 8 | Stub 字节数 | 高 32 位为 0，非 0，按扇区上取整后 ≤ `0x10000 - 0x7E00` |
-| 24 | 8 | 保留 | 全 0 |
+交权状态固定为：`CS:IP=0000:7E00`、`DS=07C0`、`ES=0`、`SS:SP=0000:7C00`、`IF=1`、`DF=0`。`DL` 是实际读取的固件驱动器号，`DH=2` 表示 HDD/USB-HDD，`DH=4` 表示光盘。其他寄存器、A20 和后续模式切换不在 IPL 的保证范围。
 
-### 4.3 交给 Stub 的机器状态
-
-跳转 `JMP 0x0000:0x7E00` 时：
-
-| 寄存器 | 值 |
-| --- | --- |
-| `CS:IP` | `0x0000:0x7E00` |
-| `DS` | `0x07C0`（IPL 的段） |
-| `ES` | `0` |
-| `SS:SP` | `0x0000:0x7C00` |
-| `DL` | 固件驱动器号（光盘形态可能探测为 `0xE0` / `0xE1`） |
-| `DH` | `Boot::Media`：`2` = Hdd（硬盘 / USB-HDD）、`4` = Cdrom |
-
-Stub 不得占用 IPL 所在的 `[0x7C00, 0x7E00)`，也不得越过 `0x10000`。
-
-## 五、失败诊断
-
-任一步失败即输出一个字符并停机，字符同时送 VGA 电传与 0xE9 口：
+## 五、失败输出
 
 | 码 | 含义 |
 | --- | --- |
-| `D` | `BootDescriptor` 无效：魔数、版本、头长、保留位、偏移或大小不合规 |
-| `R` | 描述符扇区读盘失败 |
-| `S` | Stub 字节数为 0、高 32 位非 0，或按扇区上取整后越过 `0x10000` |
-| `L` | Stub 读盘失败 |
+| `D` | 描述符字段、保留位、Stub 偏移或范围非法；光盘也包括未找到可读且魔数正确的描述符 |
+| `R` | 磁盘形态读不出描述符扇区；光盘形态不输出此码 |
+| `S` | Stub 长度为零、高 32 位非零或超过该介质的完整扇区装载上限 |
+| `L` | 描述符已通过校验，但 Stub 读取失败 |
 
-## 六、本目录不做的事
+错误码输出到当前 VGA 页及可选 0xE9 调试口，随后 `CLI/HLT` 停机，不跳转 Stub。详细 BIOS 状态、LBA、串口日志和恢复交互留给空间更充足的后续阶段。
 
-- 不生成 `BootDescriptor`、`BaleenLayout.bin` 和磁盘 / ISO 镜像——写盘与镜像组装工具尚未加入，混合镜像需在同一份字节上同时满足光盘与磁盘引导记录，见 [启动介质与文件系统](../../../Docs/Specs/启动介质与文件系统.md) 第二节。
-- 不解析 Ext4、不读 Superblock、不持久化引导状态——引导选择在 Stub / BootCore / UEFI 侧，见 [Baleen 引导器](../../../Docs/Specs/Baleen引导器.md) 第五、七节。
+## 六、阶段边界
 
-## 七、当前状态
+IPL 不解析 `BaleenLayout.bin`、Ext4、Superblock，不做内核集选择、BuildId 核对、摘要或签名认证，也不准备 A20、内存图和长模式。这些职责分别归 [Stub](../Stub/README.md)、BaleenCore 和 UEFI 入口。
 
-一级引导的源码与构建已就位（NASM 3.01 下 `make check` 通过）；Stub、BootCore 与 UEFI 侧仍是空骨架。`Out/` 是构建输出目录，可随时 `make clean` 后重建。
+Stub 目前保留开发中的结构与交接说明，尚未实现。IPL 的验收可使用专用探针验证完整装载、寄存器状态和失败停机；占位件启动或 UEFI 应用启动均不等同于整条 Baleen 引导链已经完成。仿真器回归为当前证据，物理介质及不同厂商固件的验证仍应独立记录。

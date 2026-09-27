@@ -20,6 +20,5 @@ Out/
 
 # 测试相关文件
 *Test
-Tools/Build/BootTest.sh
 Tools/Build/Payloads/
 Tools/Build/Payloads/*

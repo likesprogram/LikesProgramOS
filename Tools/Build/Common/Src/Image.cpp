@@ -1,3 +1,6 @@
+// Image.cpp
+// 输出镜像的按绝对字节偏移读写实现
+
 #include "Image.h"
 
 #include <algorithm>
@@ -6,21 +9,21 @@
 #include <string>
 
 namespace makeiso {
-    Image::Image(const std::string& path) : file_(path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc) {
-        if (!file_) throw std::runtime_error("无法创建镜像：" + path);
+    Image::Image(const std::string& path) : m_file(path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc) {
+        if (!m_file) throw std::runtime_error("无法创建镜像：" + path);
     }
 
     void Image::Seek(uint64_t offset) {
-        file_.seekp(static_cast<std::streamoff>(offset));
-        if (!file_) throw std::runtime_error("镜像定位失败，偏移 " + std::to_string(offset));
+        m_file.seekp(static_cast<std::streamoff>(offset));
+        if (!m_file) throw std::runtime_error("镜像定位失败，偏移 " + std::to_string(offset));
     }
 
     void Image::Write(uint64_t offset, std::span<const uint8_t> bytes) {
         if (bytes.empty()) return;
         Seek(offset);
-        file_.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!file_) throw std::runtime_error("镜像写入失败，偏移 " + std::to_string(offset));
-        size_ = std::max(size_, offset + bytes.size());
+        m_file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!m_file) throw std::runtime_error("镜像写入失败，偏移 " + std::to_string(offset));
+        m_size = std::max(m_size, offset + bytes.size());
     }
 
     void Image::Fill(uint64_t offset, uint64_t bytes, uint8_t value) {
@@ -30,15 +33,15 @@ namespace makeiso {
         while (written < bytes) {
             const auto chunk = static_cast<std::size_t>(std::min<uint64_t>(bytes - written, buffer.size()));
             Seek(offset + written);
-            file_.write(buffer.data(), static_cast<std::streamsize>(chunk));
-            if (!file_) throw std::runtime_error("镜像填充失败，偏移 " + std::to_string(offset + written));
+            m_file.write(buffer.data(), static_cast<std::streamsize>(chunk));
+            if (!m_file) throw std::runtime_error("镜像填充失败，偏移 " + std::to_string(offset + written));
             written += chunk;
         }
-        size_ = std::max(size_, offset + bytes);
+        m_size = std::max(m_size, offset + bytes);
     }
 
     void Image::ExtendTo(uint64_t bytes) {
-        if (bytes > size_) Fill(size_, bytes - size_, 0);
+        if (bytes > m_size) Fill(m_size, bytes - m_size, 0);
     }
 
     uint64_t Image::CopyFile(uint64_t offset, const std::string& path) {

@@ -1,3 +1,6 @@
+// Fat.cpp
+// FAT 引导扇区类型判定与 FAT32 校验实现
+
 #include "Fat.h"
 #include "HostIo.h"
 
@@ -32,56 +35,54 @@ namespace makeiso {
         }
     }
 
-    // 按 Microsoft FAT 规范的簇数规则判定引导扇区所属的 FAT 类型（不依赖卷标字符串）
-    // detail 写出诊断信息：成功时给簇数，失败时给原因
-    FatType DetectFatType(std::span<const uint8_t> boot_sector, std::string& detail) {
-        if (boot_sector.size() < 512) {
+    FatType DetectFatType(std::span<const uint8_t> bootSector, std::string& detail) {
+        if (bootSector.size() < 512) {
             detail = "引导扇区不足 512 字节";
             return FatType::Unknown;
         }
-        if (boot_sector[510] != 0x55 || boot_sector[511] != 0xAA) {
+        if (bootSector[510] != 0x55 || bootSector[511] != 0xAA) {
             detail = "偏移 510 不是 0x55AA";
             return FatType::Unknown;
         }
 
-        const uint32_t bytes_per_sector = GetLe16(boot_sector, 11);
-        const uint32_t sectors_per_cluster = boot_sector[13];
-        const uint32_t reserved_sectors = GetLe16(boot_sector, 14);
-        const uint32_t fat_count = boot_sector[16];
-        const uint32_t root_entries = GetLe16(boot_sector, 17);
-        const uint32_t total16 = GetLe16(boot_sector, 19);
-        const uint32_t fat16 = GetLe16(boot_sector, 22);
-        const uint32_t total32 = GetLe32(boot_sector, 32);
-        const uint32_t fat32 = GetLe32(boot_sector, 36);
+        const uint32_t bytesPerSector = GetLe16(bootSector, 11);
+        const uint32_t sectorsPerCluster = bootSector[13];
+        const uint32_t reservedSectors = GetLe16(bootSector, 14);
+        const uint32_t fatCount = bootSector[16];
+        const uint32_t rootEntries = GetLe16(bootSector, 17);
+        const uint32_t total16 = GetLe16(bootSector, 19);
+        const uint32_t fat16 = GetLe16(bootSector, 22);
+        const uint32_t total32 = GetLe32(bootSector, 32);
+        const uint32_t fat32 = GetLe32(bootSector, 36);
 
-        // 各字段首先要像 FAT 引导扇区：扇区与簇大小为 2 的幂，FAT 与保留区非空。
-        if (bytes_per_sector < 512 || bytes_per_sector > 4096 || !IsPowerOfTwo(bytes_per_sector)) {
-            detail = "每扇区字节数非法（" + std::to_string(bytes_per_sector) + "）";
+        // 各字段首先要像 FAT 引导扇区：扇区与簇大小为 2 的幂，FAT 与保留区非空
+        if (bytesPerSector < 512 || bytesPerSector > 4096 || !IsPowerOfTwo(bytesPerSector)) {
+            detail = "每扇区字节数非法（" + std::to_string(bytesPerSector) + "）";
             return FatType::Unknown;
         }
-        if (!IsPowerOfTwo(sectors_per_cluster)) {
-            detail = "每簇扇区数非法（" + std::to_string(sectors_per_cluster) + "）";
+        if (!IsPowerOfTwo(sectorsPerCluster)) {
+            detail = "每簇扇区数非法（" + std::to_string(sectorsPerCluster) + "）";
             return FatType::Unknown;
         }
-        if (reserved_sectors == 0 || fat_count == 0) {
+        if (reservedSectors == 0 || fatCount == 0) {
             detail = "保留扇区数或 FAT 个数为 0";
             return FatType::Unknown;
         }
-        const uint32_t total_sectors = total16 != 0 ? total16 : total32;
-        const uint32_t fat_sectors = fat16 != 0 ? fat16 : fat32;
-        if (total_sectors == 0 || fat_sectors == 0) {
+        const uint32_t totalSectors = total16 != 0 ? total16 : total32;
+        const uint32_t fatSectors = fat16 != 0 ? fat16 : fat32;
+        if (totalSectors == 0 || fatSectors == 0) {
             detail = "总扇区数或 FAT 大小为 0";
             return FatType::Unknown;
         }
 
-        // 数据区簇数决定类型（Microsoft FAT 规范：<4085 FAT12，<65525 FAT16，其余 FAT32）。
-        const uint32_t root_dir_sectors = (root_entries * 32 + bytes_per_sector - 1) / bytes_per_sector;
-        const uint32_t overhead = reserved_sectors + fat_count * fat_sectors + root_dir_sectors;
-        if (total_sectors <= overhead) {
+        // 数据区簇数决定类型（Microsoft FAT 规范：<4085 FAT12，<65525 FAT16，其余 FAT32）
+        const uint32_t rootDirSectors = (rootEntries * 32 + bytesPerSector - 1) / bytesPerSector;
+        const uint32_t overhead = reservedSectors + fatCount * fatSectors + rootDirSectors;
+        if (totalSectors <= overhead) {
             detail = "总扇区数不足以容纳元数据区";
             return FatType::Unknown;
         }
-        const uint32_t clusters = (total_sectors - overhead) / sectors_per_cluster;
+        const uint32_t clusters = (totalSectors - overhead) / sectorsPerCluster;
 
         if (clusters < 4085) {
             detail = "簇数 " + std::to_string(clusters);
@@ -91,7 +92,7 @@ namespace makeiso {
             detail = "簇数 " + std::to_string(clusters);
             return FatType::Fat16;
         }
-        if (root_entries != 0 || fat16 != 0) {
+        if (rootEntries != 0 || fat16 != 0) {
             detail = "簇数 " + std::to_string(clusters) + " 落在 FAT32 范围，但根目录项数或 FATSz16 非 0，卷结构不一致";
             return FatType::Unknown;
         }
@@ -99,8 +100,6 @@ namespace makeiso {
         return FatType::Fat32;
     }
 
-    // 校验镜像文件的引导扇区必须是 FAT32，否则抛异常。role 用于错误信息，如 "ESP 镜像"
-    // ESP 写死为 FAT32：UEFI 固件读它，内核必备的 FAT32 实现也读它
     void RequireFat32Image(const std::string& path, const std::string& role) {
         std::string detail;
         const FatType type = DetectFatType(ReadHead(path, 512), detail);

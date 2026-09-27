@@ -5,7 +5,7 @@
 | 模块 | 内容 |
 | --- | --- |
 | `Image` | 输出镜像：按绝对字节偏移写入、长度自跟踪、孔洞显式写零，保证同一输入产出同样的字节 |
-| `Baleen` | 介质上的引导结构：物理 `0x300` 的 BootDescriptor、El Torito 引导目录、MBR 分区项 |
+| `Baleen` | 介质上的引导结构：介质绝对偏移 `0x300` 的 BootDescriptor、El Torito 引导目录、MBR 分区项 |
 | `HostIo` | 宿主文件读取、数字解析、布局记账（区间不重叠）与清单 JSON 片段 |
 | `Fat` | FAT 引导扇区判定：按 Microsoft FAT 规范的簇数规则分出 FAT12/16/32，供 ESP 与 El Torito 引导镜像的"必须 FAT32"校验使用 |
 

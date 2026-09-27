@@ -1,19 +1,17 @@
 # MakeIso — ISO 组装器
 
-MakeIso 是宿主侧的构建期工具：把一级引导、实模式服务层（Stub）、核心阶段（BaleenCore）、EFI 引导镜像（光盘 El Torito 用的小 FAT 镜像与 ESP 分区内容各一份）与已装配好的 Ext4 系统卷镜像组装成一份可引导的 ISO9660 镜像，并让同一份字节在写入 U 盘后仍带磁盘引导记录（混合镜像）。它属于 [Baleen 引导器](../../../Docs/Specs/Baleen引导器.md) 第八节的镜像组装环节，产物形态见[启动介质与文件系统](../../../Docs/Specs/启动介质与文件系统.md)第二节。
+MakeIso 是宿主侧的构建期工具：把一级引导、实模式服务层（Stub）、核心阶段（BaleenCore）、EFI 引导镜像（光盘 El Torito 用的小 FAT 镜像与 ESP 分区内容各一份）与已装配好的 Ext4 系统卷镜像组装成一份可引导的 ISO9660 镜像，并让同一份字节在写入 U 盘后仍带磁盘引导记录（混合镜像）。它属于 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md) 第八节的镜像组装环节，产物形态见[启动介质与文件系统](../../../Docs/Specs/启动介质与文件系统.md)第二节。
 
 工具不解析 Ext4、不装配系统卷内容，也不生成 `.os` / `.osm`：它只负责介质上的位置安排与引导结构。构建期工具用宿主格式，不属于目标系统的容器体系。磁盘镜像（MBR + ESP + Ext4）由 [MakeHdd](../MakeHdd/README.md) 产出，两者共用 `../Common` 里的 BootDescriptor、El Torito 与 MBR 代码。
 
-## 一、构建与自测
+## 一、构建
 
 ```
 make            # 产出 ../../Bin/MakeIso（中间产物在 Obj/；g++，C++20，共享代码在 ../Common）
-make test       # 合成载荷组装 ISO，校验结构、内容与可复现性
-make test-ovmf  # 可选：用 QEMU + OVMF 实测 UEFI 经 El Torito 的启动（需 root、qemu、OVMF）
 make clean      # 删除 Obj/ 与本工具的可执行文件（Bin 与 MakeHdd 共用，不删别人的）
 ```
 
-`make test` 覆盖：MBR 分区项与 0xAA55、BootDescriptor 字段、El Torito 校验和与两个引导项、ISO9660 主卷描述符与目录记录（Rock Ridge NM/PX/TF）、清单与实际字节一致性、两次构建逐字节相同、纯光盘形态，以及坏 MBR/超长 Stub、非 FAT32 的 ESP 与 El Torito 引导镜像这些拒绝路径，并核对超限镜像的扇区计数按上限写、清单标记为截断；装有 xorriso 时用 libisofs 独立读取并提取比对，有权限时再用内核 isofs 挂载核对。
+正常构建只依赖正式 C++ 源码，不依赖未交付的本地回归夹具。本地回归覆盖：MBR 分区项与 0xAA55、BootDescriptor 字段、El Torito 校验和与两个引导项、ISO9660 主卷描述符与目录记录（Rock Ridge NM/PX/TF）、清单与实际字节一致性、两次构建逐字节相同、纯光盘形态，以及坏 MBR/超长 Stub、非 FAT32 的 ESP 与 El Torito 引导镜像这些拒绝路径，并核对超限镜像的扇区计数按上限写、清单标记为截断；装有 xorriso 时用 libisofs 独立读取并提取比对，有权限时再用内核 isofs 挂载核对。
 
 ## 二、用法
 
@@ -70,22 +68,22 @@ MakeIso --out Baleen.iso \
 
 ## 四、写出的引导结构
 
-**BootDescriptor**（物理 `0x300`，小端，与 `Packages/Baleen/Ipl/Include/Const.inc`、`Body.inc` 的常量一致）：
+**BootDescriptor**（介质绝对偏移 `0x300`，小端，与 `Packages/Baleen/Ipl/Include/Const.inc`、`Body.inc` 的常量一致）：
 
 | 偏移 | 宽度 | 字段 | 值 |
 | --- | --- | --- | --- |
 | 0 | 4 | magic | `0x52445342`（`BSDR`） |
-| 4 | 2 | version | `1` |
+| 4 | 2 | version | 当前格式标记 `1`，尚未发布，开发阶段可直接调整 |
 | 6 | 2 | header | `32` |
-| 8 | 8 | Stub 偏移 | 字节偏移，2048 对齐（512 与 2048 两种扇区尺寸都成立） |
-| 16 | 8 | Stub 字节数 | 非 0，且不超过 `0x10000 - 0x7E00` |
+| 8 | 8 | Stub 偏移 | 低 32 位字节偏移，至少 `0x800`，2048 对齐，偏移加文件长度不得产生 32 位进位 |
+| 16 | 8 | Stub 字节数 | 非 0，且不超过 `0x8000`（16 个 2048 B 扇区）；纯光盘和混合镜像均受此限制 |
 | 24 | 8 | 保留 | 全 0 |
 
 **El Torito**：校验项（16 字之和为 0，含 `0x55AA`）；默认项平台 BIOS、无仿真、装入段 `0x7C0`、LoadSize = `ceil(引导镜像/512)`；给 `--efi` 时追加平台 0xEF 段首部与 EFI 项，指向该小 FAT 镜像。
 
 **两份 FAT32 镜像、一个规范缺口。** `--esp`（0xEF 分区内容）与 `--efi`（El Torito EFI 项）都写死为 FAT32：UEFI 固件读它们，内核必备的 FAT 实现也是 FAT32。但 El Torito 的扇区计数只有 16 位，上限 65535 × 512 = 33,553,920 字节；而 FAT32 卷的下限（65525 个簇 × 512 字节）约 66,500 个扇区，**该字段按规范表达不了任何 FAT32 镜像**。工具的处理：按上限 65535 写入并在标准错误上提示，清单里同时给出 `sector_count_exact` 与 `sector_count_clamped`。
 
-实测（`make test-ovmf`，QEMU + OVMF/EDK2）：FAT16 基准、FAT32 且计数写 65535、FAT32 且计数被截断成 4096 三种情形都能挂载 FAT 卷并执行 `\EFI\BOOT\BOOTX64.EFI` —— 说明 EDK2 按 FAT 卷自身尺寸取镜像，不看这个字段。**风险在别处**：若某个固件按字段截断，超过 32 MiB 的镜像会被切掉尾部。要不要接受这个风险由发行侧决定；要完全避开它，只能把 `--efi` 收回成小的 FAT12/16 镜像（那就是规范能表达、发行版通行做法）。
+实测（QEMU + OVMF/EDK2 的本地启动回归）：FAT16 基准、FAT32 且计数写 65535、FAT32 且计数被截断成 4096 三种情形都能挂载 FAT 卷并执行 `\EFI\BOOT\BOOTX64.EFI` —— 说明 EDK2 按 FAT 卷自身尺寸取镜像，不看这个字段。**风险在别处**：若某个固件按字段截断，超过 32 MiB 的镜像会被切掉尾部。要不要接受这个风险由发行侧决定；要完全避开它，只能把 `--efi` 收回成小的 FAT12/16 镜像（那就是规范能表达、发行版通行做法）。
 
 **混合 MBR 分区表**（仅在给 `--mbr` 时写入，按顺序）：0 号 = ESP（类型 `0xEF`），1 号 = Ext4 系统卷（类型 `0x83`）；起点与长度取实际字节偏移换算的 512 字节 LBA，CHS 字段写 `FE FF FF`，强制读取方按 LBA 访问。
 
@@ -109,7 +107,7 @@ MakeIso --out Baleen.iso \
 
 ## 七、边界与待定项
 
-- **不生成** `BootDescriptor` 之外的引导期结构：Stub 读的超级块（`loaderLba` / `loaderSectors` / `systemFs`，见 `Const.inc` 的 `SB_*`）与 `BaleenLayout.bin` 的字段、落点规格尚未确定。工具把 Core 等载荷的偏移写进清单，等规格确定后由生成器落盘，或直接用 `--raw` 指定位置。
+- **不生成** `BootDescriptor` 之外的引导期结构：Stub 装载 Core 所需元数据与 `BaleenLayout.bin` 的字段、落点仍待后续阶段设计。工具把 Core 等载荷的偏移写进清单，等规格确定后由生成器落盘，或直接用 `--raw` 指定位置；IPL 不解析这些内容。
 - **不装配系统卷**：Ext4 系统卷镜像（内核槽位、发行内容）与磁盘形态镜像都属「布局计算与镜像组装」的产出，尚未加入；本工具只消费调用方给的镜像并记录位置。
 - **不做** ISO 之外的分发打包、签名与信任锚、Joliet/UDF 卷、压缩与引导镜像校验。
 - **不写** 任何持久写回：镜像是一次性生成的文件，写入 U 盘由外部工具（如 `dd`）负责。

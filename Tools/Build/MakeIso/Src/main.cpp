@@ -1,5 +1,5 @@
-// MakeIso：把一级引导、实模式服务层、核心阶段、EFI 引导镜像与系统卷组装成
-// 可引导的光盘镜像，并同时满足写入 U 盘后的磁盘引导记录要求（混合镜像）。
+// main.cpp
+// MakeIso：把一级引导、实模式服务层、核心阶段、EFI 引导镜像与系统卷组装成可引导的光盘镜像，并同时满足写入 U 盘后的磁盘引导记录要求（混合镜像）
 
 #include "Baleen.h"
 #include "Fat.h"
@@ -45,28 +45,30 @@ namespace {
 
     constexpr uint64_t kBlock = 2048;
     constexpr uint64_t kSystemAreaBytes = 16 * kBlock;
-    // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB。
+    // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB
     constexpr uint64_t kEspPreferredOffset = 1u << 20;
 
+    // 命令行选项
     struct Options {
-        std::string out;
-        std::string volume_id = "LIKESPROGRAM";
-        std::string boot_image;
-        uint16_t load_segment = 0x07C0;
-        std::string mbr;
-        std::string stub;
-        std::string core;
-        std::string efi;   // El Torito 平台 0xEF 的引导镜像（小 FAT 镜像）
-        std::string esp;   // 混合镜像的 ESP 分区内容（必须 FAT32）
-        std::string system_volume;
-        std::string iso_name;
-        std::vector<std::pair<std::string, std::string>> files;             // ISO 路径 -> 宿主路径
-        std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;   // 宿主路径 -> 偏移
-        std::string manifest;
-        std::optional<uint64_t> timestamp;
-        bool help = false;
+        std::string out;                                                   // 输出镜像路径
+        std::string volume_id = "LIKESPROGRAM";                            // ISO 卷标识
+        std::string boot_image;                                            // El Torito 默认引导镜像
+        uint16_t load_segment = 0x07C0;                                    // 引导镜像装入段
+        std::string mbr;                                                   // 混合镜像的 MBR
+        std::string stub;                                                  // 实模式服务层
+        std::string core;                                                  // 核心阶段
+        std::string efi;                                                   // El Torito 平台 0xEF 的引导镜像（小 FAT 镜像）
+        std::string esp;                                                   // 混合镜像的 ESP 分区内容（必须 FAT32）
+        std::string system_volume;                                         // 系统卷镜像（Ext4）
+        std::string iso_name;                                              // 系统卷在 ISO 内的文件名
+        std::vector<std::pair<std::string, std::string>> files;            // ISO 路径 -> 宿主路径
+        std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移
+        std::string manifest;                                              // 构建清单输出路径
+        std::optional<uint64_t> timestamp;                                 // 卷时间戳；空 = 写全零
+        bool help = false;                                                 // 是否只要帮助
     };
 
+    // 取卷时间戳：命令行优先，其次 SOURCE_DATE_EPOCH，都没有就写全零
     uint64_t ResolveTimestamp(const Options& options) {
         if (options.timestamp.has_value()) {
             return *options.timestamp;
@@ -81,6 +83,7 @@ namespace {
         return 0;  // 不指定：日期写全零，保证同一输入产出同样的字节
     }
 
+    // 打印用法
     void Usage() {
         std::cout <<
             "MakeIso — Baleen 引导介质（ISO9660 + El Torito + 混合 MBR）组装器\n"
@@ -110,64 +113,67 @@ namespace {
     // 参数解析
     Options ParseArgs(int argc, char** argv) {
         Options options;
-        const auto need_value = [&](int& i, const std::string& flag) -> std::string {
+        // 取当前选项的值，缺值即报错
+        const auto needValue = [&](int& i, const std::string& flag) -> std::string {
             if (i + 1 >= argc) throw std::runtime_error(flag + " 缺少取值");
             return argv[++i];
         };
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "-h" || arg == "--help") options.help = true;
-            else if (arg == "--out") options.out = need_value(i, arg);
-            else if (arg == "--volume-id") options.volume_id = need_value(i, arg);
-            else if (arg == "--boot-image") options.boot_image = need_value(i, arg);
-            else if (arg == "--load-segment") options.load_segment = static_cast<uint16_t>(ParseNumber(need_value(i, arg), "装入段"));
-            else if (arg == "--mbr") options.mbr = need_value(i, arg);
-            else if (arg == "--stub") options.stub = need_value(i, arg);
-            else if (arg == "--core") options.core = need_value(i, arg);
-            else if (arg == "--efi") options.efi = need_value(i, arg);
-            else if (arg == "--esp") options.esp = need_value(i, arg);
-            else if (arg == "--system-volume") options.system_volume = need_value(i, arg);
-            else if (arg == "--iso-name") options.iso_name = need_value(i, arg);
+            else if (arg == "--out") options.out = needValue(i, arg);
+            else if (arg == "--volume-id") options.volume_id = needValue(i, arg);
+            else if (arg == "--boot-image") options.boot_image = needValue(i, arg);
+            else if (arg == "--load-segment") options.load_segment = static_cast<uint16_t>(ParseNumber(needValue(i, arg), "装入段"));
+            else if (arg == "--mbr") options.mbr = needValue(i, arg);
+            else if (arg == "--stub") options.stub = needValue(i, arg);
+            else if (arg == "--core") options.core = needValue(i, arg);
+            else if (arg == "--efi") options.efi = needValue(i, arg);
+            else if (arg == "--esp") options.esp = needValue(i, arg);
+            else if (arg == "--system-volume") options.system_volume = needValue(i, arg);
+            else if (arg == "--iso-name") options.iso_name = needValue(i, arg);
             else if (arg == "--file") {
-                const std::string value = need_value(i, arg);
+                const std::string value = needValue(i, arg);
                 const auto eq = value.find('=');
                 if (eq == std::string::npos || eq == 0 || eq + 1 == value.size()) throw std::runtime_error("--file 需要 ISO路径=宿主路径：" + value);
                 options.files.emplace_back(value.substr(0, eq), value.substr(eq + 1));
             } else if (arg == "--raw") {
-                const std::string value = need_value(i, arg);
+                const std::string value = needValue(i, arg);
                 const auto at = value.rfind('@');
                 if (at != std::string::npos && at + 1 < value.size()) options.raw.emplace_back(value.substr(0, at), ParseNumber(value.substr(at + 1), "原始载荷偏移"));
                 else options.raw.emplace_back(value, std::nullopt);
-            } else if (arg == "--manifest") options.manifest = need_value(i, arg);
-            else if (arg == "--timestamp") options.timestamp = ParseNumber(need_value(i, arg), "时间戳");
+            } else if (arg == "--manifest") options.manifest = needValue(i, arg);
+            else if (arg == "--timestamp") options.timestamp = ParseNumber(needValue(i, arg), "时间戳");
             else throw std::runtime_error("无法识别的参数：" + arg);
         }
         return options;
     }
 
+    // 待组装的布局与已放置的载荷
     struct Build {
-        Options options;
-        IsoLayout layout;
-        uint32_t boot_lba = 0;
-        uint16_t boot_sectors_512 = 0;
-        std::optional<Placed> stub;
-        std::optional<Placed> core;
-        std::optional<Placed> efi;
-        std::optional<Placed> esp;
-        std::optional<Placed> volume;
-        std::optional<std::array<uint8_t, 32>> descriptor;
-        std::vector<Placed> raw;
-        std::vector<Placed> files;
-        std::string volume_iso_path;
+        Options options;                                    // 生效的命令行选项
+        IsoLayout layout;                                   // ISO 元数据布局
+        uint32_t boot_lba = 0;                              // 引导镜像所在 LBA（混合镜像为 1）
+        uint16_t boot_sectors_512 = 0;                      // 引导镜像的 LoadSize（512 字节单位）
+        std::optional<Placed> stub;                         // 实模式服务层
+        std::optional<Placed> core;                         // 核心阶段
+        std::optional<Placed> efi;                          // El Torito EFI 引导镜像
+        std::optional<Placed> esp;                          // ESP 的 FAT32 镜像
+        std::optional<Placed> volume;                       // 系统卷镜像
+        std::optional<std::array<uint8_t, 32>> descriptor;  // 已写入的 BootDescriptor
+        std::vector<Placed> raw;                            // 原始载荷（--raw）
+        std::vector<Placed> files;                          // 附加文件（--file）
+        std::string volume_iso_path;                        // 系统卷在 ISO 内的路径
     };
 
+    // 校验选项并固定引导镜像的位置，返回待组装的布局骨架
     Build Prepare(const Options& options) {
         Build build;
         build.options = options;
 
-        const uint64_t boot_bytes = FileSize(options.boot_image);
-        if (boot_bytes == 0) throw std::runtime_error("引导镜像为空：" + options.boot_image);
-        if ((boot_bytes + 511) / 512 > 0xFFFF) throw std::runtime_error("引导镜像超过 El Torito 的 16 位扇区计数上限");
+        const uint64_t bootBytes = FileSize(options.boot_image);
+        if (bootBytes == 0) throw std::runtime_error("引导镜像为空：" + options.boot_image);
+        if ((bootBytes + 511) / 512 > 0xFFFF) throw std::runtime_error("引导镜像超过 El Torito 的 16 位扇区计数上限");
 
         std::optional<std::vector<uint8_t>> mbr;
         if (!options.mbr.empty()) {
@@ -175,22 +181,24 @@ namespace {
             if (mbr->size() != 512) throw std::runtime_error("MBR 必须恰好 512 字节：" + options.mbr);
         }
         build.boot_lba = mbr.has_value() ? 1 : 0;
-        const uint64_t system_area_limit = build.boot_lba == 1 ? kSystemAreaBytes - kBlock : kSystemAreaBytes;
-        if (boot_bytes > system_area_limit) throw std::runtime_error("引导镜像放不进 16 扇区的系统区");
-        build.boot_sectors_512 = static_cast<uint16_t>((boot_bytes + 511) / 512);
+        const uint64_t systemAreaLimit = build.boot_lba == 1 ? kSystemAreaBytes - kBlock : kSystemAreaBytes;
+        if (bootBytes > systemAreaLimit) throw std::runtime_error("引导镜像放不进 16 扇区的系统区");
+        build.boot_sectors_512 = static_cast<uint16_t>((bootBytes + 511) / 512);
 
         if (!options.stub.empty()) {
             const uint64_t bytes = FileSize(options.stub);
-            if (bytes == 0 || bytes > BootDescriptor::kMaxStubBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 0x10000-0x7E00：" + options.stub);
+            // CD 按 2048 字节整块读取，装入空间最多容纳 0x8000 字节
+            constexpr uint64_t maxBytes = BootDescriptor::kMaxStubBytes / kBlock * kBlock;
+            if (bytes == 0 || bytes > maxBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 CD 整块读取上限 0x8000：" + options.stub);
         }
         if (options.core.empty() == false) if (FileSize(options.core) == 0) throw std::runtime_error("核心阶段载荷为空：" + options.core);
         if (!options.efi.empty()) {
             const uint64_t bytes = FileSize(options.efi);
             if (bytes == 0) throw std::runtime_error("El Torito EFI 引导镜像为空：" + options.efi);
-            // 与 ESP 同一条规则：写死 FAT32。
+            // 与 ESP 同一条规则：写死 FAT32
             RequireFat32Image(options.efi, "El Torito EFI 引导镜像");
             // FAT32 卷的体积下限（约 66500 个 512 字节扇区）超过 El Torito 的 16 位扇区计数上限，
-            // 该字段按规范表达不了这份镜像：按上限 65535 写入，并在下面提示。
+            // 该字段按规范表达不了这份镜像：按上限 65535 写入，并在下面提示
             if ((bytes + 511) / 512 > 0xFFFF) {
                 std::cerr << "MakeIso: El Torito 的扇区计数是 16 位（上限 65535 个 512 字节扇区），"
                           << "FAT32 镜像下限已超过它；引导目录里按上限写，" << options.efi
@@ -199,13 +207,14 @@ namespace {
         }
         if (!options.esp.empty()) {
             if (FileSize(options.esp) == 0) throw std::runtime_error("ESP 镜像为空：" + options.esp);
-            // ESP 写死为 FAT32：UEFI 固件读它，内核必备的 FAT32 实现也读它。
+            // ESP 写死为 FAT32：UEFI 固件读它，内核必备的 FAT32 实现也读它
             RequireFat32Image(options.esp, "ESP 镜像");
         }
         if (!options.iso_name.empty() && options.system_volume.empty()) throw std::runtime_error("--iso-name 只在提供 --system-volume 时有意义");
         return build;
     }
 
+    // 按选项完成布局、分区表、引导目录、清单与镜像写入
     int Run(const Options& options) {
         Build build = Prepare(options);
 
@@ -220,13 +229,14 @@ namespace {
             const std::string name = options.iso_name.empty() ? BaseName(options.system_volume) : options.iso_name;
             build.volume_iso_path = iso.AddFile(name, options.system_volume, FileSize(options.system_volume));
         }
-        for (const auto& [iso_path, host_path] : options.files) iso.AddFile(iso_path, host_path, FileSize(host_path));
+        for (const auto& [isoPath, hostPath] : options.files) iso.AddFile(isoPath, hostPath, FileSize(hostPath));
 
         build.layout = iso.PlanMetadata();
 
         Reservations reserved;
         reserved.Reserve("元数据区", 0, build.layout.metadata_end);
         uint64_t cursor = build.layout.metadata_end;
+        // 按 2048 对齐分配一段连续空间并登记占用
         const auto place = [&](const std::string& name, uint64_t bytes) {
             cursor = AlignUp(cursor, kBlock);
             const Placed placed{name, cursor, bytes};
@@ -238,16 +248,16 @@ namespace {
         if (!options.stub.empty()) build.stub = place("BaleenStub", FileSize(options.stub));
         if (!options.core.empty()) build.core = place("BaleenCore", FileSize(options.core));
         if (!options.efi.empty()) build.efi = place("El Torito EFI 镜像", FileSize(options.efi));
-        for (const auto& [host_path, offset] : options.raw) {
-            const uint64_t bytes = FileSize(host_path);
+        for (const auto& [hostPath, offset] : options.raw) {
+            const uint64_t bytes = FileSize(hostPath);
             if (offset.has_value()) {
-                if (*offset % kBlock != 0) throw std::runtime_error("--raw 偏移未按 2048 对齐：" + host_path);
-                if (*offset < build.layout.metadata_end) throw std::runtime_error("--raw 偏移落在元数据区内：" + host_path);
-                const Placed placed{host_path, *offset, bytes};
-                reserved.Reserve(host_path, placed.offset, AlignUp(bytes, kBlock));
+                if (*offset % kBlock != 0) throw std::runtime_error("--raw 偏移未按 2048 对齐：" + hostPath);
+                if (*offset < build.layout.metadata_end) throw std::runtime_error("--raw 偏移落在元数据区内：" + hostPath);
+                const Placed placed{hostPath, *offset, bytes};
+                reserved.Reserve(hostPath, placed.offset, AlignUp(bytes, kBlock));
                 cursor = std::max(cursor, placed.offset + AlignUp(bytes, kBlock));
                 build.raw.push_back(placed);
-            } else build.raw.push_back(place(host_path, bytes));
+            } else build.raw.push_back(place(hostPath, bytes));
         }
         if (!options.esp.empty()) {
             const uint64_t bytes = FileSize(options.esp);
@@ -270,31 +280,29 @@ namespace {
         iso.SetFileExtents(extents);
         const uint64_t total = iso.total_bytes();
 
-        // 引导镜像：混合镜像里位于 LBA 1，纯光盘镜像里位于 LBA 0（描述符都落在绝对偏移 0x300）。
-        if (image.CopyFile(static_cast<uint64_t>(build.boot_lba) * kBlock, options.boot_image) !=
-            FileSize(options.boot_image)) {
+        // 引导镜像：混合镜像里位于 LBA 1，纯光盘镜像里位于 LBA 0（描述符都落在绝对偏移 0x300）
+        if (image.CopyFile(static_cast<uint64_t>(build.boot_lba) * kBlock, options.boot_image) != FileSize(options.boot_image))
             throw std::runtime_error("引导镜像长度在写入时发生变化");
-        }
 
         if (build.stub.has_value()) {
             BootDescriptor descriptor;
             descriptor.stub_offset = build.stub->offset;
             descriptor.stub_bytes = build.stub->bytes;
-            build.descriptor = EncodeBootDescriptor(descriptor);
+            build.descriptor = EncodeBootDescriptor(descriptor, kBlock);
             image.Write(BootDescriptor::kImageOffset, *build.descriptor);
         } else std::cerr << "MakeIso: 未提供 --stub，不写 BootDescriptor，BIOS 路径无法装载 Stub\n";
 
         std::vector<MbrPartition> partitions;
         if (build.esp.has_value()) partitions.push_back(MbrPartition{0xEF, build.esp->offset, build.esp->bytes});
-        std::optional<Placed> volume_placed;
+        std::optional<Placed> volumePlaced;
         if (!build.volume_iso_path.empty()) {
             const IsoExtent& extent = extents.at(build.volume_iso_path);
             if (extent.bytes > 0) {
-                volume_placed = Placed{build.volume_iso_path, extent.offset, extent.bytes};
+                volumePlaced = Placed{build.volume_iso_path, extent.offset, extent.bytes};
                 partitions.push_back(MbrPartition{0x83, extent.offset, extent.bytes});
             }
         }
-        build.volume = volume_placed;
+        build.volume = volumePlaced;
         if (!options.mbr.empty()) {
             const std::vector<uint8_t> mbr = ReadFile(options.mbr);
             const auto patched = makeiso::PatchMbrPartitions(std::span<const uint8_t, 512>(mbr.data(), mbr.size()), std::span<const MbrPartition>(partitions.data(), partitions.size()));
@@ -393,6 +401,7 @@ namespace {
     }
 }
 
+// 入口：解析参数、检查必选选项，然后组装镜像
 int main(int argc, char** argv) {
     try {
         const Options options = ParseArgs(argc, argv);

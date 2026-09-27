@@ -1,27 +1,33 @@
-; 与 BootInfo.hpp、Superblock.hpp 保持数值一致
+; Const.inc
+; IPL 运行期常量：装入地址、描述符字段、介质编号与长度上限
 
-MAGIC            EQU 0x20020115  ; Superblock / Boot::Info 魔数
-VERSION          EQU 3           ; Superblock 布局版本（3 = 追加升级区字段，见 ADR-034 的 S4）
+LOAD_TOP         EQU 0x7E00      ; Stub 装入点，即 [0x7E00,0x10000) 窗口下端
+LOAD_CEIL        EQU 0x10000     ; Stub 窗口上端，不含
+BIOS_LOAD        EQU 0x7C00      ; BIOS 装入 IPL 的物理地址，IPL 留在原地
+STACK_TOP        EQU 0x7C00      ; 16 位栈顶，从 IPL 之下向下增长
 
-LOAD_TOP         EQU 0x7E00      ; BootStub 装入点，紧邻 IPL 之上
-LOAD_CEIL        EQU 0x10000     ; BootStub 镜像（含 BSS）上限；stub/Bios.asm 实模式 thunk 以 CS=0 取址
-BIOS_LOAD        EQU 0x7C00      ; BIOS 把 IPL 放到的物理地址；IPL 留在此处
-STACK_TOP        EQU 0x7C00      ; 16 位阶段栈顶（BootStub 之下向下长，避开其镜像）
-LOADER_PM_STACK  EQU 0x21000     ; BootStub/BootCore 32 位栈顶，栈区 [0x20000,0x21000)
-BOUNCE_PHYS      EQU 0x0800      ; BootStub 的 INT 13h 弹跳缓冲（须在低 64KiB）
+DESC_IMAGE       EQU 0x300       ; 介质绝对字节偏移，不是内存地址
+DESC_MAGIC       EQU 0x52445342  ; 描述符魔数 'BSDR'
+DESC_VERSION     EQU 1           ; 当前开发格式标记
+DESC_HEADER      EQU 32          ; 描述符总长
+DESC_VER         EQU 4           ; Version 与 HeaderBytes 字段偏移（同一个 DWORD）
+DESC_LOFF        EQU 8           ; StubFileOffset 字段偏移
+DESC_LBYTES      EQU 16          ; StubImageBytes 字段偏移
+DESC_RESV        EQU 24          ; Reserved 字段偏移
+DESC_SEC         EQU DESC_IMAGE >> SECT_SHIFT                ; 描述符所在介质扇区
+DESC_OFF         EQU DESC_IMAGE & ((1 << SECT_SHIFT) - 1)    ; 描述符在扇区内的偏移
+MAX_STUB_SECTORS EQU (LOAD_CEIL - LOAD_TOP) >> SECT_SHIFT    ; 单批读取的扇区上限
+MAX_STUB_BYTES   EQU MAX_STUB_SECTORS << SECT_SHIFT          ; 对应的文件字节上限
 
-SB_MAGIC         EQU 0           ; Superblock.magic 偏移
-SB_VERSION       EQU 4           ; Superblock.version 偏移
-SB_MEDIA         EQU 8           ; Superblock.media 偏移
-SB_LOADER_LBA    EQU 12          ; Superblock.loaderLba 偏移
-SB_LOADER_SECTS  EQU 16          ; Superblock.loaderSectors 偏移
-SB_SECTOR_SIZE   EQU 44          ; Superblock.sectorSize 偏移
-SB_SYSTEM_FS     EQU 176         ; Superblock.systemFs 偏移（v2 追加字段）
+MEDIA_HDD        EQU 2           ; 交权时 DH 的介质编号：硬盘 / USB-HDD
+MEDIA_CDROM      EQU 4           ; 交权时 DH 的介质编号：光盘
 
-SUPER_FS_UNKNOWN EQU 0           ; Superblock.systemFs：按注册表顺序探测
-SUPER_FS_EXFAT   EQU 1           ; Superblock.systemFs：ExFAT 系统卷
-SUPER_FS_EXT4    EQU 2           ; Superblock.systemFs：Ext4 系统卷
+; 0xE9 调试口开关，默认开；构建期用 -DENABLE_E9=0 关闭
+%IFNDEF ENABLE_E9
+%DEFINE ENABLE_E9 1
+%ENDIF
 
-MEDIA_HDD        EQU 2           ; Boot::Media::Hdd（U 盘 USB-HDD 同此）
-MEDIA_USB        EQU 3           ; Boot::Media::Usb（本 IPL 不用）
-MEDIA_CDROM      EQU 4           ; Boot::Media::Cdrom
+; IPL 只读描述符或整个 Stub，不需要通用的 127 块分批循环
+%IF MAX_STUB_SECTORS > 127
+%ERROR "IPL 单批读取超过 EDD 的 127 块上限"
+%ENDIF

@@ -1,5 +1,5 @@
-// MakeHdd：把磁盘一级引导（MBR）、实模式服务层、核心阶段、ESP 的 FAT 镜像与
-// Ext4 系统卷组装成可写入硬盘 / U 盘的磁盘镜像。
+// main.cpp
+// MakeHdd：把磁盘一级引导（MBR）、实模式服务层、核心阶段、ESP 的 FAT 镜像与 Ext4 系统卷组装成可写入硬盘 / U 盘的磁盘镜像
 //
 // 布局（字节偏移）：
 //   0x000        MBR：BaleenIPL.bin 的引导代码 + 由本工具写实的分区表
@@ -42,22 +42,22 @@ namespace {
     constexpr uint64_t kEntryBytes = 16 * 4;
     constexpr uint64_t kAlign = 2048;       // 载荷与分区起点一律 2048 对齐
     constexpr uint64_t kRawStart = 0x400;   // BootDescriptor 之后
-    // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB。
+    // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB
     constexpr uint64_t kEspPreferredOffset = 1u << 20;
     constexpr uint64_t kDefaultPadTo = 1u << 20;
 
     // 参数
     struct Options {
-        std::string out;    // 输出路径
-        std::string mbr;    // MBR 文件路径
-        std::string stub;   // Stub 文件路径
-        std::string core;   // BootCore 文件路径
-        std::string esp;    // Esp 文件路径
-        std::string system_volume; // 系统卷文件路径
-        std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移
-        std::string manifest;
-        uint64_t pad_to = kDefaultPadTo;
-        bool help = false;
+        std::string out;                                                   // 输出镜像路径
+        std::string mbr;                                                   // MBR 文件路径
+        std::string stub;                                                  // Stub 文件路径
+        std::string core;                                                  // BootCore 文件路径
+        std::string esp;                                                   // Esp 文件路径
+        std::string system_volume;                                         // 系统卷文件路径
+        std::string manifest;                                              // 构建清单输出路径
+        uint64_t pad_to = kDefaultPadTo;                                   // 镜像总长的对齐粒度
+        bool help = false;                                                 // 是否只要帮助
+        std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移，空表示自动分配
     };
 
     // 分区
@@ -66,7 +66,7 @@ namespace {
         std::optional<Placed> system_volume;   // 1 号槽：类型 0x83
     };
 
-    // 输出
+    // 打印用法
     void Usage() {
         std::cout <<
             "MakeHdd — Baleen 磁盘引导介质（MBR + ESP + Ext4）组装器\n"
@@ -90,26 +90,27 @@ namespace {
     // 参数解析
     Options ParseArgs(int argc, char** argv) {
         Options options;
-        const auto need_value = [&](int& i, const std::string& flag) -> std::string {
+        // 取当前选项的值，缺值即报错
+        const auto needValue = [&](int& i, const std::string& flag) -> std::string {
             if (i + 1 >= argc) throw std::runtime_error(flag + " 缺少取值");
             return argv[++i];
         };
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "-h" || arg == "--help") options.help = true;
-            else if (arg == "--out") options.out = need_value(i, arg);
-            else if (arg == "--mbr") options.mbr = need_value(i, arg);
-            else if (arg == "--stub") options.stub = need_value(i, arg);
-            else if (arg == "--core") options.core = need_value(i, arg);
-            else if (arg == "--esp") options.esp = need_value(i, arg);
-            else if (arg == "--system-volume") options.system_volume = need_value(i, arg);
+            else if (arg == "--out") options.out = needValue(i, arg);
+            else if (arg == "--mbr") options.mbr = needValue(i, arg);
+            else if (arg == "--stub") options.stub = needValue(i, arg);
+            else if (arg == "--core") options.core = needValue(i, arg);
+            else if (arg == "--esp") options.esp = needValue(i, arg);
+            else if (arg == "--system-volume") options.system_volume = needValue(i, arg);
             else if (arg == "--raw") {
-                const std::string value = need_value(i, arg);
+                const std::string value = needValue(i, arg);
                 const auto at = value.rfind('@');
                 if (at != std::string::npos && at + 1 < value.size()) options.raw.emplace_back(value.substr(0, at), ParseNumber(value.substr(at + 1), "原始载荷偏移"));
                 else options.raw.emplace_back(value, std::nullopt);
-            } else if (arg == "--manifest") options.manifest = need_value(i, arg);
-            else if (arg == "--pad-to")options.pad_to = ParseNumber(need_value(i, arg), "对齐粒度");
+            } else if (arg == "--manifest") options.manifest = needValue(i, arg);
+            else if (arg == "--pad-to") options.pad_to = ParseNumber(needValue(i, arg), "对齐粒度");
             else throw std::runtime_error("无法识别的参数：" + arg);
         }
         return options;
@@ -127,7 +128,7 @@ namespace {
         if (!options.core.empty() && FileSize(options.core) == 0) throw std::runtime_error("核心阶段载荷为空：" + options.core);
         if (!options.esp.empty()) {
             if (FileSize(options.esp) == 0) throw std::runtime_error("ESP 镜像为空：" + options.esp);
-            // ESP 写死为 FAT32：UEFI 固件读它，内核必备的 FAT32 实现也读它。
+            // ESP 写死为 FAT32：UEFI 固件读它，内核必备的 FAT32 实现也读它
             RequireFat32Image(options.esp, "ESP 镜像");
         }
         if (!options.system_volume.empty() && FileSize(options.system_volume) == 0) throw std::runtime_error("系统卷镜像为空：" + options.system_volume);
@@ -135,6 +136,7 @@ namespace {
     }
 }
 
+// 入口：解析参数、检查必选选项，然后组装镜像
 int main(int argc, char** argv) {
     try {
         const Options options = ParseArgs(argc, argv);
@@ -150,6 +152,7 @@ int main(int argc, char** argv) {
         Reservations reserved;
         reserved.Reserve("MBR 与 BootDescriptor 区", 0, kRawStart);
         uint64_t cursor = kRawStart;
+        // 按 2048 对齐分配一段连续空间并登记占用
         const auto place = [&](const std::string& name, uint64_t bytes) {
             cursor = AlignUp(cursor, kAlign);
             const Placed placed{name, cursor, bytes};
@@ -163,16 +166,16 @@ int main(int argc, char** argv) {
         std::vector<Placed> raw;
         if (!options.stub.empty()) stub = place("BaleenStub", FileSize(options.stub));
         if (!options.core.empty()) core = place("BaleenCore", FileSize(options.core));
-        for (const auto& [host_path, offset] : options.raw) {
-            const uint64_t bytes = FileSize(host_path);
+        for (const auto& [hostPath, offset] : options.raw) {
+            const uint64_t bytes = FileSize(hostPath);
             if (offset.has_value()) {
-                if (*offset % kAlign != 0) throw std::runtime_error("--raw 偏移未按 2048 对齐：" + host_path);
-                if (*offset < kRawStart) throw std::runtime_error("--raw 偏移落在 MBR / 描述符区内：" + host_path);
-                const Placed placed{host_path, *offset, bytes};
-                reserved.Reserve(host_path, placed.offset, AlignUp(bytes, kAlign));
+                if (*offset % kAlign != 0) throw std::runtime_error("--raw 偏移未按 2048 对齐：" + hostPath);
+                if (*offset < kRawStart) throw std::runtime_error("--raw 偏移落在 MBR / 描述符区内：" + hostPath);
+                const Placed placed{hostPath, *offset, bytes};
+                reserved.Reserve(hostPath, placed.offset, AlignUp(bytes, kAlign));
                 cursor = std::max(cursor, placed.offset + AlignUp(bytes, kAlign));
                 raw.push_back(placed);
-            } else raw.push_back(place(host_path, bytes));
+            } else raw.push_back(place(hostPath, bytes));
         }
 
         Partitions partitions;
@@ -193,7 +196,7 @@ int main(int argc, char** argv) {
         } else std::cerr << "MakeHdd: 未提供 --system-volume，1 号分区留空，引导链没有系统卷可读\n";
         const uint64_t total = AlignUp(cursor, options.pad_to);
 
-        // MBR：保留引导代码，分区表由本工具写实（四个槽位先清空，再写有内容的槽位）。
+        // MBR：保留引导代码，分区表由本工具写实（四个槽位先清空，再写有内容的槽位）
         std::array<uint8_t, kMbrBytes> mbr{};
         {
             const std::vector<uint8_t> source = ReadFile(options.mbr);
@@ -216,7 +219,7 @@ int main(int argc, char** argv) {
             BootDescriptor boot;
             boot.stub_offset = stub->offset;
             boot.stub_bytes = stub->bytes;
-            descriptor = makeiso::EncodeBootDescriptor(boot);
+            descriptor = makeiso::EncodeBootDescriptor(boot, kMbrBytes);
             image.Write(BootDescriptor::kImageOffset, *descriptor);
         } else std::cerr << "MakeHdd: 未提供 --stub，不写 BootDescriptor，BIOS 路径无法装载 Stub\n";
 
@@ -227,6 +230,7 @@ int main(int argc, char** argv) {
         if (partitions.system_volume.has_value()) image.CopyFile(partitions.system_volume->offset, options.system_volume);
         image.ExtendTo(total);
 
+        // 清单与摘要
         std::string manifest = "{\n";
         manifest += "  \"tool\": \"MakeHdd\",\n";
         manifest += "  \"total_bytes\": " + std::to_string(total) + ",\n";
@@ -240,11 +244,12 @@ int main(int argc, char** argv) {
         } else manifest += "  \"descriptor\": null,\n";
         manifest += "  \"stub\": " + JsonPlaced(stub.has_value() ? &*stub : nullptr) + ",\n";
         manifest += "  \"core\": " + JsonPlaced(core.has_value() ? &*core : nullptr) + ",\n";
-        const auto json_placed = [](const std::optional<Placed>& placed) {
+        // 可选的载荷统一转成清单里的 JSON 片段
+        const auto jsonPlaced = [](const std::optional<Placed>& placed) {
             return JsonPlaced(placed.has_value() ? &*placed : nullptr);
         };
-        manifest += "  \"esp\": " + json_placed(partitions.esp) + ",\n";
-        manifest += "  \"system_volume\": " + json_placed(partitions.system_volume) + ",\n";
+        manifest += "  \"esp\": " + jsonPlaced(partitions.esp) + ",\n";
+        manifest += "  \"system_volume\": " + jsonPlaced(partitions.system_volume) + ",\n";
         manifest += "  \"raw\": [";
         for (std::size_t i = 0; i < raw.size(); ++i) {
             manifest += (i == 0 ? "\n    " : ",\n    ");
