@@ -1,0 +1,25 @@
+# 构建产物：中间对象、宿主工具的 Obj/、各子包与顶层构建的 Out/
+Obj/
+Out/
+*.o
+*.d
+
+# 介质镜像与占位载荷
+*.iso
+*.hdd
+*.img
+*.bin.json
+
+# SDK 安装目录：用户安装的 SDK 目录，包含宿主工具、头文件、库文件等，便于直接使用，不忽略
+!Install/
+!Install/*
+
+# Tools/Bin：宿主工具的可执行文件随源码交付，便于直接使用，不忽略
+!Tools/Bin/
+!Tools/Bin/*
+
+# 测试相关文件
+*Test
+Tools/Build/BootTest.sh
+Tools/Build/Payloads/
+Tools/Build/Payloads/*
