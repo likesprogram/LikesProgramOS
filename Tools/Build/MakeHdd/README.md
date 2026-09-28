@@ -45,6 +45,7 @@ MakeHdd --out Baleen.img \
 | --- | --- |
 | `0x000` | MBR：`BaleenIPL.bin` 的引导代码原样保留，分区表由本工具写实 |
 | `0x300` | BootDescriptor（32 字节；一级引导从 512 字节 LBA 1 的偏移 `0x100` 读同一处） |
+| `0x340` | CoreDescriptor（32 字节，与上一个同扇区；Stub 读同一处定位核心阶段） |
 | `0x400` 起 | 原始载荷：Stub、Core 与 `--raw` 条目，各自 2048 对齐，落在未分区的空隙里 |
 | 1 MiB（原始载荷越过 1 MiB 时顺延） | 0 号分区：ESP 的 FAT 镜像 |
 | ESP 之后 | 1 号分区：Ext4 系统卷镜像 |
@@ -69,9 +70,11 @@ ESP 的 1 MiB 起点与 `Mbr.asm` 里分区项 0 的占位 LBA 2048（512 字节
 | 16 | 8 | Stub 字节数 | 非 0，且不超过 `0x10000 - 0x7E00` |
 | 24 | 8 | 保留 | 全 0 |
 
+**CoreDescriptor**（介质绝对偏移 `0x340`，小端，与 `Packages/Baleen/Common/Include/Contract.inc`、`Stub/Src/LoadCore.cpp` 的常量一致）：字段与校验同 BootDescriptor 的形态——magic `0x52444342`（`BCDR`）、version `1`、header `32`、8 字节 Core 偏移、8 字节 Core 字节数、8 字节保留；偏移至少 `0x800` 且 2048 对齐，偏移加长度不得产生 32 位进位，长度非 0 且不超过 `0x400000`。写它的前提是提供 `--core`；缺 Core 时只提示，不写描述符。
+
 ## 五、构建清单
 
-`--manifest` 的 JSON 记录：`total_bytes` / `total_sectors_512`、`mbr`、`descriptor`（含 Stub 偏移与长度）、`stub` / `core` / `raw[]`、`esp` / `system_volume`（偏移与长度），以及 `partitions[]`（槽位、类型、起始 LBA、扇区数）。后续的布局描述生成与验证脚本按它取字节偏移与长度。
+`--manifest` 的 JSON 记录：`total_bytes` / `total_sectors_512`、`mbr`、`descriptor`（含 Stub 偏移与长度）、`core_descriptor`（含 Core 偏移与长度）、`stub` / `core` / `raw[]`、`esp` / `system_volume`（偏移与长度），以及 `partitions[]`（槽位、类型、起始 LBA、扇区数）。后续的布局描述生成与验证脚本按它取字节偏移与长度。
 
 ## 六、可复现性
 
@@ -79,7 +82,7 @@ ESP 的 1 MiB 起点与 `Mbr.asm` 里分区项 0 的占位 LBA 2048（512 字节
 
 ## 七、边界与待定项
 
-- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；`BaleenLayout.bin` 与 Stub 装载 Core 所需元数据的字段和落点仍待后续阶段设计，工具只把偏移写进清单，或由 `--raw` 指定位置。IPL 只消费 BootDescriptor，不解析这些内容。
+- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；`BaleenLayout.bin` 的字段与落点仍待后续阶段设计，可由 `--raw` 指定位置。IPL 只消费 BootDescriptor，Stub 只消费 CoreDescriptor，其余结构两者都不解析。
 - **不写 GPT**：只有 MBR 分区表（UEFI 固件按 MBR 里的 ESP 分区项启动），保护性 MBR + GPT 是否加入尚未决定。
 - **不做** 物理设备写入（由 `dd` 等外部工具负责）、签名与信任锚、坏块与磨损处理。
 - **不擦除**：镜像大小由内容决定，写到更大的介质上时其余空间保持介质原状，需要擦除由写盘步骤自行决定。

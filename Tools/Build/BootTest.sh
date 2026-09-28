@@ -2,7 +2,7 @@
 # BootTest.sh
 #    无人值守启动测试：QEMU 的 ISO/HDD × BIOS/UEFI × 内置/USB 共八例，另跑 Bochs HDD
 #
-#    BIOS 期望 PLACEHOLDER-STUB，UEFI 期望 MAKEISO-EFI-BOOT-OK
+#    BIOS 期望 STUB（占位件与真实 BaleenStub 的输出都含它），UEFI 期望 MAKEISO-EFI-BOOT-OK
 #    用法：BootTest.sh <iso> <hdd> [OVMF_CODE] [OVMF_VARS]
 #    BOOT_TEST_TIMEOUT=40 是每例上限，看到标记立即结束
 #    BOOT_TEST_STRICT=1 将工具/固件缺失视为失败（exit 2）；真实失败始终 exit 1
@@ -151,7 +151,7 @@ if command -v "$qemu" >/dev/null 2>&1; then
                         -drive "if=pflash,format=raw,file=$case_dir/vars.fd"
                     marker=MAKEISO-EFI-BOOT-OK
                 else
-                    marker=PLACEHOLDER-STUB
+                    marker=STUB
                 fi
                 if [ "$mode" = usb ]; then
                     set -- "$@" -device usb-ehci,id=ehci \
@@ -233,7 +233,7 @@ else
     } > "$case_dir/bochsrc"
     printf 'boot-test: Bochs BIOS=%s，VGA=%s，display=%s\n' "$bochs_rom" "$bochs_vgarom" "$bochs_display"
     # 非 debugger 构建忽略 stdin；debugger 构建会读 continue，避免停在复位向量
-    run_case 'Bochs hdd + bios + built' hdd-bios-bochs PLACEHOLDER-STUB \
+    run_case 'Bochs hdd + bios + built' hdd-bios-bochs STUB \
         "$case_dir/continue.rc" "$bochs" -q -f "$case_dir/bochsrc"
 fi
 

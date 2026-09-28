@@ -60,6 +60,23 @@ namespace makeiso {
         return out;
     }
 
+    std::array<uint8_t, 32> EncodeCoreDescriptor(const CoreDescriptor& descriptor, uint32_t sector_bytes) {
+        if (sector_bytes != 512 && sector_bytes != 2048) throw std::runtime_error("引导介质扇区大小必须为 512 或 2048 字节");
+        if (descriptor.core_bytes == 0 || descriptor.core_bytes > CoreDescriptor::kMaxCoreBytes) throw std::runtime_error("Core 长度必须非 0 且不超过 0x400000");
+        if (descriptor.core_offset < 0x800) throw std::runtime_error("Core 偏移必须至少为 0x800，避开描述符所在扇区");
+        if (descriptor.core_offset % 2048 != 0) throw std::runtime_error("Core 偏移必须 2048 对齐（工具对两种介质的统一策略）");
+        // 对应 Stub 读盘路径的 32 位寻址：偏移加长度不得进位
+        if (descriptor.core_offset > 0xFFFFFFFFull || descriptor.core_bytes > 0xFFFFFFFFull - descriptor.core_offset) throw std::runtime_error("Core 偏移及偏移加长度必须不超过 0xFFFFFFFF");
+        std::array<uint8_t, 32> out{};
+        Put32Le(out.data() + 0, CoreDescriptor::kMagic);
+        Put16Le(out.data() + 4, CoreDescriptor::kVersion);
+        Put16Le(out.data() + 6, CoreDescriptor::kHeaderBytes);
+        Put64Le(out.data() + 8, descriptor.core_offset);
+        Put64Le(out.data() + 16, descriptor.core_bytes);
+        // 24..31 保留，必须为 0
+        return out;
+    }
+
     std::vector<uint8_t> EncodeBootCatalog(const BootCatalogSpec& spec) {
         std::vector<uint8_t> catalog(2048, 0);
 

@@ -29,10 +29,11 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | --- | --- |
 | Baleen 一级引导（`Packages/Baleen/Ipl`） | 已实现：硬盘 / USB-HDD 与 El Torito 光盘两种形态，NASM 汇编，构建含尺寸硬约束检查（NASM 3.01 下 `make check` 通过）；源码、产物与运行期契约见 [Ipl 说明](Packages/Baleen/Ipl/README.md) |
 | 宿主构建工具（`Tools/Build`） | 已实现：MakeIso 与 MakeHdd 组装可引导的 ISO 与磁盘镜像，MakePayloads 生成开发占位载荷；构建不依赖测试目录；用法见[工具 README](Tools/Build/MakeIso/README.md) |
-| Baleen 其余阶段（Stub、BootCore、UEFI 侧） | 骨架，尚未实现 |
+| Baleen Stub（`Packages/Baleen/Stub`） | 阶段性实现：切保护模式、开 A20、建立运行期 GDT/IDT、异常诊断，BIOS 服务经实模式弹跳提供扇区探测、E820 内存图与低地址读盘；并按 [Stub 说明](Packages/Baleen/Stub/README.md)第二节的契约读取介质上的 `CoreDescriptor`、校验装载区、把 `BaleenCore` 装到 1MiB 并经交权块交给它（QEMU 与 Bochs 上 HDD / ISO / USB 形态实测均已走到占位 Core）；Core 本身尚未实现 |
+| Baleen 其余阶段（BootCore、UEFI 侧） | 骨架，尚未实现 |
 | 内核本体、模块、驱动、用户空间、SDK | 尚未实现（`Packages/LikesProgramOS`、`Packages/Common`、`Packages/LikesProgramSDK`、`Install/` 下的 SDK 目录仍是空骨架） |
 
-顶层 `make` 现在就能产出可启动的 `Out/LikesProgram.iso` 与 `Out/LikesProgram.hdd`。Stub、BootCore、EFI 引导镜像、Ext4 系统卷与布局描述尚未实现，构建时由 `Tools/Bin/MakePayloads` 生成的占位件顶上，只为把引导链跑通；每个载荷的实际来源都在构建日志里逐项打印。
+顶层 `make` 现在就能产出可启动的 `Out/LikesProgram.iso` 与 `Out/LikesProgram.hdd`。Stub 已由 `Packages/Baleen/Stub` 真实构建；BootCore、EFI 引导镜像、Ext4 系统卷与布局描述尚未实现，构建时由 `Tools/Bin/MakePayloads` 生成的占位件顶上，只为把引导链跑通；每个载荷的实际来源都在构建日志里逐项打印。
 
 ## 快速开始
 
@@ -41,13 +42,14 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 ```sh
 make                # 构建 Out/LikesProgram.iso 与 Out/LikesProgram.hdd
 make iso            # 只构建 ISO（make hdd 只构建磁盘镜像）
-make run            # 启动镜像：默认 hdd + qemu + 直接挂载 + BIOS
+make run            # 启动镜像：默认 hdd + qemu + 直接挂载 + BIOS，不开窗口
+make run-win        # 同上，但开本地窗口（QEMU 用 gtk/sdl，Bochs 用 wx）
 make run iso qemu built uefi    # 例：光盘 + QEMU + UEFI
 Tools/Bin/CheckIpl --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 IPL，不依赖 Test 目录
 make help           # 全部目标与可用变量
 ```
 
-默认不弹图形窗口，串口输出打在终端上；`QEMU_DISPLAY= make run` 开图形窗口，Bochs 的画面默认走 VNC 5900（`BOCHS_DISPLAY=wx` 开本地窗口）。`make run` 的四个位置参数、载荷变量与其余目标见顶层 [Makefile](Makefile) 头部注释与 `make help`。
+`make run` 不开窗口，串口输出打在终端上（QEMU 用 `-display none`，Bochs 画面走 VNC，从 5900 起）；要在本地窗口里看画面就用 `make run-win`，它接受与 `run` 完全相同的四个位置参数。窗口路径要求机器上有图形会话：QEMU 需要装了 `qemu-system-gui` 的 gtk/sdl 后端，Bochs 用 wx 显示库（配置界面同为 wx，否则 Bochs 会退回 rfb）。四个位置参数、载荷变量与其余目标见顶层 [Makefile](Makefile) 头部注释与 `make help`。
 
 ## 文档索引
 
@@ -59,6 +61,7 @@ make help           # 全部目标与可用变量
 | [内核启动与固件边界](Docs/Specs/内核启动与固件边界.md) | 内核入口契约、固件服务的失效边界、第三方引导方式的接入条件 |
 | [内核架构与自举闭包](Docs/Specs/内核架构与自举闭包.md) | 内核组成、`LINK_MODE` 与源码边界、自举闭包与内置必备基线、外置能力归属、镜像体积口径 |
 | [输出通道与Print](Docs/Specs/输出通道与Print.md) | 引导期与内核共用的文本输出：前端与目标契约、各阶段装配、重定向与缺省行为 |
+| [CPU 描述符表](Docs/Specs/CPU描述符表.md) | GDT/IDT 的装载机制、Baleen 与内核的分工、32 位与长模式的字节差异 |
 | [内核模块与驱动清单](Docs/Specs/内核模块与驱动清单.md) | 内核模块、驱动、SDK 与契约层的名称、交付形态和职责 |
 | [模块与驱动装载](Docs/Specs/模块与驱动装载.md) | 模块与驱动的装载流程、执行上下文、归属登记与热替换边界 |
 | [启动介质与文件系统](Docs/Specs/启动介质与文件系统.md) | 启动介质与访问链、ISO 的三种投递方式、必备文件系统、阶段切换与写入启用 |

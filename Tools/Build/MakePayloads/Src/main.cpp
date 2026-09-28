@@ -20,6 +20,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "CoreHandoff.hpp"
+
 namespace fs = std::filesystem;
 using Bytes = std::vector<uint8_t>;
 
@@ -150,6 +152,73 @@ _Stub:
     JMP .Hang
 _Msg: DB "PLACEHOLDER-STUB (BaleenStub not implemented yet)", 13, 10, 0
 )ASM";
+
+    // 占位 Core 的尾部填充长度：跨过 64KiB，让 Stub 的高位装载分两轮走完，而不是只读一个扇区
+    constexpr std::size_t kPlaceholderCoreBytes = 0x11000;
+
+    // 占位 Core：Stub 把它装到 1MiB 并按 32 位保护模式进入，入口时 ESI 指向交权块
+    // 交权块可用就经 Stub 的控制台打印标识；不可用时退回直接写 0xE9 与 COM1，标记仍要出现
+    // @...@ 是待替换的交权块常量，由 FillHandoffConstants 用 CoreHandoff.hpp 的取值填上
+    constexpr std::string_view CoreAssembly = R"ASM(BITS 32
+ORG 0x100000
+_Entry:
+    CMP DWORD [ESI], @HANDOFF_MAGIC@
+    JNE .Direct
+    CMP DWORD [ESI + 4], @HANDOFF_VERSION@
+    JNE .Direct
+    CMP DWORD [ESI + 8], @HANDOFF_BYTES@
+    JNE .Direct
+    MOV EAX, [ESI + @HANDOFF_WRITE@]
+    MOV EBX, _Msg
+    PUSH EBX
+    CALL EAX
+    ADD ESP, 4
+    JMP .Hang
+.Direct:
+    ; 交权块不可用：直接写 0xE9 与 COM1，并写明走的是退路
+    MOV EBX, _MsgDirect
+.Next:
+    MOV AL, [EBX]
+    TEST AL, AL
+    JZ .Hang
+    OUT 0xE9, AL
+.WaitTx:
+    MOV DX, 0x3FD
+    IN AL, DX
+    TEST AL, 0x20
+    JZ .WaitTx
+    MOV AL, [EBX]
+    MOV DX, 0x3F8
+    OUT DX, AL
+    INC EBX
+    JMP .Next
+.Hang:
+    HLT
+    JMP .Hang
+_Msg: DB "PLACEHOLDER-CORE-IMAGE (BaleenCore not implemented yet)", 13, 10, 0
+_MsgDirect: DB "PLACEHOLDER-CORE-IMAGE (handoff unavailable)", 13, 10, 0
+)ASM";
+
+    // 把占位 Core 汇编里的 @...@ 换成 CoreHandoff.hpp 的交权块常量
+    // 偏移只在头文件里写一次：结构体一改，这里与 Stub 侧的断言会同时失败
+    std::string FillHandoffConstants(std::string_view source) {
+        // 按 0x 加 8 位大写十六进制格式化，与汇编里的字面量写法一致
+        const auto hex = [](uint32_t value) {
+            std::string text = "0x";
+            for (int shift = 28; shift >= 0; shift -= 4) text += "0123456789ABCDEF"[(value >> shift) & 0xF];
+            return text;
+        };
+        // 逐个替换所有出现处
+        const auto replaceAll = [](std::string& text, std::string_view token, const std::string& value) {
+            for (std::size_t at = text.find(token); at != std::string::npos; at = text.find(token, at + value.size())) text.replace(at, token.size(), value);
+        };
+        std::string text(source);
+        replaceAll(text, "@HANDOFF_MAGIC@", hex(Baleen::CoreHandoffLayout::kMagic));
+        replaceAll(text, "@HANDOFF_VERSION@", hex(Baleen::CoreHandoffLayout::kVersion));
+        replaceAll(text, "@HANDOFF_BYTES@", hex(Baleen::CoreHandoffLayout::kBytes));
+        replaceAll(text, "@HANDOFF_WRITE@", hex(Baleen::CoreHandoffLayout::kWrite));
+        return text;
+    }
 
     // 占位 EFI 应用：往串口打印 MAKEISO-EFI-BOOT-OK，然后停机
     constexpr std::string_view EfiAssembly = R"ASM(BITS 64
@@ -346,11 +415,12 @@ _RelocSlot: DQ 0
                 placeholder = data.size() == 16 * 1024 * 1024 && Get(data, 1024 + 56, 2) == 0xef53 && std::equal(std::begin(uuid), std::end(uuid), data.begin() + 1024 + 104);
             } else {
                 const std::string_view marker = std::string_view(name) == "BaleenStub.bin" ? "PLACEHOLDER-STUB" :
-                    std::string_view(name) == "BaleenCore.bin" ? "PLACEHOLDER-CORE" :
+                    std::string_view(name) == "BaleenCore.bin" ? "PLACEHOLDER-CORE-IMAGE" :
                     std::string_view(name) == "Efi.img" ? "MAKEISO-EFI-BOOT-OK" : "PLACEHOLDER BaleenLayout.bin";
                 placeholder = bytes.find(marker) != std::string_view::npos;
             }
-            Require(placeholder, "已有文件未标识为占位件，请使用专门输出目录：" + path.string());
+            // 占位件换过格式时旧文件认不出来，这里只说明要删：本工具不覆写已有文件
+            Require(placeholder, "已有文件不是当前格式的占位件（旧格式占位件需先删除），或请使用专门输出目录：" + path.string());
         }
         return missing;
     }
@@ -369,8 +439,11 @@ _RelocSlot: DQ 0
         Staging staging(output);
         const auto& dir = staging.path;
         Assemble(dir, "BaleenStub", StubAssembly);
-        Bytes core(4096, 0);
-        Text(core, 0, "PLACEHOLDER-CORE (BaleenCore not implemented yet)\n");
+        // 占位 Core 是真正的 32 位可执行映像：Stub 会把它装到 1MiB 并跳进去，标识由它自己打印
+        // 尾部补零到 kPlaceholderCoreBytes，顺带让高位装载的分批与拷贝路径在默认构建里就被走到
+        Assemble(dir, "coreapp", FillHandoffConstants(CoreAssembly));
+        Bytes core = Read(dir / "coreapp.bin");
+        core.resize(kPlaceholderCoreBytes, 0);
         Write(dir / "BaleenCore.bin", core);
         Assemble(dir, "efiapp", EfiAssembly);
         const Bytes efi = EfiPe(Read(dir / "efiapp.bin"));

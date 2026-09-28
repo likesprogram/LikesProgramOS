@@ -28,6 +28,7 @@ namespace {
     using makeiso::BootCatalogEntry;
     using makeiso::BootCatalogSpec;
     using makeiso::BootDescriptor;
+    using makeiso::CoreDescriptor;
     using makeiso::FileSize;
     using makeiso::RequireFat32Image;
     using makeiso::Image;
@@ -96,7 +97,7 @@ namespace {
             "  --load-segment N         引导镜像装入段，默认 0x7C0（与一级引导的寻址一致）\n"
             "  --mbr PATH               混合镜像用 MBR（BaleenIPL.bin，512 字节），写到镜像偏移 0\n"
             "  --stub PATH              实模式服务层，原始扇区放置并写入 BootDescriptor\n"
-            "  --core PATH              核心阶段，原始扇区放置（位置进清单）\n"
+            "  --core PATH              核心阶段，原始扇区放置并写 CoreDescriptor（位置进清单）\n"
             "  --efi PATH               El Torito 的 EFI 引导镜像（FAT32，供光盘 UEFI 引导）\n"
             "  --esp PATH               混合镜像的 ESP 分区内容（必须 FAT32）\n"
             "  --system-volume PATH     系统卷镜像（Ext4）：作为连续 ISO 文件存放，并写 Ext4 分区项\n"
@@ -162,6 +163,7 @@ namespace {
         std::optional<Placed> esp;                          // ESP 的 FAT32 镜像
         std::optional<Placed> volume;                       // 系统卷镜像
         std::optional<std::array<uint8_t, 32>> descriptor;  // 已写入的 BootDescriptor
+        std::optional<std::array<uint8_t, 32>> core_descriptor;  // 已写入的 CoreDescriptor
         std::vector<Placed> raw;                            // 原始载荷（--raw）
         std::vector<Placed> files;                          // 附加文件（--file）
         std::string volume_iso_path;                        // 系统卷在 ISO 内的路径
@@ -293,6 +295,15 @@ namespace {
             image.Write(BootDescriptor::kImageOffset, *build.descriptor);
         } else std::cerr << "MakeIso: 未提供 --stub，不写 BootDescriptor，BIOS 路径无法装载 Stub\n";
 
+        // CoreDescriptor 与 BootDescriptor 同扇区：Stub 从同一扇区读到两者，缺它 Stub 不再往下装载
+        if (build.core.has_value()) {
+            CoreDescriptor coreDescriptor;
+            coreDescriptor.core_offset = build.core->offset;
+            coreDescriptor.core_bytes = build.core->bytes;
+            build.core_descriptor = EncodeCoreDescriptor(coreDescriptor, kBlock);
+            image.Write(CoreDescriptor::kImageOffset, *build.core_descriptor);
+        } else std::cerr << "MakeIso: 未提供 --core，不写 CoreDescriptor，Stub 无法装载核心阶段\n";
+
         std::vector<MbrPartition> partitions;
         if (build.esp.has_value()) partitions.push_back(MbrPartition{0xEF, build.esp->offset, build.esp->bytes});
         std::optional<Placed> volumePlaced;
@@ -351,6 +362,12 @@ namespace {
                         ", \"stub_offset\": " + std::to_string(build.stub->offset) +
                         ", \"stub_bytes\": " + std::to_string(build.stub->bytes) + "},\n";
         } else manifest += "  \"descriptor\": null,\n";
+        if (build.core_descriptor.has_value()) {
+            manifest += "  \"core_descriptor\": {\"offset\": " + std::to_string(CoreDescriptor::kImageOffset) +
+                        ", \"bytes\": " + std::to_string(CoreDescriptor::kHeaderBytes) +
+                        ", \"core_offset\": " + std::to_string(build.core->offset) +
+                        ", \"core_bytes\": " + std::to_string(build.core->bytes) + "},\n";
+        } else manifest += "  \"core_descriptor\": null,\n";
         manifest += "  \"stub\": " + JsonPlaced(build.stub.has_value() ? &*build.stub : nullptr) + ",\n";
         manifest += "  \"core\": " + JsonPlaced(build.core.has_value() ? &*build.core : nullptr) + ",\n";
         if (build.efi.has_value()) {
@@ -395,6 +412,7 @@ namespace {
         std::cout << "  引导镜像    LBA " << build.boot_lba << "，偏移 " << static_cast<uint64_t>(build.boot_lba) * kBlock << "，LoadSize " << build.boot_sectors_512 << "（512 字节单位）\n";
         if (build.descriptor.has_value()) std::cout << "  BootDescriptor 偏移 " << BootDescriptor::kImageOffset << "，Stub 偏移 " << build.stub->offset << "，Stub 字节 " << build.stub->bytes << "\n";
         if (build.core.has_value()) std::cout << "  BaleenCore  偏移 " << build.core->offset << "，字节 " << build.core->bytes << "\n";
+        if (build.core_descriptor.has_value()) std::cout << "  CoreDescriptor 偏移 " << CoreDescriptor::kImageOffset << "，Core 偏移 " << build.core->offset << "，Core 字节 " << build.core->bytes << "\n";
         if (build.efi.has_value()) std::cout << "  El Torito EFI 镜像 偏移 " << build.efi->offset << "，字节 " << build.efi->bytes << "\n";
         if (build.esp.has_value()) std::cout << "  ESP（FAT32）偏移 " << build.esp->offset << "，字节 " << build.esp->bytes << "（0xEF 分区）\n";
         if (build.volume.has_value()) std::cout << "  系统卷      ISO 路径 " << build.volume_iso_path << "，偏移 " << build.volume->offset << "，字节 " << build.volume->bytes << "（Ext4 分区）\n";

@@ -1,5 +1,5 @@
 /* Baleen.h
-    Baleen 引导结构的宿主侧编码：BootDescriptor、El Torito 引导目录与 MBR 分区项
+    Baleen 引导结构的宿主侧编码：BootDescriptor、CoreDescriptor、El Torito 引导目录与 MBR 分区项
 */
 
 #pragma once
@@ -27,6 +27,23 @@ namespace makeiso {
     // 把 BootDescriptor 编码为 32 字节的二进制表示
     // sector_bytes 为本地介质扇区大小：HDD 512、CD 2048；仅用于校验，不写入描述符
     std::array<uint8_t, 32> EncodeBootDescriptor(const BootDescriptor& descriptor, uint32_t sector_bytes);
+
+    // CoreDescriptor：Stub 在介质绝对字节偏移 0x340 读的 32 字节说明，与 BootDescriptor 落在同一扇区；
+    // 数值与 Packages/Baleen/Common/Include/Contract.inc、Stub/Src/Core.cpp 保持一致
+    struct CoreDescriptor {
+        static constexpr uint32_t kMagic = 0x52444342;        // 'BCDR'
+        static constexpr uint16_t kVersion = 1;               // 当前开发格式标记
+        static constexpr uint16_t kHeaderBytes = 32;          // 描述符固定总长
+        static constexpr uint64_t kImageOffset = 0x340;       // 镜像内的绝对字节偏移
+        static constexpr uint64_t kMaxCoreBytes = 0x400000;   // Core 文件字节数上限
+
+        uint64_t core_offset = 0;  // 低 32 位字节偏移，至少 0x800 且 2048 对齐（工具统一策略）
+        uint64_t core_bytes = 0;   // 非 0，且偏移加长度不超过 0xFFFFFFFF
+    };
+
+    // 把 CoreDescriptor 编码为 32 字节的二进制表示
+    // sector_bytes 为本地介质扇区大小：HDD 512、CD 2048；仅用于校验，不写入描述符
+    std::array<uint8_t, 32> EncodeCoreDescriptor(const CoreDescriptor& descriptor, uint32_t sector_bytes);
 
     // El Torito 引导目录的一项；sector_count 只有 16 位，表达不了的由调用方给截断值
     struct BootCatalogEntry {

@@ -13,6 +13,10 @@
 #                                         模拟把镜像写进 U 盘后的样子）
 #                                   固件：bios（默认）| uefi（用 OVMF）
 #                                 例：make run iso qemu usb uefi / make run hdd bochs built bios
+#      make run-win [介质] [模拟器] [形态] [固件]
+#                                 与 run 同一套位置参数，区别只在画面：run 不开窗口，
+#                                 run-win 开本地窗口（QEMU 挑可用的 gtk/sdl，Bochs 用 wx）
+#                                 例：make run-win hdd qemu built bios / make run-win iso qemu built uefi
 #      make clean                 删除顶层 Out/；make clean-all 连同子包与工具的产物
 #
 #    载荷来源：各子包的真实产物优先，缺失时用 Tools/Bin/MakePayloads 生成的占位件
@@ -82,8 +86,10 @@ BOCHS_ROM_ADDR ?= 0
 # 虚拟机内存（MiB）
 BOCHS_MEM    ?= 128
 # rfb 无需图形会话；timeout=0 不等待 VNC 客户端，端口由 RFB 自动选择（从 5900 起）
-# BOCHS_DISPLAY=wx 开本地窗口；换显示库时默认不附加 RFB 选项
+# wx 开本地窗口，且要求配置界面也是 wx，否则 Bochs 会退回 rfb；run-win 已把两者一起设好
 BOCHS_DISPLAY ?= rfb
+# 配置界面：textconfig 无需图形会话，wx 是本地窗口路径要求的那一个
+BOCHS_CONFIG_INTERFACE ?= textconfig
 # RFB 类显示库的附加选项
 BOCHS_DISPLAY_OPTIONS ?= $(if $(filter rfb vncsrv,$(BOCHS_DISPLAY)),timeout=0,)
 # make 的 $(if ...) 里逗号是参数分隔符，要输出字面逗号得借道一个变量
@@ -132,8 +138,23 @@ QEMU_CONSOLE := -serial stdio
 # QEMU 只允许一个字符设备占用 stdio：串口占了 stdio，调试口（0xE9）默认写文件
 QEMU_DEBUGCON ?= -debugcon file:$(OUT_DIR)/debugcon.log
 
+# —— run-win：与 run 同一套位置参数，只把无窗口画面换成本地窗口 ——
+# QEMU 的显示后端清单；只有 run-win 且真跑 QEMU 时才问一次，别的目标不白起进程
+QEMU_DISPLAY_HELP := $(if $(filter run-win,$(MAKECMDGOALS)),$(if $(filter qemu,$(RUN_EMU)),$(shell $(QEMU) -display help 2>/dev/null)))
+# QEMU 可用的本地窗口后端：gtk 优先，其次 sdl
+QEMU_WIN_BACKEND ?= $(firstword $(filter gtk sdl,$(QEMU_DISPLAY_HELP)))
+# run-win 下 QEMU 的显示参数；留空说明没有可用的本地窗口后端，由 run-check 拦下
+QEMU_DISPLAY_WIN ?= $(if $(QEMU_WIN_BACKEND),-display $(QEMU_WIN_BACKEND))
+# run-win 下 Bochs 的配置界面与显示库
+BOCHS_CONFIG_INTERFACE_WIN ?= wx
+BOCHS_DISPLAY_WIN ?= wx
+# 本次是不是 run-win
+RUN_WINDOWED := $(filter run-win,$(MAKECMDGOALS))
+# 本次入口的名字，出现在打印与报错里
+RUN_LABEL := $(if $(RUN_WINDOWED),run-win,run)
+
 .DEFAULT_GOAL := all
-.PHONY: all images iso hdd packages tools payloads payload-report run run-check run-uefi clean clean-all help qemu bochs built usb bios uefi
+.PHONY: all images iso hdd packages tools payloads payload-report run run-win run-check run-uefi clean clean-all help qemu bochs built usb bios uefi
 
 # 默认目标
 all: images
@@ -186,32 +207,38 @@ payload-report:
 	@printf '  系统卷    %s%s\n' "$(SYSTEM_VOLUME)" "$(if $(findstring $(PAYLOAD_DIR),$(SYSTEM_VOLUME)),  <- 占位件,)"
 	@printf '  布局描述  %s%s\n' "$(LAYOUT)" "$(if $(findstring $(PAYLOAD_DIR),$(LAYOUT)),  <- 占位件,)"
 
-# —— 启动：make run <hdd|iso> <qemu|bochs> <built|usb> ——
-# 检查 run 的参数组合与外部依赖
+# —— 启动：make run / run-win <hdd|iso> <qemu|bochs> <built|usb> <bios|uefi> ——
+# 检查本次运行的参数组合与外部依赖
 run-check:
-	@if [ -n "$(RUN_EXTRA)" ]; then echo "run: 无法识别的参数 $(RUN_EXTRA)；用法 make run <hdd|iso> <qemu|bochs> <built|usb> <bios|uefi>" >&2; exit 2; fi
-	@if [ "$(RUN_EMU)" = bochs ] && [ "$(RUN_MODE)" = usb ]; then echo "run: Bochs 没有 USB 存储仿真；usb 形态请用 qemu" >&2; exit 2; fi
-	@if [ "$(RUN_EMU)" = bochs ] && [ "$(RUN_FIRMWARE)" = uefi ]; then echo "run: Bochs 侧只支持 BIOS 路径，uefi 固件请用 qemu" >&2; exit 2; fi
+	@if [ -n "$(RUN_EXTRA)" ]; then echo "$(RUN_LABEL): 无法识别的参数 $(RUN_EXTRA)；用法 make $(RUN_LABEL) <hdd|iso> <qemu|bochs> <built|usb> <bios|uefi>" >&2; exit 2; fi
+	@if [ "$(RUN_EMU)" = bochs ] && [ "$(RUN_MODE)" = usb ]; then echo "$(RUN_LABEL): Bochs 没有 USB 存储仿真；usb 形态请用 qemu" >&2; exit 2; fi
+	@if [ "$(RUN_EMU)" = bochs ] && [ "$(RUN_FIRMWARE)" = uefi ]; then echo "$(RUN_LABEL): Bochs 侧只支持 BIOS 路径，uefi 固件请用 qemu" >&2; exit 2; fi
 	@if [ "$(RUN_EMU)" = bochs ]; then \
-	    test -r "$(BOCHS_ROM)" || { echo "run: 缺少 BIOS ROM，可用 BOCHS_ROM= 指定" >&2; exit 1; }; \
-	    test -r "$(BOCHS_VGAROM)" || { echo "run: 缺少 VGA ROM，可用 BOCHS_VGAROM= 指定" >&2; exit 1; }; \
+	    test -r "$(BOCHS_ROM)" || { echo "$(RUN_LABEL): 缺少 BIOS ROM，可用 BOCHS_ROM= 指定" >&2; exit 1; }; \
+	    test -r "$(BOCHS_VGAROM)" || { echo "$(RUN_LABEL): 缺少 VGA ROM，可用 BOCHS_VGAROM= 指定" >&2; exit 1; }; \
+	fi
+	@if [ -n "$(RUN_WINDOWED)" ] && [ "$(RUN_EMU)" = qemu ] && [ -z "$(QEMU_DISPLAY_WIN)" ]; then \
+	    echo "$(RUN_LABEL): $(QEMU) 没有 gtk/sdl 本地窗口后端；装 qemu-system-gui，或用 QEMU_DISPLAY_WIN= 指定别的显示方式" >&2; exit 1; \
+	fi
+	@if [ -n "$(RUN_WINDOWED)" ] && [ -z "$$DISPLAY" ] && [ -z "$$WAYLAND_DISPLAY" ]; then \
+	    echo "$(RUN_LABEL): 当前会话没有图形环境（DISPLAY 与 WAYLAND_DISPLAY 都为空），开不了本地窗口；无窗口改用 make run" >&2; exit 1; \
 	fi
 
 # QEMU 路径：挂镜像并直接启动
 ifeq ($(RUN_EMU),qemu)
 run: run-check $(RUN_TARGET_IMAGE)
-	@echo "run: qemu / $(RUN_IMAGE) / $(RUN_MODE) / $(RUN_FIRMWARE)"
+	@echo "$(RUN_LABEL): qemu / $(RUN_IMAGE) / $(RUN_MODE) / $(RUN_FIRMWARE)$(if $(RUN_WINDOWED), / 显示 $(QEMU_DISPLAY_WIN))"
 ifeq ($(RUN_FIRMWARE),uefi)
-	@test -f "$(OVMF_CODE)" || { echo "run: 缺少 OVMF（$(OVMF_CODE)），可用 OVMF_CODE= 指定" >&2; exit 1; }
+	@test -f "$(OVMF_CODE)" || { echo "$(RUN_LABEL): 缺少 OVMF（$(OVMF_CODE)），可用 OVMF_CODE= 指定" >&2; exit 1; }
 	@mkdir -p $(OUT_DIR) && cp "$(OVMF_VARS)" $(OUT_DIR)/OVMF_VARS.fd
 endif
 	$(QEMU) -machine q35 -m $(QEMU_MEM) $(QEMU_DISPLAY) $(QEMU_FIRMWARE) $(QEMU_MEDIA) $(QEMU_CONSOLE) $(QEMU_DEBUGCON) $(QEMU_EXTRA)
 else
 # Bochs 路径：按本次介质生成 bochsrc 再启动
 run: run-check $(RUN_TARGET_IMAGE) $(OUT_DIR)/bochsrc.$(RUN_IMAGE)
-	@echo "run: bochs / $(RUN_IMAGE) / $(RUN_MODE) / bios"
-	@echo "run: 串口日志 $(OUT_DIR)/bochs-$(RUN_IMAGE).serial.log；画面走 $(BOCHS_DISPLAY)$(if $(BOCHS_DISPLAY_OPTIONS),（$(BOCHS_DISPLAY_OPTIONS)）)"
-	@echo "run: BIOS ROM $(BOCHS_ROM)；VGA ROM $(BOCHS_VGAROM)"
+	@echo "$(RUN_LABEL): bochs / $(RUN_IMAGE) / $(RUN_MODE) / bios"
+	@echo "$(RUN_LABEL): 串口日志 $(OUT_DIR)/bochs-$(RUN_IMAGE).serial.log；画面走 $(BOCHS_DISPLAY)$(if $(BOCHS_DISPLAY_OPTIONS),（$(BOCHS_DISPLAY_OPTIONS)）)"
+	@echo "$(RUN_LABEL): BIOS ROM $(BOCHS_ROM)；VGA ROM $(BOCHS_VGAROM)"
 	@printf 'continue\n' > "$(OUT_DIR)/bochs-continue.rc"
 	@if $(BOCHS) --help 2>&1 | grep -q -- '-rc '; then \
 	    $(BOCHS) -q -f "$(OUT_DIR)/bochsrc.$(RUN_IMAGE)" -rc "$(OUT_DIR)/bochs-continue.rc"; \
@@ -219,6 +246,13 @@ run: run-check $(RUN_TARGET_IMAGE) $(OUT_DIR)/bochsrc.$(RUN_IMAGE)
 	    $(BOCHS) -q -f "$(OUT_DIR)/bochsrc.$(RUN_IMAGE)"; \
 	fi
 endif
+
+# run-win：位置参数与 run 完全相同，只把画面换成本地窗口
+# target-specific 变量沿前提链生效：run 的启动命令与 bochsrc.* 的生成都取窗口值
+run-win: QEMU_DISPLAY := $(QEMU_DISPLAY_WIN)
+run-win: BOCHS_DISPLAY := $(BOCHS_DISPLAY_WIN)
+run-win: BOCHS_CONFIG_INTERFACE := $(BOCHS_CONFIG_INTERFACE_WIN)
+run-win: run
 
 # 便捷别名：UEFI 光盘启动
 run-uefi:
@@ -235,7 +269,7 @@ $(OUT_DIR)/bochsrc.iso: Makefile FORCE
 	    'romimage: file="$(BOCHS_ROM)", address=$(BOCHS_ROM_ADDR)' \
 	    'vgaromimage: file="$(BOCHS_VGAROM)"' \
 	    'megs: $(BOCHS_MEM)' \
-	    'config_interface: textconfig' \
+	    'config_interface: $(BOCHS_CONFIG_INTERFACE)' \
 	    'sound: driver=dummy' \
 	    'speaker: enabled=0' \
 	    'ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14' \
@@ -254,7 +288,7 @@ $(OUT_DIR)/bochsrc.hdd: Makefile FORCE
 	    'romimage: file="$(BOCHS_ROM)", address=$(BOCHS_ROM_ADDR)' \
 	    'vgaromimage: file="$(BOCHS_VGAROM)"' \
 	    'megs: $(BOCHS_MEM)' \
-	    'config_interface: textconfig' \
+	    'config_interface: $(BOCHS_CONFIG_INTERFACE)' \
 	    'sound: driver=dummy' \
 	    'speaker: enabled=0' \
 	    'ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14' \
@@ -286,8 +320,13 @@ help:
 	    '  make run [介质] [模拟器] [形态] [固件]' \
 	    '                         介质 hdd|iso（默认 hdd）；模拟器 qemu|bochs（默认 qemu，Bochs 只支持 BIOS）；' \
 	    '                         形态 built|usb（默认 built）；固件 bios|uefi（默认 bios，uefi 用 OVMF）' \
+	    '                         不开窗口：QEMU 用 -display none，Bochs 用 rfb（VNC 从 5900 起）' \
 	    '                         例：make run iso qemu usb uefi / make run hdd bochs built bios' \
-	    '                         QEMU_DISPLAY= 开图形窗口；Bochs 默认 rfb（VNC 从 5900 起），BOCHS_DISPLAY=wx 开本地窗口' \
+	    '  make run-win [介质] [模拟器] [形态] [固件]' \
+	    '                         与 run 同一套位置参数，差别只在开本地窗口：' \
+	    '                         QEMU 挑可用的 gtk/sdl，Bochs 用 wx（配置界面同为 wx），要求有图形会话' \
+	    '                         例：make run-win hdd qemu built bios' \
+	    '                         显示方式可覆盖：QEMU_DISPLAY_WIN= / BOCHS_DISPLAY_WIN=' \
 	    '  make run-uefi          = make run iso qemu built uefi' \
 	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与工具' \
 	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME / LAYOUT（默认取真实产物，缺失时用占位件）'

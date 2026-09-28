@@ -4,6 +4,7 @@
     布局（字节偏移）：
         0x000        MBR：BaleenIPL.bin 的引导代码 + 由本工具写实的分区表
         0x300        BootDescriptor（32 字节；一级引导从 512 字节 LBA 1 的偏移 0x100 读它）
+        0x340        CoreDescriptor（32 字节，与上一个同扇区；Stub 读它定位核心阶段）
         0x400 起     原始载荷：Stub、Core 与 --raw 条目，各自 2048 对齐
         1 MiB（原始载荷越过 1 MiB 时顺延）  0 号分区：ESP 的 FAT 镜像
         ESP 之后     1 号分区：Ext4 系统卷镜像
@@ -28,6 +29,7 @@
 namespace {
     using makeiso::AlignUp;
     using makeiso::BootDescriptor;
+    using makeiso::CoreDescriptor;
     using makeiso::FileSize;
     using makeiso::RequireFat32Image;
     using makeiso::Image;
@@ -78,7 +80,7 @@ namespace {
             "载荷：\n"
             "  --mbr PATH                磁盘一级引导（BaleenIPL.bin，512 字节、带 0xAA55）\n"
             "  --stub PATH               实模式服务层：原始扇区放置并写 BootDescriptor\n"
-            "  --core PATH               核心阶段：原始扇区放置（位置进清单）\n"
+            "  --core PATH               核心阶段：原始扇区放置并写 CoreDescriptor（位置进清单）\n"
             "  --esp PATH                ESP 的 FAT32 镜像（含 \\EFI\\BOOT\\BOOTX64.EFI），0 号分区\n"
             "  --system-volume PATH      Ext4 系统卷镜像，1 号分区\n"
             "  --raw 宿主路径[@偏移]      原始载荷，可重复；偏移须 2048 对齐，省略则自动分配\n"
@@ -225,6 +227,16 @@ int main(int argc, char** argv) {
             image.Write(BootDescriptor::kImageOffset, *descriptor);
         } else std::cerr << "MakeHdd: 未提供 --stub，不写 BootDescriptor，BIOS 路径无法装载 Stub\n";
 
+        // CoreDescriptor 与 BootDescriptor 同扇区：Stub 从同一扇区读到两者，缺它 Stub 不再往下装载
+        std::optional<std::array<uint8_t, 32>> core_descriptor;
+        if (core.has_value()) {
+            CoreDescriptor coreDescriptor;
+            coreDescriptor.core_offset = core->offset;
+            coreDescriptor.core_bytes = core->bytes;
+            core_descriptor = makeiso::EncodeCoreDescriptor(coreDescriptor, kMbrBytes);
+            image.Write(CoreDescriptor::kImageOffset, *core_descriptor);
+        } else std::cerr << "MakeHdd: 未提供 --core，不写 CoreDescriptor，Stub 无法装载核心阶段\n";
+
         if (stub.has_value()) image.CopyFile(stub->offset, options.stub);
         if (core.has_value()) image.CopyFile(core->offset, options.core);
         for (const Placed& placed : raw) image.CopyFile(placed.offset, placed.name);
@@ -244,6 +256,12 @@ int main(int argc, char** argv) {
                         ", \"stub_offset\": " + std::to_string(stub->offset) +
                         ", \"stub_bytes\": " + std::to_string(stub->bytes) + "},\n";
         } else manifest += "  \"descriptor\": null,\n";
+        if (core_descriptor.has_value()) {
+            manifest += "  \"core_descriptor\": {\"offset\": " + std::to_string(CoreDescriptor::kImageOffset) +
+                        ", \"bytes\": " + std::to_string(CoreDescriptor::kHeaderBytes) +
+                        ", \"core_offset\": " + std::to_string(core->offset) +
+                        ", \"core_bytes\": " + std::to_string(core->bytes) + "},\n";
+        } else manifest += "  \"core_descriptor\": null,\n";
         manifest += "  \"stub\": " + JsonPlaced(stub.has_value() ? &*stub : nullptr) + ",\n";
         manifest += "  \"core\": " + JsonPlaced(core.has_value() ? &*core : nullptr) + ",\n";
         // 可选的载荷统一转成清单里的 JSON 片段
@@ -278,6 +296,7 @@ int main(int argc, char** argv) {
 
         std::cout << "MakeHdd：已生成 " << options.out << "（" << total << " 字节，" << total / kMbrBytes << " 个 512 字节扇区）\n";
         if (descriptor.has_value()) std::cout << "  BootDescriptor 偏移 " << BootDescriptor::kImageOffset << "，Stub 偏移 " << stub->offset << "，Stub 字节 " << stub->bytes << "\n";
+        if (core_descriptor.has_value()) std::cout << "  CoreDescriptor 偏移 " << CoreDescriptor::kImageOffset << "，Core 偏移 " << core->offset << "，Core 字节 " << core->bytes << "\n";
         if (core.has_value()) std::cout << "  BaleenCore  偏移 " << core->offset << "，字节 " << core->bytes << "\n";
         if (partitions.esp.has_value()) std::cout << "  0 号分区    ESP（0xEF）偏移 " << partitions.esp->offset << "，字节 " << partitions.esp->bytes << "\n";
         if (partitions.system_volume.has_value()) std::cout << "  1 号分区    Ext4（0x83）偏移 " << partitions.system_volume->offset << "，字节 " << partitions.system_volume->bytes << "\n";

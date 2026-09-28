@@ -7,8 +7,8 @@ OBJ_DIR  ?= Obj
 BIN_DIR  ?= ../../Bin
 # C++ 编译器
 CXX      ?= g++
-# 预处理选项
-CPPFLAGS ?=
+# 预处理选项：占位 Core 的汇编常量取自 Baleen 的交权块头，避免偏移在本工具里重写一遍
+CPPFLAGS ?= -I../../../Packages/Baleen/Common/Include -I../../../Packages/Common/Include
 # 编译选项
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic
 # 链接选项

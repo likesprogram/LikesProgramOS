@@ -37,7 +37,7 @@ MakeIso --out Baleen.iso \
 | `--load-segment N` | 引导镜像装入段，默认 `0x7C0`，与一级引导的寻址一致 |
 | `--mbr PATH` | 混合镜像的 MBR（`BaleenIPL.bin`，512 字节且带 `0xAA55`），写到镜像偏移 0 |
 | `--stub PATH` | 实模式服务层，原始扇区放置，并把偏移/长度写进 BootDescriptor |
-| `--core PATH` | 核心阶段，原始扇区放置，位置进清单 |
+| `--core PATH` | 核心阶段，原始扇区放置并写 CoreDescriptor，位置进清单 |
 | `--efi PATH` | El Torito 平台 0xEF 的引导镜像（供光盘 UEFI 引导）：**必须是 FAT32** |
 | `--esp PATH` | 混合镜像的 ESP 分区内容：**必须是 FAT32**，落到 0xEF 分区项 |
 | `--system-volume PATH` | 构建期装配好的 Ext4 系统卷镜像，作为连续 ISO 文件存放，并写 Ext4 分区项 |
@@ -56,6 +56,7 @@ MakeIso --out Baleen.iso \
 | --- | --- |
 | 偏移 0（LBA 0） | 混合镜像：MBR（磁盘一级引导 + 分区表）；纯光盘：CD 引导镜像 |
 | 绝对偏移 `0x300` | BootDescriptor（32 字节） |
+| 绝对偏移 `0x340` | CoreDescriptor（32 字节，与上一个同扇区；Stub 读同一处定位核心阶段） |
 | LBA 1 | 混合镜像的 CD 引导镜像（`BaleenIPLCd.bin`，2048 字节） |
 | LBA 16/17/18 | 主卷描述符 / El Torito 引导记录 / 卷描述符集结束符 |
 | LBA 19 | El Torito 引导目录 |
@@ -79,6 +80,8 @@ MakeIso --out Baleen.iso \
 | 16 | 8 | Stub 字节数 | 非 0，且不超过 `0x8000`（16 个 2048 B 扇区）；纯光盘和混合镜像均受此限制 |
 | 24 | 8 | 保留 | 全 0 |
 
+**CoreDescriptor**（介质绝对偏移 `0x340`，小端，与 `Packages/Baleen/Common/Include/Contract.inc`、`Stub/Src/LoadCore.cpp` 的常量一致）：magic `0x52444342`（`BCDR`）、version `1`、header `32`、8 字节 Core 偏移、8 字节 Core 字节数、8 字节保留；偏移至少 `0x800` 且 2048 对齐，偏移加长度不得产生 32 位进位，长度非 0 且不超过 `0x400000`。写它的前提是提供 `--core`；缺 Core 时只提示，不写描述符。
+
 **El Torito**：校验项（16 字之和为 0，含 `0x55AA`）；默认项平台 BIOS、无仿真、装入段 `0x7C0`、LoadSize = `ceil(引导镜像/512)`；给 `--efi` 时追加平台 0xEF 段首部与 EFI 项，指向该小 FAT 镜像。
 
 **两份 FAT32 镜像、一个规范缺口。** `--esp`（0xEF 分区内容）与 `--efi`（El Torito EFI 项）都写死为 FAT32：UEFI 固件读它们，内核必备的 FAT 实现也是 FAT32。但 El Torito 的扇区计数只有 16 位，上限 65535 × 512 = 33,553,920 字节；而 FAT32 卷的下限（65525 个簇 × 512 字节）约 66,500 个扇区，**该字段按规范表达不了任何 FAT32 镜像**。工具的处理：按上限 65535 写入并在标准错误上提示，清单里同时给出 `sector_count_exact` 与 `sector_count_clamped`。
@@ -97,7 +100,7 @@ MakeIso --out Baleen.iso \
 - `boot_image`：LBA、偏移、长度、LoadSize（512 字节单位）、装入段
 - `boot_catalog`：引导目录的位置
 - `descriptor`：BootDescriptor 的偏移与 Stub 偏移/长度
-- `stub` / `core` / `efi_image` / `raw[]`：原始载荷的偏移与长度
+- `core_descriptor`（含 Core 偏移与长度）、`stub` / `core` / `efi_image` / `raw[]`：原始载荷的偏移与长度
 - `system_volume`：ISO 路径、偏移、长度
 - `files[]`：每个 ISO 文件的名字、偏移、长度
 
@@ -107,7 +110,7 @@ MakeIso --out Baleen.iso \
 
 ## 七、边界与待定项
 
-- **不生成** `BootDescriptor` 之外的引导期结构：Stub 装载 Core 所需元数据与 `BaleenLayout.bin` 的字段、落点仍待后续阶段设计。工具把 Core 等载荷的偏移写进清单，等规格确定后由生成器落盘，或直接用 `--raw` 指定位置；IPL 不解析这些内容。
+- **不生成** `BootDescriptor` 与 `CoreDescriptor` 之外的引导期结构：`BaleenLayout.bin` 的字段、落点仍待后续阶段设计。工具把 Core 等载荷的偏移写进清单，等规格确定后由生成器落盘，或直接用 `--raw` 指定位置；IPL 不解析这些内容。
 - **不装配系统卷**：Ext4 系统卷镜像（内核槽位、发行内容）与磁盘形态镜像都属「布局计算与镜像组装」的产出，尚未加入；本工具只消费调用方给的镜像并记录位置。
 - **不做** ISO 之外的分发打包、签名与信任锚、Joliet/UDF 卷、压缩与引导镜像校验。
 - **不写** 任何持久写回：镜像是一次性生成的文件，写入 U 盘由外部工具（如 `dd`）负责。

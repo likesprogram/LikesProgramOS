@@ -16,13 +16,13 @@ Baleen 是 LikesProgramOS 的自家引导器子项目，与系统本体 `LikesPr
 | 阶段 | 职责 | 当前状态 |
 | --- | --- | --- |
 | `Ipl` | 校验 `BootDescriptor` 结构、文件偏移与长度，装入 Stub，按约定交权；失败诊断并停机 | 已有 HDD / CD 分路源码和构建；实际验证结果单独记录 |
-| `Stub` | A20、内存图、实模式磁盘会话、自身内存初始化、Core 装载 | 尚未实现；只有约定与结构草案，不生成真实 `BaleenStub.bin` |
-| `Core` | BIOS 侧的 `BaleenLayout.bin`、Ext4、内核集摘要 / 签名、选版和持久状态、内核交接 | 尚未实现；定位、装载格式、内存位置和 Stub 交权细节仍待设计 |
+| `Stub` | A20、内存图、实模式磁盘会话、自身内存初始化、Core 装载 | 已实现并构建为真实 `BaleenStub.bin`：A20、运行期 GDT/IDT、E820 内存图、扇区探测与读盘，以及按 Core 契约的定位、高位装载与交权；自身完整性头与摘要自检仍是草案 |
+| `Core` | BIOS 侧的 `BaleenLayout.bin`、Ext4、内核集摘要 / 签名、选版和持久状态、内核交接 | 尚未实现；Stub → Core 的定位、装载与交权契约已定稿（见 Stub 说明第二节），Core 侧本身还没有实现 |
 | `Uefi` | UEFI 侧对应的布局、卷访问、内核集验证、选版与交接 | 尚未实现；该路径绕过 BIOS IPL 与实模式 Stub |
 
-IPL 不解析 `BaleenLayout.bin`、Stub 头或 Ext4，不负责 Stub BSS、A20、BuildId、摘要、签名和 Core 装载。Stub/Core 未实现或占位载荷停机，不构成 IPL 缺陷；IPL 仍须独立证明满足自己的契约。HDD / CD 入口分别包含 `Hdd.inc` / `Cd.inc`，由其组织 `Init`、`Body`、`Error`、`Read`，并通过 `Init` 引入 `Const`。
+IPL 不解析 `BaleenLayout.bin`、Stub 头、`CoreDescriptor` 或 Ext4，不负责 Stub BSS、A20、BuildId、摘要、签名和 Core 装载。Stub/Core 未实现或占位载荷停机，不构成 IPL 缺陷；IPL 仍须独立证明满足自己的契约。HDD / CD 入口分别包含 `Hdd.inc` / `Cd.inc`，由其组织 `Init`、`Body`、`Error`、`Read`，并通过 `Init` 引入 `Const`。
 
-`BootDescriptor` 与 Stub 头均未发布。当前描述符 `Version=1` 仅为开发格式标记；首发前可按需要直接修订，首发后再建立版本管理规则。本次 Stub 头草案不改变 IPL 格式或入口，不要求占位载荷采用。Stub 执行后的自校验不能构成执行前认证或信任根，其中 BuildId 属于 Baleen 构建，不是内核集 BuildId。
+`BootDescriptor`、`CoreDescriptor`、交权块与 Stub 头均未发布。当前描述符 `Version=1` 仅为开发格式标记；首发前可按需要直接修订，首发后再建立版本管理规则。本次 Stub 头草案不改变 IPL 格式或入口，不要求占位载荷采用。Stub 执行后的自校验不能构成执行前认证或信任根，其中 BuildId 属于 Baleen 构建，不是内核集 BuildId。
 
 构建中同名占位件只服务介质组装与入口验证，不能代表正式 Stub/Core/UEFI 已完成；不得在 `Stub/Out/Bin/` 生成空壳或停机件，让“真实产物优先”误选它。正常构建只依赖正式 C++、ASM、Makefile、sh 源码与工具，不依赖不上传的 `Test`；尺寸和格式可由 NASM 汇编期断言及正式 C++ 工具检查，回归工具手工执行，不作为默认构建运行依赖。
 
