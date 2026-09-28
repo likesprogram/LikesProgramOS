@@ -1,5 +1,6 @@
-// main.cpp
-// MakePayloads：生成带 PLACEHOLDER 标识的开发占位载荷，不实现 Baleen Stub/Core/UEFI 加载器或系统卷装配
+/* main.cpp
+    MakePayloads：生成带 PLACEHOLDER 标识的开发占位载荷，不实现 Baleen Stub/Core/UEFI 加载器或系统卷装配
+*/
 
 #include <algorithm>
 #include <cerrno>
@@ -383,9 +384,7 @@ _RelocSlot: DQ 0
         Write(dir / "BaleenLayout.bin", layout);
         // 只补缺项。link 原子地拒绝已存在的目标，包括并行构建刚发布的文件；
         // staging 位于同一文件系统，不会出现 rename 覆盖用户修改的系统卷
-        for (const auto& name : missing) {
-            if (link((dir / name).c_str(), (output / name).c_str()) != 0) throw std::runtime_error("发布失败（不覆盖已存在目标）：" + (output / name).string() + ": " + std::strerror(errno));
-        }
+        for (const auto& name : missing) if (link((dir / name).c_str(), (output / name).c_str()) != 0) throw std::runtime_error("发布失败（不覆盖已存在目标）：" + (output / name).string() + ": " + std::strerror(errno));
         std::cout << "MakePayloads: 已补齐 " << missing.size() << " 个占位件到 " << output
                   << "（已有文件保持原样）\n"
                   << "MakePayloads: 仅验证引导链，不包含真实 Stub/Core/UEFI 加载器或内核。\n";

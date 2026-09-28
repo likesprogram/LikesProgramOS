@@ -1,5 +1,5 @@
 # Makefile
-# CheckIpl —— IPL 静态与启动回归校验工具（C++20）；默认仅编译，运行验证需显式调用 Tools/Bin/CheckIpl
+#    CheckIpl —— IPL 静态与启动回归校验工具（C++20）；默认仅编译，运行验证需显式调用 Tools/Bin/CheckIpl
 
 # 中间对象目录
 OBJ_DIR  ?= Obj

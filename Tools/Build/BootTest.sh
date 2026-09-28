@@ -1,15 +1,15 @@
 #!/bin/sh
 # BootTest.sh
-# 无人值守启动测试：QEMU 的 ISO/HDD × BIOS/UEFI × 内置/USB 共八例，另跑 Bochs HDD
+#    无人值守启动测试：QEMU 的 ISO/HDD × BIOS/UEFI × 内置/USB 共八例，另跑 Bochs HDD
 #
-# BIOS 期望 PLACEHOLDER-STUB，UEFI 期望 MAKEISO-EFI-BOOT-OK
-# 用法：BootTest.sh <iso> <hdd> [OVMF_CODE] [OVMF_VARS]
-# BOOT_TEST_TIMEOUT=40 是每例上限，看到标记立即结束
-# BOOT_TEST_STRICT=1 将工具/固件缺失视为失败（exit 2）；真实失败始终 exit 1
-# 失败自动保留日志；BOOT_TEST_KEEP_LOGS=1 也保留成功日志
-# 可用 BOCHS / BOCHS_SHARE / BOCHS_ROM / BOCHS_VGAROM / BOCHS_ROM_ADDR /
-# BOCHS_MEM / BOCHS_DISPLAY / BOCHS_DISPLAY_OPTIONS 覆盖；BOCHS_BIOS 是旧 ROM 别名
-# BOCHS_CFG 可指定基础配置，测试会覆盖磁盘、固件、显示和日志以保证隔离
+#    BIOS 期望 PLACEHOLDER-STUB，UEFI 期望 MAKEISO-EFI-BOOT-OK
+#    用法：BootTest.sh <iso> <hdd> [OVMF_CODE] [OVMF_VARS]
+#    BOOT_TEST_TIMEOUT=40 是每例上限，看到标记立即结束
+#    BOOT_TEST_STRICT=1 将工具/固件缺失视为失败（exit 2）；真实失败始终 exit 1
+#    失败自动保留日志；BOOT_TEST_KEEP_LOGS=1 也保留成功日志
+#    可用 BOCHS / BOCHS_SHARE / BOCHS_ROM / BOCHS_VGAROM / BOCHS_ROM_ADDR /
+#    BOCHS_MEM / BOCHS_DISPLAY / BOCHS_DISPLAY_OPTIONS 覆盖；BOCHS_BIOS 是旧 ROM 别名
+#    BOCHS_CFG 可指定基础配置，测试会覆盖磁盘、固件、显示和日志以保证隔离
 set -eu
 
 iso=${1:?用法: BootTest.sh <iso> <hdd> [OVMF_CODE] [OVMF_VARS]}

@@ -1,5 +1,6 @@
-// main.cpp
-// MakeIso：把一级引导、实模式服务层、核心阶段、EFI 引导镜像与系统卷组装成可引导的光盘镜像，并同时满足写入 U 盘后的磁盘引导记录要求（混合镜像）
+/* main.cpp
+    MakeIso：把一级引导、实模式服务层、核心阶段、EFI 引导镜像与系统卷组装成可引导的光盘镜像，并同时满足写入 U 盘后的磁盘引导记录要求（混合镜像）
+*/
 
 #include "Baleen.h"
 #include "Fat.h"
@@ -43,8 +44,8 @@ namespace {
     using makeiso::ReadFile;
     using makeiso::Reservations;
 
-    constexpr uint64_t kBlock = 2048;
-    constexpr uint64_t kSystemAreaBytes = 16 * kBlock;
+    constexpr uint64_t kBlock = 2048;                    // ISO9660 逻辑块大小
+    constexpr uint64_t kSystemAreaBytes = 16 * kBlock;   // 系统区 16 个逻辑块
     // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB
     constexpr uint64_t kEspPreferredOffset = 1u << 20;
 
@@ -269,7 +270,7 @@ namespace {
         }
 
         std::map<std::string, IsoExtent> extents;
-        for (const IsoFile& file : iso.files()) {
+        for (const IsoFile& file : iso.Files()) {
             cursor = AlignUp(cursor, kBlock);
             const Placed placed{"ISO 文件 " + file.iso_path, cursor, file.size};
             if (file.size > 0) reserved.Reserve(placed.name, placed.offset, AlignUp(file.size, kBlock));
@@ -278,7 +279,7 @@ namespace {
             build.files.push_back(placed);
         }
         iso.SetFileExtents(extents);
-        const uint64_t total = iso.total_bytes();
+        const uint64_t total = iso.TotalBytes();
 
         // 引导镜像：混合镜像里位于 LBA 1，纯光盘镜像里位于 LBA 0（描述符都落在绝对偏移 0x300）
         if (image.CopyFile(static_cast<uint64_t>(build.boot_lba) * kBlock, options.boot_image) != FileSize(options.boot_image))

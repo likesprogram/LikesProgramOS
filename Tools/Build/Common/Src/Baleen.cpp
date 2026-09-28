@@ -1,5 +1,6 @@
-// Baleen.cpp
-// Baleen 引导结构的宿主侧编码实现：描述符、El Torito 引导目录与 MBR 分区项
+/* Baleen.cpp
+    Baleen 引导结构的宿主侧编码实现：描述符、El Torito 引导目录与 MBR 分区项
+*/
 
 #include "Baleen.h"
 

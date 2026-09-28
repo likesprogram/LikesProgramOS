@@ -1,5 +1,6 @@
-// Image.h
-// 输出镜像的按绝对字节偏移读写接口
+/* Image.h
+    输出镜像的按绝对字节偏移读写接口
+*/
 
 #pragma once
 #include <cstdint>
@@ -16,7 +17,7 @@ namespace makeiso {
         explicit Image(const std::string& path);
 
         // 读取当前镜像长度（字节）
-        uint64_t size() const { return m_size; }
+        uint64_t Size() const { return m_size; }
 
         // 把镜像长度至少扩到 bytes，新增部分写零
         void ExtendTo(uint64_t bytes);

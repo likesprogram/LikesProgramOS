@@ -1,5 +1,6 @@
-// Fat.cpp
-// FAT 引导扇区类型判定与 FAT32 校验实现
+/* Fat.cpp
+    FAT 引导扇区类型判定与 FAT32 校验实现
+*/
 
 #include "Fat.h"
 #include "HostIo.h"

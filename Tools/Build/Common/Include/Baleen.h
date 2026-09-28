@@ -1,5 +1,6 @@
-// Baleen.h
-// Baleen 引导结构的宿主侧编码：BootDescriptor、El Torito 引导目录与 MBR 分区项
+/* Baleen.h
+    Baleen 引导结构的宿主侧编码：BootDescriptor、El Torito 引导目录与 MBR 分区项
+*/
 
 #pragma once
 #include <array>

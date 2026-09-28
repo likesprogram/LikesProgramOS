@@ -1,5 +1,6 @@
-// Fat.h
-// FAT 引导扇区类型判定与 FAT32 校验接口
+/* Fat.h
+    FAT 引导扇区类型判定与 FAT32 校验接口
+*/
 
 #pragma once
 #include <cstdint>

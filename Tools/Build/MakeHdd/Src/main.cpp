@@ -1,13 +1,14 @@
-// main.cpp
-// MakeHdd：把磁盘一级引导（MBR）、实模式服务层、核心阶段、ESP 的 FAT 镜像与 Ext4 系统卷组装成可写入硬盘 / U 盘的磁盘镜像
-//
-// 布局（字节偏移）：
-//   0x000        MBR：BaleenIPL.bin 的引导代码 + 由本工具写实的分区表
-//   0x300        BootDescriptor（32 字节；一级引导从 512 字节 LBA 1 的偏移 0x100 读它）
-//   0x400 起     原始载荷：Stub、Core 与 --raw 条目，各自 2048 对齐
-//   1 MiB（原始载荷越过 1 MiB 时顺延）  0 号分区：ESP 的 FAT 镜像
-//   ESP 之后     1 号分区：Ext4 系统卷镜像
-//   总长向上对齐到 --pad-to（默认 1 MiB）
+/* main.cpp
+    MakeHdd：把磁盘一级引导（MBR）、实模式服务层、核心阶段、ESP 的 FAT 镜像与 Ext4 系统卷组装成可写入硬盘 / U 盘的磁盘镜像
+
+    布局（字节偏移）：
+        0x000        MBR：BaleenIPL.bin 的引导代码 + 由本工具写实的分区表
+        0x300        BootDescriptor（32 字节；一级引导从 512 字节 LBA 1 的偏移 0x100 读它）
+        0x400 起     原始载荷：Stub、Core 与 --raw 条目，各自 2048 对齐
+        1 MiB（原始载荷越过 1 MiB 时顺延）  0 号分区：ESP 的 FAT 镜像
+        ESP 之后     1 号分区：Ext4 系统卷镜像
+        总长向上对齐到 --pad-to（默认 1 MiB）
+*/
 
 #include "Baleen.h"
 #include "Fat.h"
@@ -38,12 +39,13 @@ namespace {
     using makeiso::ReadFile;
     using makeiso::Reservations;
 
-    constexpr uint64_t kMbrBytes = 512;     // 分区项从 446 起，510 起是 0xAA55
-    constexpr uint64_t kEntryBytes = 16 * 4;
-    constexpr uint64_t kAlign = 2048;       // 载荷与分区起点一律 2048 对齐
-    constexpr uint64_t kRawStart = 0x400;   // BootDescriptor 之后
+    constexpr uint64_t kMbrBytes = 512;        // 分区项从 446 起，510 起是 0xAA55
+    constexpr uint64_t kEntryBytes = 16 * 4;   // 分区表 4 项，每项 16 字节
+    constexpr uint64_t kAlign = 2048;          // 载荷与分区起点一律 2048 对齐
+    constexpr uint64_t kRawStart = 0x400;      // BootDescriptor 之后
     // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB
     constexpr uint64_t kEspPreferredOffset = 1u << 20;
+    // 镜像总长默认对齐粒度
     constexpr uint64_t kDefaultPadTo = 1u << 20;
 
     // 参数

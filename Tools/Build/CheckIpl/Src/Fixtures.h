@@ -1,5 +1,6 @@
-// Fixtures.h
-// CheckIpl 用的两段 NASM 夹具源码：交接校验载荷与 BIOS 故障注入引导器
+/* Fixtures.h
+    CheckIpl 用的两段 NASM 夹具源码：交接校验载荷与 BIOS 故障注入引导器
+*/
 
 #pragma once
 #include <string_view>

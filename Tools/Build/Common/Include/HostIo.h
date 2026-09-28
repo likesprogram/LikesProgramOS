@@ -1,5 +1,6 @@
-// HostIo.h
-// 宿主文件读写、布局记账与构建清单接口
+/* HostIo.h
+    宿主文件读写、布局记账与构建清单接口
+*/
 
 #pragma once
 #include <cstdint>

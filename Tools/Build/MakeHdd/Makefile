@@ -1,5 +1,5 @@
 # Makefile
-# MakeHdd —— 宿主侧磁盘镜像组装器（C++20）
+#    MakeHdd —— 宿主侧磁盘镜像组装器（C++20）
 
 # 中间对象目录
 OBJ_DIR    ?= Obj

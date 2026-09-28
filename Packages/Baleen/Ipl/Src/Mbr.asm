@@ -1,5 +1,5 @@
 ; Mbr.asm
-; 硬盘与 U 盘（USB-HDD）共用的入口：BIOS 装入 0x7C00，产物必须恰好 512 字节
+;    硬盘与 U 盘（USB-HDD）共用的入口：BIOS 装入 0x7C00，产物必须恰好 512 字节
 
 BITS 16                         ; 十六位模式
 ORG 0

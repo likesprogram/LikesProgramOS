@@ -1,5 +1,6 @@
-// Iso9660.cpp
-// ISO9660 写入器的实现：卷描述符、路径表、目录记录与 Rock Ridge/El Torito 结构
+/* Iso9660.cpp
+    ISO9660 写入器的实现：卷描述符、路径表、目录记录与 Rock Ridge/El Torito 结构
+*/
 
 #include "Iso9660.h"
 

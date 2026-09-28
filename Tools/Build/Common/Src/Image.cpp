@@ -1,5 +1,6 @@
-// Image.cpp
-// 输出镜像的按绝对字节偏移读写实现
+/* Image.cpp
+    输出镜像的按绝对字节偏移读写实现
+*/
 
 #include "Image.h"
 

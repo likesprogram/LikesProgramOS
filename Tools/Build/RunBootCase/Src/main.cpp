@@ -1,5 +1,6 @@
-// main.cpp
-// RunBootCase：启动模拟器并监测标记，成功即停止，区分自行退出/超时，回收整个进程组
+/* main.cpp
+    RunBootCase：启动模拟器并监测标记，成功即停止，区分自行退出/超时，回收整个进程组
+*/
 
 #include <algorithm>
 #include <cerrno>

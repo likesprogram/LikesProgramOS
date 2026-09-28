@@ -1,5 +1,5 @@
 # Makefile
-# Baleen 一级引导：512 字节 MBR 与 2048 字节 El Torito 镜像
+#    Baleen 一级引导：512 字节 MBR 与 2048 字节 El Torito 镜像
 
 # 产物根目录
 OUT_DIR   ?= Out

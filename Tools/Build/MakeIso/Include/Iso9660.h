@@ -1,5 +1,6 @@
-// Iso9660.h
-// ISO9660 写入器接口：卷描述符、路径表、目录记录与 Rock Ridge/El Torito 结构
+/* Iso9660.h
+    ISO9660 写入器接口：卷描述符、路径表、目录记录与 Rock Ridge/El Torito 结构
+*/
 
 #pragma once
 #include <cstdint>
@@ -77,10 +78,10 @@ namespace makeiso {
         void Write();
 
         // 文件列表，按 ISO 路径排序；调用方按此顺序分配 extent
-        const std::vector<IsoFile>& files() const { return m_files; }
+        const std::vector<IsoFile>& Files() const { return m_files; }
 
         // 镜像总长度（SetFileExtents 之后有效），2048 对齐
-        uint64_t total_bytes() const { return m_total_bytes; }
+        uint64_t TotalBytes() const { return m_total_bytes; }
 
     private:
         struct Node;  // 目录树节点：ISO 标识符、extent 与父子关系，定义在 Iso9660.cpp

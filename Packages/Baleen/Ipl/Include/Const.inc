@@ -1,5 +1,5 @@
 ; Const.inc
-; IPL 运行期常量：装入地址、描述符字段、介质编号与长度上限
+;    IPL 运行期常量：装入地址、描述符字段、介质编号与长度上限
 
 LOAD_TOP         EQU 0x7E00      ; Stub 装入点，即 [0x7E00,0x10000) 窗口下端
 LOAD_CEIL        EQU 0x10000     ; Stub 窗口上端，不含

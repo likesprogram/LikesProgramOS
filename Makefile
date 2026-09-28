@@ -1,23 +1,23 @@
 # Makefile
-# LikesProgramOS 顶层构建：镜像组装、宿主工具、运行与清理
+#    LikesProgramOS 顶层构建：镜像组装、宿主工具、运行与清理
 #
-#   make                       构建 Out/LikesProgram.iso 与 Out/LikesProgram.hdd
-#   make iso | hdd             只构建其中一件
-#   make packages              只跑 Packages 下已有的子 Makefile
-#   make tools                 只构建 Tools 下的宿主工具（产物在 Tools/Bin，随源码交付）
-#   make run [介质] [模拟器] [形态] [固件]
-#                              启动镜像。四个位置参数都可省，默认 hdd qemu built bios：
-#                                介质：hdd（默认）| iso
-#                                模拟器：qemu（默认）| bochs（Bochs 只支持 BIOS）
-#                                形态：built（默认，直接按磁盘/光盘挂给虚拟机）| usb（挂成 USB 存储，
-#                                      模拟把镜像写进 U 盘后的样子）
-#                                固件：bios（默认）| uefi（用 OVMF）
-#                              例：make run iso qemu usb uefi / make run hdd bochs built bios
-#   make clean                 删除顶层 Out/；make clean-all 连同子包与工具的产物
+#      make                       构建 Out/LikesProgram.iso 与 Out/LikesProgram.hdd
+#      make iso | hdd             只构建其中一件
+#      make packages              只跑 Packages 下已有的子 Makefile
+#      make tools                 只构建 Tools 下的宿主工具（产物在 Tools/Bin，随源码交付）
+#      make run [介质] [模拟器] [形态] [固件]
+#                                 启动镜像。四个位置参数都可省，默认 hdd qemu built bios：
+#                                   介质：hdd（默认）| iso
+#                                   模拟器：qemu（默认）| bochs（Bochs 只支持 BIOS）
+#                                   形态：built（默认，直接按磁盘/光盘挂给虚拟机）| usb（挂成 USB 存储，
+#                                         模拟把镜像写进 U 盘后的样子）
+#                                   固件：bios（默认）| uefi（用 OVMF）
+#                                 例：make run iso qemu usb uefi / make run hdd bochs built bios
+#      make clean                 删除顶层 Out/；make clean-all 连同子包与工具的产物
 #
-# 载荷来源：各子包的真实产物优先，缺失时用 Tools/Bin/MakePayloads 生成的占位件
-# （Stub、Core、EFI 引导镜像、Ext4 系统卷、布局描述都还没实现，占位件只为把引导链
-# 跑通；每个占位件都写明身份，构建时会打印实际用到的那一份）
+#    载荷来源：各子包的真实产物优先，缺失时用 Tools/Bin/MakePayloads 生成的占位件
+#    （Stub、Core、EFI 引导镜像、Ext4 系统卷、布局描述都还没实现，占位件只为把引导链
+#    跑通；每个占位件都写明身份，构建时会打印实际用到的那一份）
 
 # 顶层产物目录
 OUT_DIR       ?= Out

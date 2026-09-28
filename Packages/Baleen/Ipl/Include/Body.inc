@@ -1,5 +1,5 @@
 ; Body.inc
-; 两种介质入口共用的描述符校验、Stub 限长与范围检查、装入和交权
+;    两种介质入口共用的描述符校验、Stub 限长与范围检查、装入和交权
 
 ; 进入前提：入口已验证魔数，DS:SI 指向刚读入的 BootDescriptor
     CMP DWORD [SI + DESC_VER], (DESC_HEADER << 16) | DESC_VERSION

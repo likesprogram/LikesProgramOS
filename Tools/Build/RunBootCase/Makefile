@@ -1,5 +1,5 @@
 # Makefile
-# RunBootCase —— 宿主侧模拟器进程与启动标记监测器（C++20）
+#    RunBootCase —— 宿主侧模拟器进程与启动标记监测器（C++20）
 
 # 中间对象目录
 OBJ_DIR  ?= Obj
