@@ -23,7 +23,7 @@ CORE_DESC_FILE   EQU 0x08        ; 描述符内文件偏移字段，8 字节小�
 CORE_DESC_BYTES  EQU 0x10        ; 描述符内文件字节数字段，8 字节小端
 CORE_DESC_RESV   EQU 0x18        ; 描述符内保留字段，8 字节全 0
 
-CORE_LOAD        EQU 0x100000    ; Core 装入的物理地址，入口在文件偏移 0，装入地址即交权入口
+CORE_LOAD        EQU 0x100000    ; Core 映像装入的物理地址，即镜像基址；交权入口 = 它 + 头里的 EntryOffset
 CORE_MAX_BYTES   EQU 0x400000    ; Core 文件字节数上限
 CORE_HANDOFF_MAGIC EQU 0x484E4C42 ; 'BLNH'，Stub 交给 Core 的交权块格式标记
 CORE_HANDOFF_VER EQU 1           ; 交权块的开发格式标记

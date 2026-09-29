@@ -2,7 +2,8 @@
 #    Baleen Stub：低内存固定桩，链接本包与 Common 的目标文件，产出 BaleenStub.bin
 #
 #    镜像装载在物理 0x7E00，整体必须留在低 64KiB（实模式弹跳按物理地址寻址）；
-#    未初始化区不落盘，由入口代码按链接脚本给出的边界清零
+#    未初始化区不落盘，由入口代码按链接脚本给出的边界清零；
+#    链接后由 Tools/Bin/PackImage 填头里的 BuildId 与 Digest，并校验头字段
 
 # 产物根目录
 OUT_DIR   ?= Out
@@ -13,7 +14,7 @@ BIN_DIR   := $(OUT_DIR)/Bin
 # 源码与头文件目录
 SRC_DIR   := Src
 INC_DIR   := Include
-# 上游包：Common 提供 Print 与平台原语，Baleen/Common 提供 BIOS 路径控制台与交权契约常量
+# 上游包：Common 提供 Print 与平台原语，Baleen/Common 提供 BIOS 路径控制台、镜像完整性头与交权契约常量
 COMMON_DIR        := ../../Common
 BALEEN_COMMON_DIR := ../Common
 SHARE_DIR         := $(BALEEN_COMMON_DIR)/Include
@@ -24,24 +25,26 @@ NASM      ?= nasm
 LD        ?= ld
 OBJCOPY   ?= objcopy
 
-# 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护
+# 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
 CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include
-# 汇编选项：32 位保护模式；-I 让 Src 里的 %INCLUDE 找到本包与共享的 Include
-NASMFLAGS ?= -f elf32 -I$(INC_DIR)/ -I$(SHARE_DIR)/
-# 链接选项：无运行库并按 Stub.ld 的固定布局；build-id 是额外的落盘节，不要
-LDFLAGS   ?= -m elf_i386 -nostdlib -T Stub.ld --build-id=none
+# 汇编选项：32 位保护模式；-I 让 Src 里的 %INCLUDE 找到本包与共享的 Include；警告视为错误
+NASMFLAGS ?= -f elf32 -Werror -I$(INC_DIR)/ -I$(SHARE_DIR)/
+# 链接选项：无运行库并按 Stub.ld 的固定布局；build-id 是额外的落盘节，不要，链接器警告视为错误
+LDFLAGS   ?= -m elf_i386 -nostdlib -T Stub.ld --build-id=none --fatal-warnings
 
-# 本包目标文件：LoadCore.cpp 是 Core 装载机制，Stub_asm.o 与同名 C++ 源以 _asm 后缀区分
-LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Stub.o LoadCore.o Stub_asm.o Bios.o)
+# 本包目标文件：LoadCore.cpp 是 Core 装载机制，SelfCheck.cpp 是自身完整性自检，Stub_asm.o 与同名 C++ 源以 _asm 后缀区分
+LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Stub.o LoadCore.o SelfCheck.o Stub_asm.o Bios.o)
 # 上游目标文件
 COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o)
-BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o)
+BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o Sha256.o ImageHeader.o)
 
 # 链接产物与交付镜像
 STUB_ELF  := $(BIN_DIR)/BaleenStub.elf
 STUB_BIN  := $(BIN_DIR)/BaleenStub.bin
+# 宿主侧打包工具：填充头里的 BuildId 与 Digest，并核对头字段与摘要
+PACK_IMAGE := ../../../Tools/Bin/PackImage
 
 .DEFAULT_GOAL := all
 .PHONY: all upstream check clean help
@@ -63,16 +66,21 @@ upstream:
 	@$(MAKE) -C $(COMMON_DIR)
 	@$(MAKE) -C $(BALEEN_COMMON_DIR)
 
-# 转平坦镜像：未初始化区不落盘，装载后由入口代码清零
-$(STUB_BIN): $(STUB_ELF)
+# 转平坦镜像并按头格式打包：未初始化区不落盘，装载后由入口代码清零
+$(STUB_BIN): $(STUB_ELF) $(PACK_IMAGE)
 	$(OBJCOPY) -O binary $< $@
+	$(PACK_IMAGE) $@
+
+# 打包工具放在 Tools/Bin 随源码交付，缺失时现建一次
+$(PACK_IMAGE):
+	@$(MAKE) -C ../../../Tools/Build/PackImage
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # 汇编产物与同名 C++ 源以 _asm 后缀区分，逐条列出
-$(OBJ_DIR)/Stub_asm.o: $(SRC_DIR)/Stub.asm $(INC_DIR)/Const.inc $(SHARE_DIR)/Contract.inc
+$(OBJ_DIR)/Stub_asm.o: $(SRC_DIR)/Stub.asm $(INC_DIR)/Const.inc $(INC_DIR)/StubHeader.inc $(SHARE_DIR)/Contract.inc
 	@mkdir -p $(OBJ_DIR)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
@@ -82,12 +90,14 @@ $(OBJ_DIR)/Bios.o: $(SRC_DIR)/Bios.asm
 
 # 校验镜像非空且不越过光盘入口的 0x8000 上限（同一文件用于两种入口）
 # 上限与窗口都用 shell 的算术展开写：POSIX 的 test 不认十六进制字面量
+# 头字段与摘要由 PackImage --verify 复核，只读不改写镜像
 check: all
 	@limit=$$((0x8000)); window=$$((0x7E00)); \
 	bytes=$$(wc -c < "$(STUB_BIN)" | tr -d ' '); \
 	[ "$$bytes" -gt 0 ] || { echo "check: $(STUB_BIN) 为空"; exit 1; }; \
 	[ "$$bytes" -le "$$limit" ] || { echo "check: $(STUB_BIN) 大小 $$bytes，超出 0x8000"; exit 1; }; \
-	echo "check: $(STUB_BIN) 大小 $$bytes，落在 [$$window,0x10000) 窗口内"
+	echo "check: $(STUB_BIN) 大小 $$bytes，落在 [$$window,0x10000) 窗口内"; \
+	$(PACK_IMAGE) --verify "$(STUB_BIN)"
 
 # 删除产物目录
 clean:
@@ -98,7 +108,7 @@ clean:
 help:
 	@printf '%s\n' 'Baleen Stub：低内存固定桩' \
 	  '  make [all]  构建 $(STUB_BIN)' \
-	  '  make check  校验镜像大小落在低内存窗口内' \
+	  '  make check  校验镜像大小、完整性头字段与摘要' \
 	  '  make clean  删除 $(OUT_DIR)/' \
 	  '  变量：OUT_DIR / CXX / NASM / LD / OBJCOPY 与各 FLAGS 可覆盖'
 

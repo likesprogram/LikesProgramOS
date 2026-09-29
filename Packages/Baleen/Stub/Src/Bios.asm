@@ -11,6 +11,10 @@
 ;
 ;    一次弹跳只做一个操作（Bios_Op 分派），不允许嵌套；实模式侧只能寻址低 64KiB，
 ;    要交给调用方的数据先落在映像内的低地址缓冲，回到 32 位平坦段后再拷出去
+;
+;    读盘分两层：批量 EDD 请求各自最多 READ_TRIES 次尝试；某批耗尽后不整体放弃，
+;    而是从原始 LBA 与目标地址起把整段范围逐扇区重读，每个单扇区请求独立计尝试，
+;    HDD 且 LBA<63 时可在 EDD 失败后退回 CHS；全部尝试有界，失败只返回 0，不停机
 
 BITS 32
 
@@ -49,8 +53,10 @@ EXTERN _Boot_Media
 %DEFINE WINDOW_BYTES 0x10000
 ; 实模式段基址决定的传输上界：1MiB，不含
 %DEFINE REAL_CEIL 0x100000
-; 每批读盘与 E820 的重试次数
+; 每次读盘请求（批量或单扇区）与 E820 的重试次数，含首次
 %DEFINE READ_TRIES 3
+; CHS 回退的 LBA 上限，不含：只覆盖 C=0、H=0 的首 63 个扇区
+%DEFINE CHS_LAST_LBA 63
 
 ; 探测启动驱动器的扇区大小：只认 512、2048、4096，其他结果与调用失败都返回 0
 _Bios_Sector_Size:
@@ -147,10 +153,13 @@ _Bios_Read_Sectors:
     PUSH EDI
     MOV EAX, [EBP + 8]                  ; lba
     MOV [Bios_Lba], EAX
+    ; 原始 LBA 与目标地址另存：批量失败后的逐扇区重读必须从它们开始，而不是从失败点
+    MOV [Bios_Orig_Lba], EAX
     MOV EAX, [EBP + 12]                 ; count
     MOV [Bios_Count], EAX
     MOV EAX, [EBP + 16]                 ; dest
     MOV [Bios_Dest], EAX
+    MOV [Bios_Orig_Dest], EAX
     MOV EAX, [EBP + 20]                 ; sectBytes
     MOV [Bios_Sect], EAX
     MOV DWORD [Bios_Done], 0
@@ -202,6 +211,12 @@ Enter_Real:
     SIDT [Bios_Saved_Idtr]
     CLD                         ; 参数表清零与本文件的 REP 例程都依赖 DF=0
     CLI
+    ; 段表模板只读，每次弹跳前把副本拷进未初始化区：
+    ; 加载 16 位选择子会置位描述符的 Accessed 位并写回，写回必须落在镜像之外
+    MOV ESI, Bios_Gdt
+    MOV EDI, Bios_Gdt_Work
+    MOV ECX, (BIOS_GDT_ENTRIES * 8) / 4
+    REP MOVSD
     LGDT [Bios_Gdtr]
     JMP DWORD SEL_CODE16:Real_Mode_Setup
 
@@ -305,6 +320,7 @@ Real_E820:
     JMP Real_Leave
 
 ; INT 13h AH=42：按 BLOCK_MAX 与 64KiB 窗口分批读，一批一次调用
+; 某批耗尽尝试后转入 Real_Read_Fallback：逐扇区重读整段范围，不在这里整体判失败
 Real_Read:
     MOV DWORD [Bios_Done], 0
 .Loop:
@@ -348,8 +364,7 @@ Real_Read:
     CALL Real_Disk_Reset               ; 失败才复位再重试，正常路径一次都不发
     DEC BYTE [Bios_Tries]
     JNZ .Retry
-    MOV BYTE [Bios_Ok], 0
-    JMP Real_Leave
+    JMP Real_Read_Fallback             ; 本批耗尽：整段从原始 LBA 与目标地址逐扇区重读
 .Batch_Ok:
     MOV EAX, [Bios_Blocks]
     ADD [Bios_Lba], EAX
@@ -359,8 +374,87 @@ Real_Read:
     MOV BYTE [Bios_Ok], 1
     JMP Real_Leave
 .Fail:
+    MOV BYTE [Bios_Ok], 0               ; 连一个扇区都放不下：布局错误，逐扇区同样放不下
+    JMP Real_Leave
+
+; 批量失败后的逐扇区重读：从原始 LBA 与目标地址起读完整段，不复用失败批次的位置
+; 每个单扇区请求独立计 READ_TRIES 次尝试，每次先 EDD，再在适用时退回 CHS
+; 任一扇区耗尽尝试即整段失败返回 0；与批量路径共用会话一次的复位策略
+Real_Read_Fallback:
+    MOV DWORD [Bios_Done], 0
+.Loop:
+    MOV EAX, [Bios_Count]
+    SUB EAX, [Bios_Done]
+    JZ .Ok
+    ; 本扇区 LBA = 原始 LBA + 已搬扇区数；目的地 = 原始目的地 + 已搬扇区数 × 扇区大小
+    MOV EAX, [Bios_Done]
+    ADD EAX, [Bios_Orig_Lba]
+    MOV [Bios_Lba], EAX
+    MOV EAX, [Bios_Done]
+    IMUL EAX, DWORD [Bios_Sect]
+    ADD EAX, [Bios_Orig_Dest]
+    MOV [Bios_Block_Dest], EAX
+    MOV DWORD [Bios_Blocks], 1
+    ; 单扇区同样不得跨 64KiB 窗口：批量路径只裁剪过已处理的批次，这里要自己挡
+    MOV ECX, [Bios_Block_Dest]
+    AND ECX, 0xFFFF
+    MOV EDX, WINDOW_BYTES
+    SUB EDX, ECX
+    CMP EDX, [Bios_Sect]
+    JB .Fail
+    CALL Real_Fill_Dap
+    MOV BYTE [Bios_Tries], READ_TRIES
+.Retry:
+    MOV DL, [_Boot_Drive]
+    MOV SI, Bios_Dap
+    MOV AH, 42h
+    INT 13h
+    CLI
+    JNC .Next
+    CALL Real_Read_Chs                  ; 不适用或失败都返回 CF=1，继续走复位重试
+    JNC .Next
+    CALL Real_Disk_Reset
+    DEC BYTE [Bios_Tries]
+    JNZ .Retry
+.Fail:
     MOV BYTE [Bios_Ok], 0
     JMP Real_Leave
+.Next:
+    INC DWORD [Bios_Done]
+    JMP .Loop
+.Ok:
+    MOV BYTE [Bios_Ok], 1
+    JMP Real_Leave
+
+; 单扇区 CHS 回退：EDD 失败后的兼容路径，只在 LBA<CHS_LAST_LBA、非光盘、
+; 驱动器号 ≥ 0x80 时尝试，编码固定 C=0、H=0、S=LBA+1，不做任意几何换算
+; LBA 与目的地一律取本文件的存储值：BIOS 返回后 AH 是状态、寄存器和 DAP 都不可信
+; CF=1 表示不适用或读失败；返回前中断已恢复关闭
+Real_Read_Chs:
+    CMP DWORD [Bios_Lba], CHS_LAST_LBA
+    JAE .Skip
+    CMP BYTE [_Boot_Media], MEDIA_CDROM
+    JE .Skip
+    CMP BYTE [_Boot_Drive], 0x80
+    JB .Skip
+    MOV EAX, [Bios_Block_Dest]
+    MOV BX, AX
+    AND BX, 0xF                         ; 段内偏移取线性地址低 4 位，段取其余高位
+    SHR EAX, 4
+    MOV ES, AX
+    MOV EAX, [Bios_Lba]
+    MOV CX, AX
+    INC CX                              ; 扇区号 = LBA+1；LBA<63 保证不进位到柱面位
+    XOR DH, DH
+    MOV AX, 0x0201
+    MOV DL, [_Boot_Drive]
+    STI
+    INT 13h
+    CLI
+    RET
+.Skip:
+    STC
+    RET
 
 ; 按 Bios_Lba、Bios_Blocks、Bios_Block_Dest 填 EDD 的 DAP
 ; 偏移字段只有 16 位，段基址取线性地址 >> 4：目的地必须 16 字节对齐且不跨窗口
@@ -421,7 +515,8 @@ Bios_Prot_Entry:
     RET
 
 SECTION .data
-; 弹跳专用段表：空、32 位代码、32 位数据、16 位代码、16 位数据
+; 弹跳专用段表模板：空、32 位代码、32 位数据、16 位代码、16 位数据
+; 模板只读，每次弹跳由 Enter_Real 拷进未初始化区的工作副本再加载
 Bios_Gdt:
     DQ 0
     DQ 0x00CF9A000000FFFF       ; 0x08：32 位代码
@@ -430,13 +525,15 @@ Bios_Gdt:
     DQ 0x000092000000FFFF       ; 0x20：16 位数据
 Bios_Gdtr:
     DW BIOS_GDT_ENTRIES * 8 - 1
-    DD Bios_Gdt
+    DD Bios_Gdt_Work            ; 基址指向工作副本，CPU 的 Accessed 位写回不碰镜像
 ; 实模式 IVT 的伪描述符：16 位限长加 32 位基址
 Bios_Real_Idtr:
     DW 0x3FF
     DD 0
 
 SECTION .bss
+ALIGNB 4
+Bios_Gdt_Work:       RESB BIOS_GDT_ENTRIES * 8   ; 弹跳段表的工作副本
 ALIGNB 4
 Bios_Op:             RESD 1                      ; 本次弹跳的操作码
 Bios_Saved_Esp:      RESD 1                      ; 弹跳前的 32 位栈指针
@@ -457,6 +554,8 @@ Bios_Blocks:         RESD 1                      ; 本批块数；填 DAP 前会
 Bios_Dest:           RESD 1                      ; 目的地线性地址
 Bios_Block_Dest:     RESD 1                      ; 本批目的地线性地址
 Bios_Sect:           RESD 1                      ; 每扇区字节数
+Bios_Orig_Lba:       RESD 1                      ; 调用方给出的原始 LBA，逐扇区回退从这里开始
+Bios_Orig_Dest:      RESD 1                      ; 调用方给出的原始目的地，逐扇区回退从这里开始
 ALIGNB 4
 Bios_E820_Dest:      RESD 1                      ; E820 调用方缓冲指针，可为 0
 Bios_E820_Limit:     RESD 1                      ; E820 本次接受的条目数上限

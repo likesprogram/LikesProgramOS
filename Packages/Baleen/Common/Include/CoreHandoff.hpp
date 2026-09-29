@@ -38,7 +38,7 @@ namespace Baleen {
         uint32_t sectorBytes;               // 介质的本地扇区大小，读盘块数以此为单位
         uint32_t coreBytes;                 // Core 文件字节数
         uint32_t coreSectors;               // Core 按扇区上取整后的读入跨度；尾部填充不是 Core 内容
-        uint32_t coreLoad;                  // Core 装入的物理地址，即 CORE_LOAD，也是本次入口
+        uint32_t coreLoad;                  // Core 映像装入的物理地址，即 CORE_LOAD；本次入口 = 它 + 镜像头里的 EntryOffset
         uint32_t memoryMapCount;            // 内存图条数
         uint32_t memoryMapTruncated;        // 缓冲装不下后续条目时为 1
         const Boot::MemoryMapEntry* memoryMap;   // 内存图，指向 Stub 的静态缓冲

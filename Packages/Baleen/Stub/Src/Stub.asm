@@ -1,12 +1,53 @@
 ; Stub.asm
-;    Stub 实模式入口与运行期异常入口桩：IPL 跳到 0000:7E00 后进入，保存 DL/DH，切到 32 位后调用 _Stub_Main；
+;    Stub 实模式入口与运行期异常入口桩：IPL 跳到 0000:7E00 后经入口前缀进入，保存 DL/DH，切到 32 位后调用 _Stub_Main；
 ;   异常桩把向量号压栈后交给 C++ 侧的停机诊断，整个文件须留在低 64KiB
+;
+;    文件偏移 0..2 是 16 位近跳转入口前缀，[0x03,0x10) 保留，[0x10,0x90) 是自身完整性头，
+;    0x90 起才是代码；头里的 ImageBytes 与 MemoryBytes 由链接器按镜像、未初始化区末尾填入，
+;    BuildId 与 Digest 由 Tools/Bin/PackImage 填充，布局与断言见 Stub.ld
 BITS 16
 %INCLUDE "Const.inc"
+%INCLUDE "StubHeader.inc"
 
 CPU 386
 
-; 入口节必须排在最前，自定义节名要让链接器知道它是可执行代码
+; 自身完整性头与入口前缀：排在镜像最前，三处关键偏移由紧随其后的断言盯住
+SECTION .stub.head progbits alloc exec nowrite
+
+    JMP NEAR $ + STUB_ENTRY_OFFSET      ; 从固定装入点跳到头之后的入口，位移由本行位置直接算出
+%IF ($ - $$) != 3
+    %ERROR "入口前缀不是 3 字节的 16 位近跳转"
+%ENDIF
+    TIMES STUB_HEAD_OFFSET - ($ - $$) DB 0
+%IF ($ - $$) != STUB_HEAD_OFFSET
+    %ERROR "Stub 头未落在约定的文件偏移"
+%ENDIF
+    DB "BLNSTUB", 0                     ; Magic：格式标记，含终止零
+    DW STUB_VERSION                     ; Version：未发布的开发格式标记
+    DW STUB_HEAD_BYTES                  ; HeaderBytes：头固定长度
+    DD STUB_FLAGS                       ; Flags：当前不定义可选标志
+    DD __image_end - LOAD_TOP           ; ImageBytes：文件字节数，按镜像末尾由链接器填入
+    DD __bss_end - LOAD_TOP             ; MemoryBytes：静态内存跨度，按未初始化区末尾由链接器填入
+    DD STUB_ENTRY_OFFSET                ; EntryOffset：早期初始化入口的文件偏移
+    DW STUB_DIGEST_SHA256               ; DigestAlgorithm：1 为 SHA-256，无“禁用摘要”值
+    DW STUB_BUILDID_BYTES               ; BuildIdBytes：BuildId 长度
+%IF ($ - $$) != STUB_HEAD_OFFSET + STUB_BUILDID_OFFSET
+    %ERROR "BuildId 未落在头内约定的偏移"
+%ENDIF
+    TIMES STUB_BUILDID_BYTES DB 0       ; BuildId：由打包器填充
+%IF ($ - $$) != STUB_HEAD_OFFSET + STUB_DIGEST_OFFSET
+    %ERROR "Digest 未落在头内约定的偏移"
+%ENDIF
+    TIMES 32 DB 0                       ; Digest：由打包器按第四节填充
+%IF ($ - $$) != STUB_HEAD_OFFSET + STUB_HEAD_BYTES - STUB_RESERVE_BYTES
+    %ERROR "保留区未落在头内约定的偏移"
+%ENDIF
+    TIMES STUB_RESERVE_BYTES DB 0       ; Reserved：全 0
+%IF ($ - $$) != STUB_HEAD_OFFSET + STUB_HEAD_BYTES
+    %ERROR "Stub 头长度不是约定的 0x80"
+%ENDIF
+
+; 入口节：头之后的第一条指令，必须落在 STUB_ENTRY_OFFSET，否则入口前缀跳错位置
 SECTION .text.start progbits alloc exec nowrite
 
 GLOBAL _Start
@@ -15,8 +56,10 @@ GLOBAL _Boot_Media
 GLOBAL _Stub_Exception_Stubs
 extern _Stub_Main
 extern _Stub_Exception_Handler
-; 链接脚本给出的未初始化区边界
+; 链接脚本给出的镜像与未初始化区边界
+extern __image_end
 extern __bss_start
+extern __bss_bytes
 extern __bss_end
 
 ; IPL 约定 CS:IP=0000:7E00。出口：32 位、调用 _Stub_Main
@@ -26,10 +69,26 @@ _Start:
     MOV ES, AX
     MOV SS, AX
     MOV SP, STACK_TOP
-    MOV [_Boot_Drive], DL       ; BIOS 驱动器
-    MOV [_Boot_Media], DH       ; Boot::Media
+    CLD                         ; 下面的 REP 串操作按递增方向
+    ; 未初始化区不落盘，介质上没有它的内容，这里在实模式下按链接脚本给出的边界整体清零
+    ; 清零必须赶在下面写 GDT 工作副本之前：工作副本也在未初始化区
+    MOV DI, __bss_start
+    MOV CX, __bss_bytes         ; 长度由链接脚本按未初始化区起止算出
+    XOR AX, AX
+    MOV BX, CX
+    SHR CX, 1
+    REP STOSW
+    MOV CX, BX
+    AND CX, 1
+    REP STOSB
+    ; 段表模板在镜像里只读；CPU 加载段选择子会置位描述符的 Accessed 位并写回，
+    ; 把副本拷进未初始化区再加载，写回就落在镜像之外
+    MOV SI, Gdt_Template
+    MOV DI, Gdt_Work
+    MOV CX, (Gdt_Template_End - Gdt_Template) / 2
+    REP MOVSW
     CLI
-    O32 LGDT [Gdt_Desc]         ; 只带进入保护模式所需的最小段表，运行期表由 C++ 侧建立
+    O32 LGDT [Gdt_Desc]         ; 指向未初始化区的工作副本，运行期表由 C++ 侧建立
     MOV EAX, CR0
     OR AL, 1
     MOV CR0, EAX
@@ -44,39 +103,36 @@ PM32:
     MOV FS, AX
     MOV GS, AX
     MOV ESP, LOADER_PM_STACK    ; 弹跳槽与 INT 13h 栈都在镜像的未初始化区，不占这里
-    CLD                         ; 清零用 REP STOSD，须 DF=0
-    ; 未初始化区不落盘，介质上没有它的内容，这里按链接脚本给出的边界整体清零
-    MOV EDI, __bss_start
-    MOV ECX, __bss_end
-    SUB ECX, EDI
-    XOR EAX, EAX
-    MOV EDX, ECX
-    SHR ECX, 2
-    REP STOSD
-    MOV ECX, EDX
-    AND ECX, 3
-    REP STOSB
+    CLD
+    ; 驱动器与介质号写进未初始化区：自检要求镜像字节在装入后保持原样，落盘的变量不能在这里写
+    MOV [_Boot_Drive], DL
+    MOV [_Boot_Media], DH
     CALL _Stub_Main
 .Hang:
     HLT
     JMP .Hang
 
-; 进入保护模式所需的最小段表：空描述符、32 位代码段与 32 位数据段
+; 进入保护模式所需的最小段表模板：空描述符、32 位代码段与 32 位数据段
+; 模板只读，运行时由 _Start 拷进未初始化区的工作副本再加载：
+; CPU 会在加载选择子时置位描述符的 Accessed 位并写回，写回必须落在镜像之外
 ; 运行期段表由 Platform::Gdt 在 _Stub_Main 里建立，选择子 0x08 与 0x10 的含义与这里一致
-Gdt:
+Gdt_Template:
     DQ 0                        ; 空
     DQ 0x00CF9A000000FFFF       ; 0x08：32 位代码
     DQ 0x00CF92000000FFFF       ; 0x10：32 位数据
-Gdt_End:
+Gdt_Template_End:
 
+; GDTR：限长取自模板，基址指向工作副本；CPU 不会改写它，可以留在镜像里
 Gdt_Desc:
-    DW Gdt_End - Gdt - 1        ; 限长
-    DD Gdt                      ; 线性基址
+    DW Gdt_Template_End - Gdt_Template - 1
+    DD Gdt_Work
 
-_Boot_Drive:
-    DB 0                        ; BIOS DL
-_Boot_Media:
-    DB 0                        ; IPL 放入 DH 的介质号
+; 启动后写入的运行期状态与段表工作副本：放在未初始化区，不落盘，也不参与镜像自检
+; 落盘数据区只留只读内容，否则写入会改掉自检要读的镜像字节
+SECTION .bss
+Gdt_Work:      RESB Gdt_Template_End - Gdt_Template   ; 入口段表的工作副本
+_Boot_Drive:   RESB 1           ; BIOS 驱动器号，IPL 交权时的 DL
+_Boot_Media:   RESB 1           ; Boot::Media，IPL 交权时的 DH
 
 ; Stub → Core 的交权入口：cdecl 参数为交权块指针与 Core 入口地址
 ; 入口状态在此固定：32 位保护模式、平坦段、分页关闭、IF=0、DF=0 都是调用前已有的状态，这里只补齐标志

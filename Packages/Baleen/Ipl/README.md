@@ -2,7 +2,7 @@
 
 IPL 是 Baleen BIOS 引导链的第一阶段：固件装入它，它校验 `BootDescriptor`、把 Stub 读到内存并交权。完整 BIOS 链是 **IPL → Stub → BaleenCore**。一级引导的完成标准是这段装载与交接可靠，不以第二、三阶段是否实现来判定。
 
-职责、介质布局、机器状态及失败语义以 [Baleen 一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 为准；整体流程见 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md)。当前仍在设计与实现阶段，BootDescriptor 的格式识别字段不代表已发布版本，首发前可以直接调整定义。
+职责、介质布局、机器状态及失败语义以 [Baleen 一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 为准；整体流程见 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md)。
 
 ## 一、产物与空间约束
 
@@ -45,7 +45,7 @@ make ENABLE_E9=0    # 禁用 0xE9，保留 VGA 报错
 make clean          # 删除本目录 Out/
 ```
 
-需要 NASM 与 GNU make，已在 NASM 3.01 下验证。默认 `-Ox`；`OUT_DIR`、`NASM`、`NASMFLAGS` 可覆盖。汇编选项写入构建配置戳，切换 `ENABLE_E9` 会重新生成产物，避免旧二进制被误当成新配置。
+需要 NASM 与 GNU make，已在 NASM 3.01 下验证。默认 `-Ox` 且以 `-Werror` 汇编，警告即失败；`OUT_DIR`、`NASM`、`NASMFLAGS` 可覆盖。汇编选项写入构建配置戳，切换 `ENABLE_E9` 会重新生成产物，避免旧二进制被误当成新配置。
 
 **Makefile 不依赖未交付的本地回归夹具，正常构建不执行测试。** 必需的布局约束在汇编源和 C++ 镜像组装器中校验。完整的宿主验证工具由 [CheckIpl](../../../Tools/Build/CheckIpl/README.md) 提供：C++ 源码编译到 `Tools/Bin/CheckIpl`，手工执行，可检查代码预算、正常装载、错误停机和 BIOS 故障回退；其运行不依赖不上传的测试目录。
 
@@ -82,4 +82,6 @@ IPL 无法从原始文件长度推知未物化的 BSS；Stub 的文件头、打�
 
 IPL 不解析 `BaleenLayout.bin`、Ext4、Superblock，不做内核集选择、BuildId 核对、摘要或签名认证，也不准备 A20、内存图和长模式。这些职责分别归 [Stub](../Stub/README.md)、BaleenCore 和 UEFI 入口。
 
-Stub 目前保留开发中的结构与交接说明，尚未实现。IPL 的验收可使用专用探针验证完整装载、寄存器状态和失败停机；占位件启动或 UEFI 应用启动均不等同于整条 Baleen 引导链已经完成。仿真器回归为当前证据，物理介质及不同厂商固件的验证仍应独立记录。
+Stub 自身的完整性头与摘要也不由 IPL 校验：摘要算法与轮常量放不进 446/510 字节的首段，验证因此下移给有余量的 Stub 在装入后自检；理由与检查时点见[一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 3.2。
+
+Stub 的进展不影响 IPL 的验收范围。IPL 的验收可使用专用探针验证完整装载、寄存器状态和失败停机；占位件启动或 UEFI 应用启动均不等同于整条 Baleen 引导链已经完成。仿真器回归为当前证据，物理介质及不同厂商固件的验证仍应独立记录。

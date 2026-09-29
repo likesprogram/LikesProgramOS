@@ -4,7 +4,7 @@
 
 它的职责只有一件事：**从不同硬件上找到指定 Ext4 文件系统的指定路径，把系统内核装载起来并完成交接。**
 
-本文描述完整 Baleen 的目标职责，不表示各阶段均已实现。当前 IPL 已有源码；Stub、Core 与 UEFI 尚无正式实现，构建中的同名占位载荷不能作为功能完成的证据。BIOS 一级引导的当前 ABI 单独定义在 [Baleen 一级引导契约](一级引导契约.md)，未来 Stub 结构见 [Stub 约定与结构草案](../../../Packages/Baleen/Stub/README.md)。
+本文描述完整 Baleen 的目标职责，不表示各阶段均已实现。Core 与 UEFI 尚无正式实现，构建中的同名占位载荷不能作为功能完成的证据。BIOS 一级引导的当前 ABI 单独定义在 [Baleen 一级引导契约](一级引导契约.md)，Stub 结构与自身完整性见 [Stub 约定与结构](../../../Packages/Baleen/Stub/README.md)。
 
 ## 一、名字与命名口径
 
@@ -36,7 +36,7 @@
 | 阶段 | 负责内容 |
 | --- | --- |
 | BIOS IPL | 只做 `BootDescriptor` 结构与偏移、长度校验，装入 Stub，按 ABI 交权；任一失败诊断并停机 |
-| BIOS Stub | A20、内存图、实模式磁盘会话、自身内存初始化，以及按 [Stub 说明](../../../Packages/Baleen/Stub/README.md)第二节的契约定位、装载 Core 并交权 |
+| BIOS Stub | A20、内存图、实模式磁盘会话、自身内存初始化，以及按 [Stub 说明](../../../Packages/Baleen/Stub/README.md)第二节的契约定位 Core、校验其镜像头与摘要、装载并交权 |
 | BIOS Core / UEFI（待实现） | `BaleenLayout.bin`、Ext4、系统卷定位、内核集选版与摘要 / 签名验证、持久状态和内核交接 |
 
 `BootDescriptor` 仅定位 Stub 文件，与描述系统卷及内核路径的 `BaleenLayout.bin` 不是同一对象。IPL 不解析布局描述、Stub 头或文件系统，不检查 Stub 的 BSS、BuildId、摘要与签名。Stub/Core 未实现或占位件主动停机，不构成 IPL 缺陷；IPL 是否满足自己的边界仍须独立验证。
@@ -84,7 +84,7 @@
 
 Secure Boot 与项目自身的签名是两条独立的链：前者让固件愿意执行 Baleen，后者让 Baleen 愿意装载内核集。两者不能互相替代。
 
-IPL 当前没有 Stub 头、摘要或签名检查。未来 Stub 的文件长度、内存长度、入口、Baleen BuildId 与摘要仅在 [Stub 开发草案](../../../Packages/Baleen/Stub/README.md) 中定义，尚无实现，也不要求当前占位件采用。Stub 执行后的自校验不能构成执行前认证或信任根；Baleen 构建身份也不能代替内核集 BuildId。
+IPL 当前没有 Stub 头、摘要或签名检查，这是分工而不是缺口。Stub 与 Core 镜像的文件长度、内存长度、入口、Baleen BuildId 与摘要定义在 [Stub 约定与结构](../../../Packages/Baleen/Stub/README.md)，由 `PackImage` 在构建期打包并校验、由 Stub 在运行期自检自身、在交权前校验 Core（第二、三节）；无头的开发占位件由组装器显式放行。Stub 的自校验与它对 Core 摘要的校验都不能构成执行前认证或信任根；Baleen 构建身份也不能代替内核集 BuildId。
 
 ## 四、硬件与介质支持范围
 
@@ -154,14 +154,14 @@ Baleen 交付给内核的内容：
 | 组件 | 输出名称 | 被谁载入 | 用途 |
 | --- | --- | --- | --- |
 | 一级引导 | `BaleenIPL.bin` / `BaleenIPLCd.bin` | BIOS / El Torito 引导目录 | 校验 `BootDescriptor` 结构、偏移与文件长度，装入 Stub 并按 ABI 交权；失败停机 |
-| 实模式服务层 | `BaleenStub.bin` | 一级引导 | A20、内存图、固件磁盘会话；按 `CoreDescriptor` 定位 Core、校验装载区、装入高位并交权；自身头与摘要自检仍未接入 |
-| 核心阶段（BIOS 侧，待实现） | `BaleenCore.bin` | 实模式服务层 | 验证布局与内核集，选版并持久记录试启动，按 Ext4 路径读入所选 `.os`，交付 `BootInfo` |
+| 实模式服务层 | `BaleenStub.bin` | 一级引导 | 自身完整性头与 SHA-256 摘要自检；A20、内存图、固件磁盘会话；按 `CoreDescriptor` 定位 Core、校验其镜像头与摘要、校验装载区、装入高位并交权 |
+| 核心阶段（BIOS 侧，待实现） | `BaleenCore.bin` | 实模式服务层 | 镜像带与 Stub 同构的完整性头与入口前缀，装入前由 Stub 校验头与摘要；验证布局与内核集，选版并持久记录试启动，按 Ext4 路径读入所选 `.os`，交付 `BootInfo` |
 | 固件应用（UEFI 侧，待实现） | `BOOTX64.EFI` | UEFI 引导管理器，`\EFI\BOOT\` | 经固件接口完成布局、Ext4、选版、签名与状态持久化，传递内存图、输出信息及 Boot Services 状态；绕过 IPL |
 | 布局描述（详细格式待定） | `BaleenLayout.bin` | Core / UEFI 读取，不执行 | 卷标识、系统卷位置、内核路径、引导状态区域及格式标记，由构建期写入约定位置 |
 
 `BOOTX64.EFI` 的名字由 UEFI 可移动介质引导路径要求决定，不是本项目选的，见[后缀设计](../后缀设计.md)第六节；镜像放在固有其他路径时可以改用启动项指向的名字，但可移动介质回退路径必须是它。布局描述按介质形态分别生成内容，字段与写入位置见后续的详细规格。
 
-**当前开发 ABI**：MBR 恰好 512 字节、代码不超过 446 字节；CD IPL 恰好 2048 字节，代码及 Boot Info Table 保留区限于首 510 字节，两者签名均在偏移 510。IPL 留在物理 `0x7C00`，Stub 从 `0x7E00` 装入，文件上限分别为 HDD `0x8200`、CD `0x8000`；BSS 由未来打包器与 Stub 另外检查。描述符位于介质绝对偏移 `0x300`，不是物理内存地址，也不作为持久指针传给 Stub；同扇区的 `0x340` 是 Stub 阶段的 `CoreDescriptor`，IPL 不读它。完整字段、交权状态、重试和错误码见 [一级引导契约](一级引导契约.md)。这些格式尚未发布，当前 `Version=1` 仅是开发格式标记，首发前可直接修订，首发后再建立版本管理规则。
+**当前 ABI**：MBR 恰好 512 字节、代码不超过 446 字节；CD IPL 恰好 2048 字节，代码及 Boot Info Table 保留区限于首 510 字节，两者签名均在偏移 510。IPL 留在物理 `0x7C00`，Stub 从 `0x7E00` 装入，文件上限分别为 HDD `0x8200`、CD `0x8000`；BSS 与头的内存跨度由 `Tools/Bin/PackImage` 在打包时检查、由 Stub 在运行期自检复核。描述符位于介质绝对偏移 `0x300`，不是物理内存地址，也不作为持久指针传给 Stub；同扇区的 `0x340` 是 Stub 阶段的 `CoreDescriptor`，IPL 不读它。Core 映像从物理 `0x100000` 装入，带与 Stub 同构的完整性头与入口前缀（入口在文件偏移 `0x90`），头与摘要由 Stub 在交权前校验。完整字段、交权状态、重试和错误码见 [一级引导契约](一级引导契约.md)。`Version=1` 标识当前格式。
 
 **验证范围**：完整系统仍需覆盖 BIOS 与 UEFI 各入口、内部硬盘、U 盘、移动硬盘、ISO 写入 U 盘与虚拟机挂载 ISO，以及卷定位、镜像校验与失败报告；掉电回滚演练见[内核集更新与回滚](../内核集更新与回滚.md)。IPL 的检查与后续功能验证必须分别记录；UEFI 绕过 IPL，不能计作其通过。模拟器实测不能替代真机、物理 USB、物理光驱或旧 BIOS，不能从文献或局部结果宣称厂商未经验证的普遍兼容。
 

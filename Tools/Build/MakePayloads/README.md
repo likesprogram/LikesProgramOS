@@ -11,8 +11,8 @@ Tools/Bin/MakePayloads Out/Payload
 
 | 产物 | 内容 |
 | --- | --- |
-| `BaleenStub.bin` | 16 位占位程序，向 COM1、0xE9 和 BIOS 文本输出写 `PLACEHOLDER-STUB` 后停留 |
-| `BaleenCore.bin` | 32 位占位映像（68 KiB），入口在文件偏移 0：核对交权块的格式标记后经 Stub 的控制台打印 `PLACEHOLDER-CORE-IMAGE` 并停机；标记不可用时退回直接写 0xE9 与 COM1，并写明走的是退路 |
+| `BaleenStub.bin` | 16 位占位程序，向 COM1、0xE9 和 BIOS 文本输出写 `PLACEHOLDER-STUB` 后停留；不含 `BaleenStubHeader`，组装器按“未验证载荷”放行 |
+| `BaleenCore.bin` | 32 位占位映像（68 KiB），带头入口：入口在文件偏移 `0x90`，本工具组装入口前缀、`BaleenCore` 完整性头并填好 BuildId 与 Digest，由 Stub 校验头与摘要后装入 1 MiB 并跳入；代码核对交权块的格式标记后经 Stub 的控制台打印 `PLACEHOLDER-CORE-IMAGE` 并停机；标记不可用时退回直接写 0xE9 与 COM1，并写明走的是退路 |
 | `Efi.img` | 36 MiB FAT32，含 `/EFI/BOOT/BOOTX64.EFI`；只输出 `MAKEISO-EFI-BOOT-OK` 和 `PLACEHOLDER-EFI` 后停留 |
 | `SystemVolume.img` | 16 MiB 空 Ext4，不含内核或发行内容 |
 | `BaleenLayout.bin` | 512 字节占位说明，不定义正式布局格式 |
@@ -21,6 +21,6 @@ Tools/Bin/MakePayloads Out/Payload
 
 占位汇编内嵌于 C++ 源码，NASM 输出裸代码；占位 Core 的装入地址与交权块偏移取自 `Packages/Baleen/Common/Include/CoreHandoff.hpp`，不在工具里另写一份。C++ 生成 PE32+ 封装与重定位表，并直接更新空 FAT32 的目录、FAT 和主/备 FSInfo，无需挂载或 mtools。生成使用独立临时目录，正常退出及异常路径会清理临时件。
 
-占位件的格式变化会让旧文件认不出来：`BaleenCore.bin` 从文本改为可执行映像后，标记从 `PLACEHOLDER-CORE` 变为 `PLACEHOLDER-CORE-IMAGE`，旧文件会被当作“不是当前格式的占位件”拒绝，需要先删除再重新生成。
+占位件的格式变化会让旧文件认不出来：`BaleenCore.bin` 从文本改为可执行映像后，标记从 `PLACEHOLDER-CORE` 变为 `PLACEHOLDER-CORE-IMAGE`；占位 Core 现在已经带完整性头，旧的无头文件同样认不出来。两者都会被当作“不是当前格式的占位件”拒绝，需要先删除再重新生成。
 
 可复现设置包括固定 FAT 元数据、PE 时间戳、Ext4 UUID/哈希种子/根所有者，关闭 Ext4 延迟初始化。`SOURCE_DATE_EPOCH` 默认 `1700000000`，传给文件系统工具，同时设置 `E2FSPROGS_FAKE_TIME`；接受 `0..2147483647` 的十进制秒数。改变该值或要求全部重新生成时，请使用新的空输出目录，现有文件不会被改写。同一工具链与文件系统配置下应生成相同字节；不同版本的 NASM、dosfstools、e2fsprogs 或 `mke2fs.conf` 可能改变产物布局。

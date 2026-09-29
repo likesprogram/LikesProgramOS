@@ -20,7 +20,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <BaleenImage.h>
 #include <CoreHandoff.hpp>
+#include <ImageHeader.hpp>
 
 namespace fs = std::filesystem;
 using Bytes = std::vector<uint8_t>;
@@ -155,12 +157,14 @@ _Msg: DB "PLACEHOLDER-STUB (BaleenStub not implemented yet)", 13, 10, 0
 
     // 占位 Core 的尾部填充长度：跨过 64KiB，让 Stub 的高位装载分两轮走完，而不是只读一个扇区
     constexpr std::size_t kPlaceholderCoreBytes = 0x11000;
+    // Core 映像的装入物理地址，取值与 Contract.inc 的 CORE_LOAD 一致；入口偏移取自镜像头布局
+    constexpr uint32_t kCoreLoad = 0x100000;
 
     // 占位 Core：Stub 把它装到 1MiB 并按 32 位保护模式进入，入口时 ESI 指向交权块
     // 交权块可用就经 Stub 的控制台打印标识；不可用时退回直接写 0xE9 与 COM1，标记仍要出现
     // @...@ 是待替换的交权块常量，由 FillHandoffConstants 用 CoreHandoff.hpp 的取值填上
     constexpr std::string_view CoreAssembly = R"ASM(BITS 32
-ORG 0x100000
+ORG @CORE_ENTRY@
 _Entry:
     CMP DWORD [ESI], @HANDOFF_MAGIC@
     JNE .Direct
@@ -199,9 +203,9 @@ _Msg: DB "PLACEHOLDER-CORE-IMAGE (BaleenCore not implemented yet)", 13, 10, 0
 _MsgDirect: DB "PLACEHOLDER-CORE-IMAGE (handoff unavailable)", 13, 10, 0
 )ASM";
 
-    // 把占位 Core 汇编里的 @...@ 换成 CoreHandoff.hpp 的交权块常量
+    // 把占位 Core 汇编里的 @...@ 换成头文件里的常量：交权块字段与入口地址
     // 偏移只在头文件里写一次：结构体一改，这里与 Stub 侧的断言会同时失败
-    std::string FillHandoffConstants(std::string_view source) {
+    std::string FillAssemblyConstants(std::string_view source) {
         // 按 0x 加 8 位大写十六进制格式化，与汇编里的字面量写法一致
         const auto hex = [](uint32_t value) {
             std::string text = "0x";
@@ -217,6 +221,7 @@ _MsgDirect: DB "PLACEHOLDER-CORE-IMAGE (handoff unavailable)", 13, 10, 0
         replaceAll(text, "@HANDOFF_VERSION@", hex(Baleen::CoreHandoffLayout::kVersion));
         replaceAll(text, "@HANDOFF_BYTES@", hex(Baleen::CoreHandoffLayout::kBytes));
         replaceAll(text, "@HANDOFF_WRITE@", hex(Baleen::CoreHandoffLayout::kWrite));
+        replaceAll(text, "@CORE_ENTRY@", hex(kCoreLoad + Baleen::ImageHeaderLayout::kEntryOffset));
         return text;
     }
 
@@ -258,6 +263,34 @@ _Msg: DB "MAKEISO-EFI-BOOT-OK", 13, 10
 ALIGN 8
 _RelocSlot: DQ 0
 )ASM";
+
+    // 组装占位 Core 的完整镜像：入口前缀 + 保留区 + 完整性头 + 代码，补零到固定长度后填身份
+    // 占位件也要让 Stub 的头与摘要校验通过：占位是内容性质，不是跳过校验的理由
+    Bytes BuildCoreImage(const Bytes& code) {
+        const std::size_t entryAt = Baleen::ImageHeaderLayout::kEntryOffset;
+        Require(code.size() + entryAt <= kPlaceholderCoreBytes, "占位 Core 代码超出映像长度上限");
+        Bytes image(entryAt + code.size(), 0);
+        // 文件起点的 16 位近跳转：位移相对指令末端，从装入点的偏移 0 跳到入口
+        image[0] = Baleen::ImageHeaderLayout::kNearJumpOpcode;
+        Put(image, 1, entryAt - Baleen::ImageHeaderLayout::kPrefixBytes, 2);
+        const std::size_t head = Baleen::ImageHeaderLayout::kOffset;
+        Text(image, head + Baleen::ImageHeaderLayout::kFieldMagic, std::string_view("BLNCORE\0", 8));
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldVersion, Baleen::ImageHeaderLayout::kVersion, 2);
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldHeaderBytes, Baleen::ImageHeaderLayout::kBytes, 2);
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldFlags, Baleen::ImageHeaderLayout::kFlags, 4);
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldEntryOffset, entryAt, 4);
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldDigestAlgorithm, Baleen::ImageHeaderLayout::kDigestSha256, 2);
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldBuildIdBytes, Baleen::ImageHeaderLayout::kBuildIdBytes, 2);
+        std::copy(code.begin(), code.end(), image.begin() + entryAt);
+        image.resize(kPlaceholderCoreBytes, 0);
+        // 长度按补零后的文件算：占位件没有未落盘的静态内存，MemoryBytes 与文件长度相同
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldImageBytes, image.size(), 4);
+        Put(image, head + Baleen::ImageHeaderLayout::kFieldMemoryBytes, image.size(), 4);
+        makeiso::FillImageIdentity(image);
+        // 自己先验一遍：占位件不经过 PackImage，任何字段写错都在这里暴露
+        makeiso::VerifyImage(image, makeiso::ImageKind::Core);
+        return image;
+    }
 
     // 把一段 NASM 源码写成文件并汇编成二进制
     void Assemble(const fs::path& directory, const std::string& name, std::string_view source) {
@@ -413,10 +446,13 @@ _RelocSlot: DQ 0
                 // UUID 只识别生成来源，不能证明仍为空卷；所有已有文件均只复用
                 constexpr uint8_t uuid[] = {0x11,0x11,0x11,0x11,0x22,0x22,0x33,0x33, 0x44,0x44,0x55,0x55,0x55,0x55,0x55,0x55};
                 placeholder = data.size() == 16 * 1024 * 1024 && Get(data, 1024 + 56, 2) == 0xef53 && std::equal(std::begin(uuid), std::end(uuid), data.begin() + 1024 + 104);
+            } else if (std::string_view(name) == "BaleenStub.bin" || std::string_view(name) == "BaleenCore.bin") {
+                // 按完整性头与占位标识判定：占位 Core 带头，旧格式（无头）要删掉重生成
+                const makeiso::ImageClass cls = makeiso::ClassifyImage(data);
+                const makeiso::ImageKind expected = std::string_view(name) == "BaleenStub.bin" ? makeiso::ImageKind::Stub : makeiso::ImageKind::Core;
+                placeholder = cls.kind == expected && cls.placeholder && (expected == makeiso::ImageKind::Stub || cls.header);
             } else {
-                const std::string_view marker = std::string_view(name) == "BaleenStub.bin" ? "PLACEHOLDER-STUB" :
-                    std::string_view(name) == "BaleenCore.bin" ? "PLACEHOLDER-CORE-IMAGE" :
-                    std::string_view(name) == "Efi.img" ? "MAKEISO-EFI-BOOT-OK" : "PLACEHOLDER BaleenLayout.bin";
+                const std::string_view marker = std::string_view(name) == "Efi.img" ? "MAKEISO-EFI-BOOT-OK" : "PLACEHOLDER BaleenLayout.bin";
                 placeholder = bytes.find(marker) != std::string_view::npos;
             }
             // 占位件换过格式时旧文件认不出来，这里只说明要删：本工具不覆写已有文件
@@ -439,12 +475,10 @@ _RelocSlot: DQ 0
         Staging staging(output);
         const auto& dir = staging.path;
         Assemble(dir, "BaleenStub", StubAssembly);
-        // 占位 Core 是真正的 32 位可执行映像：Stub 会把它装到 1MiB 并跳进去，标识由它自己打印
-        // 尾部补零到 kPlaceholderCoreBytes，顺带让高位装载的分批与拷贝路径在默认构建里就被走到
-        Assemble(dir, "coreapp", FillHandoffConstants(CoreAssembly));
-        Bytes core = Read(dir / "coreapp.bin");
-        core.resize(kPlaceholderCoreBytes, 0);
-        Write(dir / "BaleenCore.bin", core);
+        // 占位 Core 是真正的 32 位可执行映像：Stub 会校验它的头与摘要、把它装到 1MiB 并跳进去，
+        // 入口前缀与完整性头由 BuildCoreImage 组装；尾部补零跨过 64KiB，高位装载的分批与拷贝路径也会被走到
+        Assemble(dir, "coreapp", FillAssemblyConstants(CoreAssembly));
+        Write(dir / "BaleenCore.bin", BuildCoreImage(Read(dir / "coreapp.bin")));
         Assemble(dir, "efiapp", EfiAssembly);
         const Bytes efi = EfiPe(Read(dir / "efiapp.bin"));
         CreateEmpty(dir / "Efi.img", 36 * 1024 * 1024);

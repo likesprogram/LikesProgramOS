@@ -9,10 +9,10 @@ BIN_DIR  ?= ../../Bin
 CXX      ?= g++
 # 预处理选项：夹具头与源同目录，头文件引用一律走 <> 由此处指定搜索目录
 CPPFLAGS ?= -ISrc
-# 编译选项
-CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic
-# 链接选项
-LDFLAGS  ?=
+# 编译选项：常见警告全开并视为错误
+CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
+# 链接选项：链接器警告视为错误
+LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/CheckIpl

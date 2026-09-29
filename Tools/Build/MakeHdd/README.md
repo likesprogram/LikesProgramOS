@@ -35,6 +35,7 @@ MakeHdd --out Baleen.img \
 | `--system-volume PATH` | 构建期装配好的 Ext4 系统卷镜像，落到 1 号分区 |
 | `--raw 宿主路径[@偏移]` | 原始载荷，可重复；偏移须 2048 对齐且不与已安排区重叠 |
 | `--pad-to N` | 镜像总长向上对齐的粒度，默认 `0x100000`（1 MiB） |
+| `--stub-unchecked` | 免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用 |
 | `--manifest PATH` | 输出构建清单（JSON） |
 
 系统卷镜像是构建期「布局计算与镜像组装」的产出（内容与光盘形态共用同一份卷内布局），该环节尚未实现，所以要由调用方提供；`--esp` 取的是同一个 FAT 镜像，MakeIso 里叫 `--efi`。
@@ -72,6 +73,8 @@ ESP 的 1 MiB 起点与 `Mbr.asm` 里分区项 0 的占位 LBA 2048（512 字节
 
 **CoreDescriptor**（介质绝对偏移 `0x340`，小端，与 `Packages/Baleen/Common/Include/Contract.inc`、`Stub/Src/LoadCore.cpp` 的常量一致）：字段与校验同 BootDescriptor 的形态——magic `0x52444342`（`BCDR`）、version `1`、header `32`、8 字节 Core 偏移、8 字节 Core 字节数、8 字节保留；偏移至少 `0x800` 且 2048 对齐，偏移加长度不得产生 32 位进位，长度非 0 且不超过 `0x400000`。写它的前提是提供 `--core`；缺 Core 时只提示，不写描述符。
 
+**载荷门禁**：`--stub` 与 `--core` 的载荷按各自的完整性头判定，Stub 与 Core 同构、只有格式标记与长度上限不同。带头的载荷校验格式标记、版本、头长、标志、摘要算法、`BuildId` 长度、保留字段、`ImageBytes` 与实际文件长度、该类别的长度上限（Stub 为两种入口共用的 `0x8000`，Core 为 `0x400000`）、入口前缀与 `EntryOffset` 一致、`MemoryBytes` 覆盖文件且不越界（Stub 另查低 64KiB 窗口）以及整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出，便于与构建记录对照。`MakePayloads` 生成的占位内容同样要过这套校验；完全没有头的 `PLACEHOLDER-STUB` 占位件放行并在标准错误上提示未校验。两种标识都没有的载荷默认拒绝；`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验，只给测试夹具与特殊用途，被免除校验的载荷不能算作对正式产物的检查。实现与判定规则见 [BaleenImage](../Common/README.md) 与 [PackImage](../PackImage/README.md)。
+
 ## 五、构建清单
 
 `--manifest` 的 JSON 记录：`total_bytes` / `total_sectors_512`、`mbr`、`descriptor`（含 Stub 偏移与长度）、`core_descriptor`（含 Core 偏移与长度）、`stub` / `core` / `raw[]`、`esp` / `system_volume`（偏移与长度），以及 `partitions[]`（槽位、类型、起始 LBA、扇区数）。后续的布局描述生成与验证脚本按它取字节偏移与长度。
@@ -82,7 +85,7 @@ ESP 的 1 MiB 起点与 `Mbr.asm` 里分区项 0 的占位 LBA 2048（512 字节
 
 ## 七、边界与待定项
 
-- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；`BaleenLayout.bin` 的字段与落点仍待后续阶段设计，可由 `--raw` 指定位置。IPL 只消费 BootDescriptor，Stub 只消费 CoreDescriptor，其余结构两者都不解析。
+- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；`BaleenLayout.bin` 的字段与落点仍待后续阶段设计，可由 `--raw` 指定位置。IPL 只消费 BootDescriptor；Stub 消费 CoreDescriptor 与 Core 镜像自带的完整性头，其余结构两者都不解析。
 - **不写 GPT**：只有 MBR 分区表（UEFI 固件按 MBR 里的 ESP 分区项启动），保护性 MBR + GPT 是否加入尚未决定。
 - **不做** 物理设备写入（由 `dd` 等外部工具负责）、签名与信任锚、坏块与磨损处理。
 - **不擦除**：镜像大小由内容决定，写到更大的介质上时其余空间保持介质原状，需要擦除由写盘步骤自行决定。

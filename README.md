@@ -39,6 +39,8 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 
 构建需要 GNU make、NASM 3.x、g++（C++20），以及生成占位件的 `mkfs.vfat` / `mkfs.ext4`；启动与测试需要 QEMU（可选 Bochs，UEFI 用例需要 OVMF）。
 
+构建全程把警告当错误：C++ 用 `-Wall -Wextra -Werror`（宿主工具另加 `-Wpedantic`），NASM 用 `-Werror`，链接用 `--fatal-warnings`。新增警告会直接让构建失败，不会被跳过。
+
 ```sh
 make                # 构建 Out/LikesProgram.iso 与 Out/LikesProgram.hdd
 make iso            # 只构建 ISO（make hdd 只构建磁盘镜像）

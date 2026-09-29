@@ -20,6 +20,8 @@ Tools/Bin/CheckIpl --ipl-dir Packages/Baleen/Ipl/Out/Bin
 
 `--ipl-dir <IplOut/Bin>` 跑 51 例启动回归：用 `MakeHdd` / `MakeIso` 与真实 IPL 组装镜像，再在 QEMU 里启动并核对。除 IPL 产物外需要 `nasm`、`qemu-system-x86_64`，以及可执行的 `MakeHdd`、`MakeIso`——默认从可执行文件同目录寻找，`--root <项目根>` 时改用 `<项目根>/Tools/Bin`。`NASM`、`QEMU` 可指定外部程序，`IPL_TEST_TIMEOUT` 为每例启动秒数（默认 12，范围 1..300）。
 
+夹具载荷是内嵌的校验程序而不是 BaleenStub 正式产物，组装时按 `--stub-unchecked` 显式免除头与摘要校验；故障注入用例自己拼镜像，不经过组装器门禁。
+
 用例分四组：
 
 - **交权与完整装载**：4 KiB、介质上限减 1、介质上限（HDD `0x8200`、CD `0x8000`）三种长度；核对 16 位实模式状态、`CS:IP`、`DS` / `ES` / `SS:SP`、`DL` / `DH`、中断与方向标志，以及装入的载荷字节是否完整。

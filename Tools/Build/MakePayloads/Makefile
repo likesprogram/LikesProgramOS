@@ -5,19 +5,26 @@
 OBJ_DIR  ?= Obj
 # 可执行文件输出目录
 BIN_DIR  ?= ../../Bin
+# 本工具的源目录
+SRC_DIR  := Src
+# 与 PackImage / MakeIso / MakeHdd 共享的代码目录
+COMMON_DIR := ../Common
+
 # C++ 编译器
 CXX      ?= g++
-# 预处理选项：占位 Core 的汇编常量取自 Baleen 的交权块头，避免偏移在本工具里重写一遍
-CPPFLAGS ?= -I../../../Packages/Baleen/Common/Include -I../../../Packages/Common/Include
-# 编译选项
-CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic
-# 链接选项
-LDFLAGS  ?=
+# 预处理选项：占位 Core 的汇编常量与镜像头布局取自 Baleen 的公共头，避免取值在本工具里重写一遍
+CPPFLAGS ?= -I$(COMMON_DIR)/Include -I../../../Packages/Baleen/Common/Include -I../../../Packages/Common/Include
+# 编译选项：常见警告全开并视为错误
+CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
+# 链接选项：链接器警告视为错误
+LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/MakePayloads
-# 目标文件
-OBJS := $(OBJ_DIR)/main.o
+# 目标文件：镜像身份填充与摘要算法在 ../Common 共享
+OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/BaleenImage.o $(OBJ_DIR)/Sha256.o $(OBJ_DIR)/HostIo.o
+
+vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/$(SRC_DIR)
 
 .DEFAULT_GOAL := all
 .PHONY: all clean help
@@ -30,7 +37,7 @@ $(BIN): $(OBJS) | $(BIN_DIR)
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS)
 
 # 编译源文件
-$(OBJ_DIR)/main.o: Src/main.cpp | $(OBJ_DIR)
+$(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 # 建输出目录

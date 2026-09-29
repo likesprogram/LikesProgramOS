@@ -15,6 +15,7 @@
 #include <Fat.h>
 #include <HostIo.h>
 #include <Image.h>
+#include <BaleenImage.h>
 
 #include <algorithm>
 #include <array>
@@ -29,6 +30,7 @@
 namespace {
     using makeiso::AlignUp;
     using makeiso::BootDescriptor;
+    using makeiso::CheckPayload;
     using makeiso::CoreDescriptor;
     using makeiso::FileSize;
     using makeiso::RequireFat32Image;
@@ -40,6 +42,9 @@ namespace {
     using makeiso::Placed;
     using makeiso::ReadFile;
     using makeiso::Reservations;
+    using makeiso::ImageKind;
+    using makeiso::PayloadInfo;
+    using makeiso::PayloadSummary;
 
     constexpr uint64_t kMbrBytes = 512;        // 分区项从 446 起，510 起是 0xAA55
     constexpr uint64_t kEntryBytes = 16 * 4;   // 分区表 4 项，每项 16 字节
@@ -60,6 +65,8 @@ namespace {
         std::string system_volume;                                         // 系统卷文件路径
         std::string manifest;                                              // 构建清单输出路径
         uint64_t pad_to = kDefaultPadTo;                                   // 镜像总长的对齐粒度
+        bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
+        bool core_unchecked = false;                                       // 是否免除 Core 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
         std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移，空表示自动分配
     };
@@ -84,6 +91,8 @@ namespace {
             "  --esp PATH                ESP 的 FAT32 镜像（含 \\EFI\\BOOT\\BOOTX64.EFI），0 号分区\n"
             "  --system-volume PATH      Ext4 系统卷镜像，1 号分区\n"
             "  --raw 宿主路径[@偏移]      原始载荷，可重复；偏移须 2048 对齐，省略则自动分配\n"
+            "  --stub-unchecked          免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
+            "  --core-unchecked          免除 Core 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
             "\n"
             "镜像：\n"
             "  --pad-to N                镜像总长向上对齐的粒度，默认 0x100000（1 MiB）\n"
@@ -115,6 +124,8 @@ namespace {
                 else options.raw.emplace_back(value, std::nullopt);
             } else if (arg == "--manifest") options.manifest = needValue(i, arg);
             else if (arg == "--pad-to") options.pad_to = ParseNumber(needValue(i, arg), "对齐粒度");
+            else if (arg == "--stub-unchecked") options.stub_unchecked = true;
+            else if (arg == "--core-unchecked") options.core_unchecked = true;
             else throw std::runtime_error("无法识别的参数：" + arg);
         }
         return options;
@@ -151,6 +162,12 @@ int main(int argc, char** argv) {
         if (options.out.empty()) throw std::runtime_error("缺少 --out");
         if (options.mbr.empty()) throw std::runtime_error("缺少 --mbr");
         Validate(options);
+
+        // 载荷门禁：带头产物在这里校验头字段与摘要，占位内容放行并在 stderr 说明
+        PayloadInfo stubInfo;
+        PayloadInfo coreInfo;
+        if (!options.stub.empty()) stubInfo = CheckPayload(options.stub, ImageKind::Stub, options.stub_unchecked, "--stub-unchecked");
+        if (!options.core.empty()) coreInfo = CheckPayload(options.core, ImageKind::Core, options.core_unchecked, "--core-unchecked");
 
         Image image(options.out);
         Reservations reserved;
@@ -296,8 +313,9 @@ int main(int argc, char** argv) {
 
         std::cout << "MakeHdd：已生成 " << options.out << "（" << total << " 字节，" << total / kMbrBytes << " 个 512 字节扇区）\n";
         if (descriptor.has_value()) std::cout << "  BootDescriptor 偏移 " << BootDescriptor::kImageOffset << "，Stub 偏移 " << stub->offset << "，Stub 字节 " << stub->bytes << "\n";
+        if (stub.has_value()) std::cout << "  Stub 载荷：" << PayloadSummary(stubInfo) << "\n";
         if (core_descriptor.has_value()) std::cout << "  CoreDescriptor 偏移 " << CoreDescriptor::kImageOffset << "，Core 偏移 " << core->offset << "，Core 字节 " << core->bytes << "\n";
-        if (core.has_value()) std::cout << "  BaleenCore  偏移 " << core->offset << "，字节 " << core->bytes << "\n";
+        if (core.has_value()) std::cout << "  Core 载荷：" << PayloadSummary(coreInfo) << "\n";
         if (partitions.esp.has_value()) std::cout << "  0 号分区    ESP（0xEF）偏移 " << partitions.esp->offset << "，字节 " << partitions.esp->bytes << "\n";
         if (partitions.system_volume.has_value()) std::cout << "  1 号分区    Ext4（0x83）偏移 " << partitions.system_volume->offset << "，字节 " << partitions.system_volume->bytes << "\n";
         return 0;

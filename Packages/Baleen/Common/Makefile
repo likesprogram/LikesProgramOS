@@ -1,5 +1,5 @@
 # Makefile
-#    Packages/Baleen/Common：BIOS 路径引导期控制台的目标文件，供 Stub 与 Core 共用
+#    Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法与镜像完整性头的目标文件，供 Stub 与 Core 共用
 
 # 产物根目录
 OUT_DIR   ?= Out
@@ -14,13 +14,13 @@ COMMON_DIR := ../../Common
 
 # C++ 编译器
 CXX       ?= g++
-# 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护
+# 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
 CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR) -I$(COMMON_DIR)/Include
 
 # 源与产物
-CPP_OBJS  := $(addprefix $(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o)
+CPP_OBJS  := $(addprefix $(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o Sha256.o ImageHeader.o)
 
 .DEFAULT_GOAL := all
 .PHONY: all clean help
@@ -38,7 +38,7 @@ clean:
 
 # 打印用法
 help:
-	@printf '%s\n' 'Packages/Baleen/Common：BIOS 路径引导期控制台' \
+	@printf '%s\n' 'Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法与镜像完整性头' \
 	  '  make [all]  构建 $(CPP_OBJS)' \
 	  '  make clean  删除 $(OUT_DIR)/' \
 	  '  变量：OUT_DIR / CXX / CXXFLAGS 可覆盖'

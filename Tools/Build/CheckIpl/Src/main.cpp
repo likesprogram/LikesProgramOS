@@ -572,7 +572,8 @@ namespace {
                 command.insert(command.end(), {"--boot-image", (m_options.iplDir / "BaleenIPLCd.bin").string()});
                 if (hybrid) command.insert(command.end(), {"--mbr", (m_options.iplDir / "BaleenIPL.bin").string()});
             } else command.insert(command.end(), {"--mbr", (m_options.iplDir / "BaleenIPL.bin").string()});
-            command.insert(command.end(), {"--stub", stub.string()});
+            // 校验载荷是内嵌夹具而不是 BaleenStub 正式产物：显式免除组装器的头与摘要校验
+            command.insert(command.end(), {"--stub", stub.string(), "--stub-unchecked"});
             Run(command, m_work / "image.log");
             return image;
         }

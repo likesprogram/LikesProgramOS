@@ -1,7 +1,10 @@
 /* Stub.cpp
-    Stub：低内存固定桩，开 A20、建立运行期段表与中断表、校验 BaleenCore 落点、把 BaleenCore 读到高位并跳转；自身须冻结且整体留在低 64KiB，所有 BIOS 服务经这里暴露给 BootCore
+    Stub：低内存固定桩，自检自身完整性头与摘要、开 A20、建立运行期段表与中断表、校验 BaleenCore 的
+    描述符与镜像头、把 BaleenCore 读到高位、校验其摘要并跳转；自身须冻结且整体留在低 64KiB，
+    所有 BIOS 服务经这里暴露给 BootCore
 */
 
+#include <new>
 #include <stdint.h>
 
 #include <Bios.hpp>
@@ -12,6 +15,7 @@
 #include <Platform/Descriptor.hpp>
 #include <Print/VgaTextTarget.hpp>
 #include <PrintTarget.hpp>
+#include <SelfCheck.hpp>
 
 // IPL 传入，Stub.asm 保存
 extern "C" uint8_t _Boot_Drive;
@@ -20,10 +24,13 @@ extern "C" uint8_t _Boot_Media;
 extern "C" const uintptr_t _Stub_Exception_Stubs[32];
 
 namespace {
-    // 引导期控制台用的 VGA 文本设备；文本模式由 IPL 交权路径保证
-    Baleen::Devices::Vga s_vga;
-    // BIOS 路径引导期控制台：组合 VGA 文本、0xE9 与 COM1
-    Baleen::PrintTargets::BiosConsole s_console;
+    // 运行期状态对象一律落在未初始化区：镜像自检要求装入的字节保持原样，
+    // 带虚表或非零初值的对象若作为普通全局量会进落盘数据区，装配控制台就改写了镜像
+    // 这里只留存储，对象由 InitConsole 就地构造
+    alignas(Baleen::Devices::Vga) uint8_t s_vgaStorage[sizeof(Baleen::Devices::Vga)];
+    Baleen::Devices::Vga& s_vga = *reinterpret_cast<Baleen::Devices::Vga*>(s_vgaStorage);
+    alignas(Baleen::PrintTargets::BiosConsole) uint8_t s_consoleStorage[sizeof(Baleen::PrintTargets::BiosConsole)];
+    Baleen::PrintTargets::BiosConsole& s_console = *reinterpret_cast<Baleen::PrintTargets::BiosConsole*>(s_consoleStorage);
     // CPU 设备
     Platform::Cpu s_cpu;
     // 运行期段描述符表：入口汇编只带进入保护模式所需的最小段表，其余描述符在这里建立
@@ -34,8 +41,8 @@ namespace {
     // 选择子：与入口汇编的引导表同号；16 位段留给将来回实模式的 BIOS 路径
     constexpr uint16_t kSelectorCode32 = 0x08;   // 32 位代码段
     constexpr uint16_t kSelectorData32 = 0x10;   // 32 位数据段
-    constexpr uint16_t kSelectorCode16 = 0x18;   // 16 位代码段
-    constexpr uint16_t kSelectorData16 = 0x20;   // 16 位数据段
+    [[maybe_unused]] constexpr uint16_t kSelectorCode16 = 0x18;   // 16 位代码段，当前只服务汇编侧语义
+    [[maybe_unused]] constexpr uint16_t kSelectorData16 = 0x20;   // 16 位数据段，当前只服务汇编侧语义
     // CPU 异常向量数量：0 至 31，不含外部中断
     constexpr uint32_t kExceptionVectors = 32;
 
@@ -43,6 +50,13 @@ namespace {
     [[noreturn]] void Fail(const char* reason) {
         Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Fatal, reason);
         for (;;) asm volatile("CLI; HLT");
+    }
+
+    // 就地构造控制台对象：写入的只是未初始化区的存储，不改动镜像字节
+    // VGA 设备与组合控制台都带虚表或非零初值，不能依赖静态初始化落盘
+    void InitConsole() {
+        new (s_vgaStorage) Baleen::Devices::Vga();
+        new (s_consoleStorage) Baleen::PrintTargets::BiosConsole();
     }
 
     // 该向量是否由处理器压入错误码；其余向量的栈帧里没有错误码
@@ -101,10 +115,27 @@ extern "C" void _Stub_Exception_Handler(const uint32_t* frame) {
 // BaleenStub 主流程：成功跳到 BaleenCore，不返回
 extern "C" void _Stub_Main() {
     // 初始化控制台
+    InitConsole();
     s_console.Install(s_vga);
     // 接管控制台后清一次屏：VGA 上抹掉固件与上层阶段留下的输出，串口等流式通道无感
     Print::ClearScreen();
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Stub, "LikesProgramOS BaleenStub");
+
+    // 自身完整性自检：先核对头字段与链接布局，再比对整幅镜像的摘要
+    // 摘要要遍历整个文件，先播报再进行，卡在这一步时屏上仍有线索
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Verifying the stub image");
+    Baleen::Stub::SelfInfo self;
+    if (const char* reason = Baleen::Stub::CheckSelf(self)) Fail(reason);
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The stub image is intact");
+    // 续行：镜像尺寸与构建标识，BuildId 只显示前 4 字节
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Image=");
+    Print::WriteHex(self.imageBytes);
+    Print::Write(" Mem=");
+    Print::WriteHex(self.memoryBytes);
+    Print::Write(" Build=");
+    Print::WriteHex(self.buildId);
+    Print::Write("\r\n");
 
     // 初始化 CPU
     s_cpu.Install();
@@ -131,7 +162,7 @@ extern "C" void _Stub_Main() {
     // 探测设备扇区大小
     const uint32_t media = _Boot_Media;
     const uint32_t sect = ProbeSectorSize(media);
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Probe sector size");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Probing sector size");
     // 进度行：实体机上只有屏能看到输出，此行之后若再无下文，说明卡在描述符读取、E820 或 BaleenCore 装载这些要走 BIOS 的步骤上，而不是没跑起来
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Media=");
@@ -167,11 +198,11 @@ extern "C" void _Stub_Main() {
     if (sect == 512) Print::Write(signature_ok ? " Sig=Ok" : " Sig=Bad");
     Print::Write("\r\n");
 
-    // 从存储介质装载 BaleenCore 并按交权块交给它，成功不返回
+    // 从存储介质装载 BaleenCore：先核对描述符与镜像头，再读入高位，最后比对摘要，成功不返回
     // 校验、读盘、交权的顺序与每一步的诊断行都摆在这里：日志与流程集中在一处，出问题只看这一段
     Baleen::Stub::CoreLoadPlan plan;
     if (const char* reason = Baleen::Stub::PrepareCore(_Boot_Drive, media, sect, plan)) Fail(reason);
-    // 装载计划已成
+    // 装载计划已成：长度、入口与静态内存跨度都取自镜像头，且已与描述符核对
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Preparing the baleen core load");
     // 输出计划参数，屏上此行之后再无下文，说明卡在 Core 读盘上
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
@@ -181,13 +212,27 @@ extern "C" void _Stub_Main() {
     Print::WriteHex(plan.imageBytes);
     Print::Write(" Load=");
     Print::WriteHex(plan.loadAddress);
+    Print::Write(" Entry=");
+    Print::WriteHex(plan.loadAddress + plan.entryOffset);
     Print::Write(" Bounce=");
     Print::WriteHex(plan.bounceAddress);
     Print::Write("\r\n");
     if (const char* reason = Baleen::Stub::ReadCore(plan, sect)) Fail(reason);
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Loading baleen core");
 
+    // 摘要遍历整个文件，先播报再进行，卡在这一步时屏上仍有线索
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Verifying the baleen core image");
+    if (const char* reason = Baleen::Stub::CheckCore(plan)) Fail(reason);
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The baleen core image is intact");
+    // 续行：头声明的静态内存跨度与构建标识，BuildId 只显示前 4 字节
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Mem=");
+    Print::WriteHex(plan.memoryBytes);
+    Print::Write(" Build=");
+    Print::WriteHex(plan.buildId);
+    Print::Write("\r\n");
+
     // 交权与跳转：跳转前只能播报，进入 Core 由 Core 自己的输出证明
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Entering baleen core");
-    Baleen::Stub::EnterCore();
+    Baleen::Stub::EnterCore(plan);
 }

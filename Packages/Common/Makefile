@@ -14,12 +14,12 @@ INC_DIR   := Include
 CXX       ?= g++
 # 汇编器
 NASM      ?= nasm
-# 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护
+# 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
 CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR)
-# 汇编选项：32 位保护模式目标文件
-NASMFLAGS ?= -f elf32
+# 汇编选项：32 位保护模式目标文件，警告视为错误
+NASMFLAGS ?= -f elf32 -Werror
 
 # C++ 源与产物
 CPP_OBJS  := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Descriptor.o)

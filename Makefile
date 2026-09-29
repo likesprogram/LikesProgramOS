@@ -40,7 +40,7 @@ SYSTEM_VOLUME_ISO_NAME ?= SystemVolume.img
 # 所有子包的 Makefile
 SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
 # 需要构建的宿主工具目录
-TOOL_DIRS := Tools/Build/MakeIso Tools/Build/MakeHdd Tools/Build/MakePayloads Tools/Build/RunBootCase Tools/Build/CheckIpl
+TOOL_DIRS := Tools/Build/MakeIso Tools/Build/MakeHdd Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl
 
 # —— 载荷：真实产物优先，缺失时退到占位件 ——
 # 一级引导产物目录

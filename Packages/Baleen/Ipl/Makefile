@@ -16,8 +16,8 @@ INC_DIR   := Include
 NASM      ?= nasm
 # Baleen 共享头目录：交权契约常量在这里，与入口源码自己的 Include 一起进搜索路径
 SHARE_DIR := ../Common/Include
-# 汇编选项：-Ox 多趟优化把短跳转收敛到最短，446/510 字节上限依赖它
-NASMFLAGS ?= -f bin -Ox -I$(INC_DIR)/ -I$(SHARE_DIR)/
+# 汇编选项：-Ox 多趟优化把短跳转收敛到最短，446/510 字节上限依赖它；警告视为错误
+NASMFLAGS ?= -f bin -Ox -Werror -I$(INC_DIR)/ -I$(SHARE_DIR)/
 # 0xE9 调试口开关
 ENABLE_E9 ?= 1
 # 传给汇编器的定义

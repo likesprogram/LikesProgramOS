@@ -9,10 +9,10 @@ BIN_DIR  ?= ../../Bin
 CXX      ?= g++
 # 预处理选项
 CPPFLAGS ?=
-# 编译选项
-CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic
-# 链接选项
-LDFLAGS  ?=
+# 编译选项：常见警告全开并视为错误
+CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
+# 链接选项：链接器警告视为错误
+LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/RunBootCase

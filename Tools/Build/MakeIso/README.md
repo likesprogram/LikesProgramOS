@@ -46,6 +46,7 @@ MakeIso --out Baleen.iso \
 | `--raw 宿主路径[@偏移]` | 原始载荷，可重复；偏移须 2048 对齐，省略则自动分配 |
 | `--volume-id ID` | 卷标识，默认 `LIKESPROGRAM` |
 | `--timestamp N` | 卷与目录时间戳（UTC 秒）；默认取 `SOURCE_DATE_EPOCH`，未设则写全零 |
+| `--stub-unchecked` | 免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用 |
 | `--manifest PATH` | 输出构建清单（JSON） |
 
 不给 `--mbr` 时产出纯光盘形态：引导镜像放在 LBA 0，描述符写在它的偏移 `0x300`。给 `--mbr` 时产出混合镜像：引导镜像移到 LBA 1，偏移 0 是磁盘一级引导，描述符仍落在绝对偏移 `0x300`——两种引导路径读的正是同一处字节。
@@ -81,6 +82,8 @@ MakeIso --out Baleen.iso \
 | 24 | 8 | 保留 | 全 0 |
 
 **CoreDescriptor**（介质绝对偏移 `0x340`，小端，与 `Packages/Baleen/Common/Include/Contract.inc`、`Stub/Src/LoadCore.cpp` 的常量一致）：magic `0x52444342`（`BCDR`）、version `1`、header `32`、8 字节 Core 偏移、8 字节 Core 字节数、8 字节保留；偏移至少 `0x800` 且 2048 对齐，偏移加长度不得产生 32 位进位，长度非 0 且不超过 `0x400000`。写它的前提是提供 `--core`；缺 Core 时只提示，不写描述符。
+
+**载荷门禁**：与 MakeHdd 同一套判定，实现在 `../Common` 的 `BaleenImage`。`--stub` 与 `--core` 的带头载荷校验头字段、长度、入口前缀、内存跨度与整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出；`MakePayloads` 生成的占位内容同样要过校验，完全没有头的 `PLACEHOLDER-STUB` 占位件放行并提示；两种标识都没有的载荷默认拒绝，`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验（只给测试夹具与特殊用途）。
 
 **El Torito**：校验项（16 字之和为 0，含 `0x55AA`）；默认项平台 BIOS、无仿真、装入段 `0x7C0`、LoadSize = `ceil(引导镜像/512)`；给 `--efi` 时追加平台 0xEF 段首部与 EFI 项，指向该小 FAT 镜像。
 

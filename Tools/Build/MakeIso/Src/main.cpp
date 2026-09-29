@@ -7,6 +7,7 @@
 #include <HostIo.h>
 #include <Image.h>
 #include <Iso9660.h>
+#include <BaleenImage.h>
 
 #include <algorithm>
 #include <array>
@@ -28,6 +29,7 @@ namespace {
     using makeiso::BootCatalogEntry;
     using makeiso::BootCatalogSpec;
     using makeiso::BootDescriptor;
+    using makeiso::CheckPayload;
     using makeiso::CoreDescriptor;
     using makeiso::FileSize;
     using makeiso::RequireFat32Image;
@@ -44,6 +46,9 @@ namespace {
     using makeiso::Placed;
     using makeiso::ReadFile;
     using makeiso::Reservations;
+    using makeiso::ImageKind;
+    using makeiso::PayloadInfo;
+    using makeiso::PayloadSummary;
 
     constexpr uint64_t kBlock = 2048;                    // ISO9660 逻辑块大小
     constexpr uint64_t kSystemAreaBytes = 16 * kBlock;   // 系统区 16 个逻辑块
@@ -67,6 +72,8 @@ namespace {
         std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移
         std::string manifest;                                              // 构建清单输出路径
         std::optional<uint64_t> timestamp;                                 // 卷时间戳；空 = 写全零
+        bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
+        bool core_unchecked = false;                                       // 是否免除 Core 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
     };
 
@@ -104,6 +111,8 @@ namespace {
             "  --iso-name NAME          系统卷在 ISO 内的文件名，默认取源文件名\n"
             "  --file ISO路径=宿主路径   附加文件，可重复（中间目录自动建立）\n"
             "  --raw 宿主路径[@偏移]     原始载荷，可重复；偏移须 2048 对齐，省略则自动分配\n"
+            "  --stub-unchecked         免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
+            "  --core-unchecked         免除 Core 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
             "\n"
             "ISO 元数据：\n"
             "  --volume-id ID           卷标识，默认 LIKESPROGRAM\n"
@@ -146,6 +155,8 @@ namespace {
                 else options.raw.emplace_back(value, std::nullopt);
             } else if (arg == "--manifest") options.manifest = needValue(i, arg);
             else if (arg == "--timestamp") options.timestamp = ParseNumber(needValue(i, arg), "时间戳");
+            else if (arg == "--stub-unchecked") options.stub_unchecked = true;
+            else if (arg == "--core-unchecked") options.core_unchecked = true;
             else throw std::runtime_error("无法识别的参数：" + arg);
         }
         return options;
@@ -167,6 +178,8 @@ namespace {
         std::vector<Placed> raw;                            // 原始载荷（--raw）
         std::vector<Placed> files;                          // 附加文件（--file）
         std::string volume_iso_path;                        // 系统卷在 ISO 内的路径
+        PayloadInfo stub_info;                              // Stub 载荷的门禁结果
+        PayloadInfo core_info;                              // Core 载荷的门禁结果
     };
 
     // 校验选项并固定引导镜像的位置，返回待组装的布局骨架
@@ -193,8 +206,13 @@ namespace {
             // CD 按 2048 字节整块读取，装入空间最多容纳 0x8000 字节
             constexpr uint64_t maxBytes = BootDescriptor::kMaxStubBytes / kBlock * kBlock;
             if (bytes == 0 || bytes > maxBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 CD 整块读取上限 0x8000：" + options.stub);
+            // 带头产物校验头字段与摘要，占位内容放行并在 stderr 说明
+            build.stub_info = CheckPayload(options.stub, ImageKind::Stub, options.stub_unchecked, "--stub-unchecked");
         }
-        if (options.core.empty() == false) if (FileSize(options.core) == 0) throw std::runtime_error("核心阶段载荷为空：" + options.core);
+        if (!options.core.empty()) {
+            if (FileSize(options.core) == 0) throw std::runtime_error("核心阶段载荷为空：" + options.core);
+            build.core_info = CheckPayload(options.core, ImageKind::Core, options.core_unchecked, "--core-unchecked");
+        }
         if (!options.efi.empty()) {
             const uint64_t bytes = FileSize(options.efi);
             if (bytes == 0) throw std::runtime_error("El Torito EFI 引导镜像为空：" + options.efi);
@@ -411,8 +429,9 @@ namespace {
         std::cout << "MakeIso：已生成 " << options.out << "（" << total << " 字节，" << total / kBlock << " 个 2048 扇区）\n";
         std::cout << "  引导镜像    LBA " << build.boot_lba << "，偏移 " << static_cast<uint64_t>(build.boot_lba) * kBlock << "，LoadSize " << build.boot_sectors_512 << "（512 字节单位）\n";
         if (build.descriptor.has_value()) std::cout << "  BootDescriptor 偏移 " << BootDescriptor::kImageOffset << "，Stub 偏移 " << build.stub->offset << "，Stub 字节 " << build.stub->bytes << "\n";
-        if (build.core.has_value()) std::cout << "  BaleenCore  偏移 " << build.core->offset << "，字节 " << build.core->bytes << "\n";
+        if (build.stub.has_value()) std::cout << "  Stub 载荷：" << PayloadSummary(build.stub_info) << "\n";
         if (build.core_descriptor.has_value()) std::cout << "  CoreDescriptor 偏移 " << CoreDescriptor::kImageOffset << "，Core 偏移 " << build.core->offset << "，Core 字节 " << build.core->bytes << "\n";
+        if (build.core.has_value()) std::cout << "  Core 载荷：" << PayloadSummary(build.core_info) << "\n";
         if (build.efi.has_value()) std::cout << "  El Torito EFI 镜像 偏移 " << build.efi->offset << "，字节 " << build.efi->bytes << "\n";
         if (build.esp.has_value()) std::cout << "  ESP（FAT32）偏移 " << build.esp->offset << "，字节 " << build.esp->bytes << "（0xEF 分区）\n";
         if (build.volume.has_value()) std::cout << "  系统卷      ISO 路径 " << build.volume_iso_path << "，偏移 " << build.volume->offset << "，字节 " << build.volume->bytes << "（Ext4 分区）\n";
