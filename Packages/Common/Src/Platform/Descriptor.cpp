@@ -5,7 +5,7 @@
     纯汇编原语在 Descriptor.asm：表寄存器装载与段寄存器重载，位宽随目标模式
 */
 
-#include "Platform/Descriptor.hpp"
+#include <Platform/Descriptor.hpp>
 
 // Descriptor.asm 提供的纯汇编原语，出入口约定随模式（32 位 cdecl，64 位 System V）
 extern "C" void _Gdt_LoadPointer(const void* tablePointer);   // 装入 GDTR

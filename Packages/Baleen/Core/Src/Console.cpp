@@ -2,9 +2,9 @@
     Core 引导期控制台：持有独立于 Stub 的控制台实例，向汇编入口暴露安装与写入包装
 */
 
-#include "Print.hpp"
-#include "Print/VgaTextTarget.hpp"
-#include "PrintTarget.hpp"
+#include <Print.hpp>
+#include <Print/VgaTextTarget.hpp>
+#include <PrintTarget.hpp>
 
 namespace {
     // 引导期控制台用的 VGA 文本设备

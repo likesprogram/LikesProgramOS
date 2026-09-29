@@ -3,7 +3,7 @@
 */
 
 #pragma once
-#include "Print.hpp"
+#include <Print.hpp>
 
 namespace Print {
     // 16550 兼容串口目标：直接访问 I/O 端口，不注册中断；发送等待超限时丢弃字符

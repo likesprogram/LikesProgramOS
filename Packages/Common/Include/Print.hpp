@@ -14,6 +14,9 @@ namespace Print {
         virtual bool Ready() const { return true; }
         // 写入以 '\0' 结尾的文本；默认实现丢弃，避免无 C++ 运行库的镜像引用 __cxa_pure_virtual
         virtual void Write(const char* text) { (void)text; }
+        // 设置后续写入使用的显示属性；默认实现丢弃：串口与调试口是流式通道，没有属性概念
+        // 属性是通道的显示特性而不是文本内容，不随文本进入流，自动化抓取的日志因此保持纯文本
+        virtual void SetAttribute(uint8_t attribute) { (void)attribute; }
         // 清空目标已显示的文本；默认实现什么都不做：串口与调试口是流式通道，没有清屏语义
         // 与 Write 一样不要求调用方先判断可用性，设备未就绪时静默丢弃
         virtual void ClearScreen() {}
@@ -37,6 +40,8 @@ namespace Print {
         bool Ready() const override;
         // 按加入顺序写入每个目标；单个目标的丢弃不影响其他目标
         void Write(const char* text) override;
+        // 按加入顺序设置每个目标的显示属性；不支持属性的成员忽略
+        void SetAttribute(uint8_t attribute) override;
         // 按加入顺序让每个目标清屏；不支持清屏的目标不受影响
         void ClearScreen() override;
     private:
@@ -55,6 +60,9 @@ namespace Print {
     inline OutTarget* Target() { return Detail::currentTarget; }
     // 写入以 '\0' 结尾的文本；未安装目标或文本为空时丢弃
     inline void Write(const char* text) { if (Detail::currentTarget != nullptr && text != nullptr) Detail::currentTarget->Write(text); }
+    // 设置当前目标的显示属性；未安装目标时丢弃
+    // 只有 VGA 文本这类有屏幕的目标有属性概念，流式通道收到后不做任何事
+    inline void SetAttribute(uint8_t attribute) { if (Detail::currentTarget != nullptr) Detail::currentTarget->SetAttribute(attribute); }
     // 清空当前目标已显示的文本；未安装目标时丢弃
     // 流式通道（串口、调试口）收到后不做任何事，清屏只对 VGA 文本这类有屏幕的目标有效
     inline void ClearScreen() { if (Detail::currentTarget != nullptr) Detail::currentTarget->ClearScreen(); }

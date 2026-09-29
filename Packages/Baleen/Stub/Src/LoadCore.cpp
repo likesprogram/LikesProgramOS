@@ -8,10 +8,10 @@
 
 #include <stdint.h>
 
-#include "Bios.hpp"
-#include "BootInfo.hpp"
-#include "CoreHandoff.hpp"
-#include "LoadCore.hpp"
+#include <Bios.hpp>
+#include <BootInfo.hpp>
+#include <CoreHandoff.hpp>
+#include <LoadCore.hpp>
 
 // 由 Stub.asm 提供：把 ESI 置为交权块、跳到 Core 入口后不返回
 extern "C" [[noreturn]] void _Stub_Enter_Core(const Baleen::CoreHandoff* handoff, uintptr_t entry);

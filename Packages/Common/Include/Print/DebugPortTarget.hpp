@@ -3,7 +3,7 @@
 */
 
 #pragma once
-#include "Print.hpp"
+#include <Print.hpp>
 
 namespace Print {
     // 0xE9 调试口目标：Bochs 与 QEMU 捕获写到该端口的字节，真实硬件上写入被忽略

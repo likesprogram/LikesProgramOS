@@ -7,8 +7,8 @@ OBJ_DIR  ?= Obj
 BIN_DIR  ?= ../../Bin
 # C++ 编译器
 CXX      ?= g++
-# 预处理选项
-CPPFLAGS ?=
+# 预处理选项：夹具头与源同目录，头文件引用一律走 <> 由此处指定搜索目录
+CPPFLAGS ?= -ISrc
 # 编译选项
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic
 # 链接选项

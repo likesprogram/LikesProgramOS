@@ -5,7 +5,7 @@
 #pragma once
 #include <stdint.h>
 
-#include "Print.hpp"
+#include <Print.hpp>
 
 namespace Baleen {
     namespace Devices {
@@ -15,7 +15,7 @@ namespace Baleen {
         public:
             static constexpr uint32_t kColumns = 80;             // 文本列数
             static constexpr uint32_t kRows = 25;                // 文本行数
-            static constexpr uint8_t kDefaultAttribute = 0x0F;   // 默认属性字节：亮灰前景、黑底
+            static constexpr uint8_t kDefaultAttribute = 0x0F;   // 默认属性字节：白字黑底
 
             // 常量初始化不依赖启动运行库；Stub/Core 都可以直接定义静态实例
             constexpr Vga() : m_text(nullptr), m_row(0), m_column(0), m_attribute(kDefaultAttribute), m_hardwareCursor(false) {}
@@ -83,6 +83,8 @@ namespace Print {
         bool Ready() const override { return m_vga != nullptr && m_vga->IsInitialized(); }
         // 写入文本；未绑定或文本为空时丢弃
         void Write(const char* text) override { if (m_vga != nullptr && text != nullptr) m_vga->Write(text); }
+        // 设置后续写入的属性字节；设备未绑定时丢弃
+        void SetAttribute(uint8_t attribute) override { if (m_vga != nullptr) m_vga->SetAttribute(attribute); }
         // 清空文本页并把光标归零；设备未绑定时丢弃
         void ClearScreen() override { if (m_vga != nullptr) m_vga->Clear(); }
     private:

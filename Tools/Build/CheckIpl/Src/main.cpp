@@ -2,7 +2,7 @@
     CheckIpl：IPL 的静态布局校验与 QEMU 启动回归，按需手工执行，不构成默认构建依赖
 */
 
-#include "Fixtures.h"
+#include <Fixtures.h>
 
 #include <algorithm>
 #include <array>

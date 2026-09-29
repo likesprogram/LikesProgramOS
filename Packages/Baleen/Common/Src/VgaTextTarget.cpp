@@ -2,7 +2,7 @@
     VGA 文本设备与对应 Print 目标的实现：文本页写入、光标同步与滚动
 */
 
-#include "Print/VgaTextTarget.hpp"
+#include <Print/VgaTextTarget.hpp>
 
 namespace Baleen {
     namespace Devices {

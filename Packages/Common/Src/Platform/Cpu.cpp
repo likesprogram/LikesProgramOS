@@ -13,7 +13,7 @@
       段描述符的 L 与 D/B 位：Intel SDM 卷 3A §3.4.5 Figure 3-8
 */
 
-#include "Platform/Cpu.hpp"
+#include <Platform/Cpu.hpp>
 
 // Cpu.asm 与这里的标志寄存器读写、SGDT 结构与固定地址测试都是 32 位形式，64 位侧要另行实现
 #if defined(__x86_64__)

@@ -4,14 +4,14 @@
 
 #include <stdint.h>
 
-#include "Bios.hpp"
-#include "BootInfo.hpp"
-#include "LoadCore.hpp"
-#include "Print.hpp"
-#include "Platform/Cpu.hpp"
-#include "Platform/Descriptor.hpp"
-#include "Print/VgaTextTarget.hpp"
-#include "PrintTarget.hpp"
+#include <Bios.hpp>
+#include <BootInfo.hpp>
+#include <LoadCore.hpp>
+#include <Print.hpp>
+#include <Platform/Cpu.hpp>
+#include <Platform/Descriptor.hpp>
+#include <Print/VgaTextTarget.hpp>
+#include <PrintTarget.hpp>
 
 // IPL 传入，Stub.asm 保存
 extern "C" uint8_t _Boot_Drive;
@@ -41,9 +41,7 @@ namespace {
 
     // 停机并停留，供自动化读取诊断；本阶段的失败路径都走这里，打印集中在启动流程里
     [[noreturn]] void Fail(const char* reason) {
-        Print::Write("[STUB] fail: ");
-        Print::Write(reason);
-        Print::Write("\r\n");
+        Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Fatal, reason);
         for (;;) asm volatile("CLI; HLT");
     }
 
@@ -57,12 +55,12 @@ namespace {
     void InstallDescriptorTables() {
         s_gdt.Clear();
         if (!s_gdt.SetCode(1, 0, Platform::CodeWidth::Bits32) || !s_gdt.SetData(2, 0, Platform::DataWidth::Bits32)
-            || !s_gdt.SetCode(3, 0, Platform::CodeWidth::Bits16) || !s_gdt.SetData(4, 0, Platform::DataWidth::Bits16)) Fail("gdt");
+            || !s_gdt.SetCode(3, 0, Platform::CodeWidth::Bits16) || !s_gdt.SetData(4, 0, Platform::DataWidth::Bits16)) Fail("Install gdt fail");
         s_gdt.Load(kSelectorCode32, kSelectorData32);
 
         s_idt.Clear();
         for (uint32_t vector = 0; vector < kExceptionVectors; ++vector) {
-            if (!s_idt.SetGate(vector, _Stub_Exception_Stubs[vector], kSelectorCode32, Platform::GateType::Interrupt, 0, 0)) Fail("idt");
+            if (!s_idt.SetGate(vector, _Stub_Exception_Stubs[vector], kSelectorCode32, Platform::GateType::Interrupt, 0, 0)) Fail("Install idt fail");
         }
         s_idt.Load();
     }
@@ -90,10 +88,11 @@ extern "C" void _Stub_Write(const char* text) {
 extern "C" void _Stub_Exception_Handler(const uint32_t* frame) {
     const uint32_t vector = frame[0];
     const uint32_t* tail = frame + 1;
-    Print::Write("[STUB] exception ");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Fatal);
+    Print::Write("Exception ");
     Print::WriteHex(vector);
-    if (HasErrorCode(vector)) { Print::Write(" err="); Print::WriteHex(tail[0]); ++tail; }   // 有错误码的向量由处理器先压错误码
-    Print::Write(" eip=");
+    if (HasErrorCode(vector)) { Print::Write(" Err="); Print::WriteHex(tail[0]); ++tail; }   // 有错误码的向量由处理器先压错误码
+    Print::Write(" Eip=");
     Print::WriteHex(tail[0]);
     Print::Write("\r\n");
     for (;;) asm volatile("CLI; HLT");
@@ -105,27 +104,27 @@ extern "C" void _Stub_Main() {
     s_console.Install(s_vga);
     // 接管控制台后清一次屏：VGA 上抹掉固件与上层阶段留下的输出，串口等流式通道无感
     Print::ClearScreen();
-    Print::Write("[STUB] LikesProgramOS BaleenStub\r\n");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Stub, "LikesProgramOS BaleenStub");
 
     // 初始化 CPU
-    Print::Write("[STUB] Initialize the CPU\r\n");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Initializing the CPU");
     s_cpu.Install();
     // 段与门都按 32 位保护模式建立，进入这个模式由入口汇编负责；模式不符时后续步骤没有意义
     if (s_cpu.Mode() != Platform::CpuMode::Protected32) Fail("The CPU mode doesn't match, it needs 32-bit protected mode");
 
     // 打开 A20。A20 测试要按平坦段访问 1MiB 以上的物理地址，此处的数据段已由入口汇编置为平坦段
-    Print::Write("[STUB] Enable A20\r\n");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Enabling A20");
     if (!s_cpu.EnableA20()) Fail("Enable A20");
 
     // 运行期段表与中断表：此后 CPU 异常停在诊断行上，而不是无输出的三重故障
-    Print::Write("[STUB] Start install descriptor tables\r\n");
     InstallDescriptorTables();
-    Print::Write("[STUB] Descriptor tables installation complete\r\n");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Install descriptor tables");
 
     const uint32_t media = _Boot_Media;
     const uint32_t sect = ProbeSectorSize(media);
     // 进度行：实体机上只有屏能看到输出，此行之后若再无下文，说明卡在描述符读取、E820 或 BaleenCore 装载这些要走 BIOS 的步骤上，而不是没跑起来
-    Print::Write("[STUB] Cpu=");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Debug);
+    Print::Write("Cpu=");
     Print::Write(s_cpu.HasCpuid() ? s_cpu.Vendor() : "no-cpuid");
     Print::Write(" Mode=");
     Print::WriteHex(static_cast<uint32_t>(s_cpu.Mode()));
@@ -145,7 +144,12 @@ extern "C" void _Stub_Main() {
     uint8_t probe_sector[4096] __attribute__((aligned(16)));
     const uint32_t read_ok = _Bios_Read_Sectors(0, 1, probe_sector, sect);
     const bool signature_ok = read_ok != 0 && probe_sector[510] == 0x55 && probe_sector[511] == 0xAA;
-    Print::Write("[STUB] Mmap=");
+    // 本行等级随自检结果走：两项都不阻断启动，读盘失败按非致命错误标出，签名不符按警告标出
+    Baleen::PrintTargets::Tag probe_tag = Baleen::PrintTargets::Tag::Debug;
+    if (read_ok == 0) probe_tag = Baleen::PrintTargets::Tag::Error;
+    else if (sect == 512 && !signature_ok) probe_tag = Baleen::PrintTargets::Tag::Warn;
+    Baleen::PrintTargets::WriteTag(probe_tag);
+    Print::Write("Mmap=");
     Print::WriteHex(mmap_count);
     Print::Write(" Trunc=");
     Print::WriteHex(truncated);
@@ -157,11 +161,12 @@ extern "C" void _Stub_Main() {
 
     // 从存储介质装载 BaleenCore 并按交权块交给它，成功不返回
     // 校验、读盘、交权的顺序与每一步的诊断行都摆在这里：日志与流程集中在一处，出问题只看这一段
-    Print::Write("[STUB] Load BaleenCore\r\n");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Loading BaleenCore");
     Baleen::Stub::CoreLoadPlan plan;
     if (const char* reason = Baleen::Stub::PrepareCore(_Boot_Drive, media, sect, plan)) Fail(reason);
     // 进度行：实体机上只有屏能看到输出，此行之后若再无下文，说明卡在 Core 读盘上
-    Print::Write("[STUB] At=");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Debug);
+    Print::Write("At=");
     Print::WriteHex(plan.fileOffset);
     Print::Write(" Bytes=");
     Print::WriteHex(plan.imageBytes);
@@ -172,7 +177,7 @@ extern "C" void _Stub_Main() {
     Print::Write("\r\n");
     if (const char* reason = Baleen::Stub::ReadCore(plan, sect)) Fail(reason);
 
-    // 交权与跳转
-    Print::Write("[STUB] Enter BaleenCore\r\n");
+    // 交权与跳转：跳转前只能播报，进入 Core 由 Core 自己的输出证明
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Entering BaleenCore");
     Baleen::Stub::EnterCore();
 }

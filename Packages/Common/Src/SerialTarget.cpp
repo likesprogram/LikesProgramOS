@@ -2,7 +2,7 @@
     串口输出目标的实现：16550 初始化与轮询发送
 */
 
-#include "Print/SerialTarget.hpp"
+#include <Print/SerialTarget.hpp>
 
 namespace Print {
     void SerialTarget::Initialize(uint16_t base, uint16_t divisor) {

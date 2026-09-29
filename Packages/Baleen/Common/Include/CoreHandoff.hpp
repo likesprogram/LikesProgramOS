@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "BootInfo.hpp"
+#include <BootInfo.hpp>
 
 namespace Baleen {
     // 交权块的格式标记、长度与字段偏移：C++ 侧用结构体成员，汇编与生成器用这里的常量

@@ -8,7 +8,7 @@
 #pragma once
 #include <stdint.h>
 
-#include "BootInfo.hpp"
+#include <BootInfo.hpp>
 
 // 探测启动驱动器的扇区大小，即 INT 13h AH=48 返回的每扇区字节数
 // 驱动器号取 IPL 交权时保存的那个；只认 512、2048、4096，其余情况返回 0

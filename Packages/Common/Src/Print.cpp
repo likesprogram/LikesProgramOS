@@ -2,7 +2,7 @@
     文本输出前端与多路复用目标的实现
 */
 
-#include "Print.hpp"
+#include <Print.hpp>
 
 namespace Print {
     namespace Detail {
@@ -23,6 +23,10 @@ namespace Print {
 
     void MultiplexTarget::Write(const char* text) {
         for (uint32_t i = 0; i < m_count; ++i) m_targets[i]->Write(text);
+    }
+
+    void MultiplexTarget::SetAttribute(uint8_t attribute) {
+        for (uint32_t i = 0; i < m_count; ++i) m_targets[i]->SetAttribute(attribute);
     }
 
     void MultiplexTarget::ClearScreen() {
