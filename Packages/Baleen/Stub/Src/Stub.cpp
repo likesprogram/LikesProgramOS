@@ -107,28 +107,34 @@ extern "C" void _Stub_Main() {
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Stub, "LikesProgramOS BaleenStub");
 
     // 初始化 CPU
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Initializing the CPU");
     s_cpu.Install();
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Initializing the CPU");
+
     // 段与门都按 32 位保护模式建立，进入这个模式由入口汇编负责；模式不符时后续步骤没有意义
     if (s_cpu.Mode() != Platform::CpuMode::Protected32) Fail("The CPU mode doesn't match, it needs 32-bit protected mode");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "The CPU mode is 32-bit protected mode");
 
     // 打开 A20。A20 测试要按平坦段访问 1MiB 以上的物理地址，此处的数据段已由入口汇编置为平坦段
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Enabling A20");
     if (!s_cpu.EnableA20()) Fail("Enable A20");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Enabling A20");
 
     // 运行期段表与中断表：此后 CPU 异常停在诊断行上，而不是无输出的三重故障
     InstallDescriptorTables();
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Install descriptor tables");
-
-    const uint32_t media = _Boot_Media;
-    const uint32_t sect = ProbeSectorSize(media);
-    // 进度行：实体机上只有屏能看到输出，此行之后若再无下文，说明卡在描述符读取、E820 或 BaleenCore 装载这些要走 BIOS 的步骤上，而不是没跑起来
-    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Debug);
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Installing descriptor tables");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Cpu=");
     Print::Write(s_cpu.HasCpuid() ? s_cpu.Vendor() : "no-cpuid");
     Print::Write(" Mode=");
     Print::WriteHex(static_cast<uint32_t>(s_cpu.Mode()));
-    Print::Write(" Media=");
+    Print::Write("\r\n");
+
+    // 探测设备扇区大小
+    const uint32_t media = _Boot_Media;
+    const uint32_t sect = ProbeSectorSize(media);
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Probe sector size");
+    // 进度行：实体机上只有屏能看到输出，此行之后若再无下文，说明卡在描述符读取、E820 或 BaleenCore 装载这些要走 BIOS 的步骤上，而不是没跑起来
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Media=");
     Print::WriteHex(media);
     Print::Write(" Sect=");
     Print::WriteHex(sect);
@@ -144,11 +150,13 @@ extern "C" void _Stub_Main() {
     uint8_t probe_sector[4096] __attribute__((aligned(16)));
     const uint32_t read_ok = _Bios_Read_Sectors(0, 1, probe_sector, sect);
     const bool signature_ok = read_ok != 0 && probe_sector[510] == 0x55 && probe_sector[511] == 0xAA;
-    // 本行等级随自检结果走：两项都不阻断启动，读盘失败按非致命错误标出，签名不符按警告标出
-    Baleen::PrintTargets::Tag probe_tag = Baleen::PrintTargets::Tag::Debug;
-    if (read_ok == 0) probe_tag = Baleen::PrintTargets::Tag::Error;
-    else if (sect == 512 && !signature_ok) probe_tag = Baleen::PrintTargets::Tag::Warn;
-    Baleen::PrintTargets::WriteTag(probe_tag);
+    // 等级随自检结果走：两项都不阻断启动，任一项失败按非致命错误、内存图截断或签名不符按警告
+    Baleen::PrintTargets::Tag probe_tag = Baleen::PrintTargets::Tag::Ok;
+    if (read_ok == 0 || mmap_count == 0) probe_tag = Baleen::PrintTargets::Tag::Error;
+    else if (truncated != 0 || (sect == 512 && !signature_ok)) probe_tag = Baleen::PrintTargets::Tag::Warn;
+    Baleen::PrintTargets::WriteLine(probe_tag, "Probing BIOS services");
+    // 读数另起一行
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Mmap=");
     Print::WriteHex(mmap_count);
     Print::Write(" Trunc=");
@@ -161,11 +169,12 @@ extern "C" void _Stub_Main() {
 
     // 从存储介质装载 BaleenCore 并按交权块交给它，成功不返回
     // 校验、读盘、交权的顺序与每一步的诊断行都摆在这里：日志与流程集中在一处，出问题只看这一段
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Loading BaleenCore");
     Baleen::Stub::CoreLoadPlan plan;
     if (const char* reason = Baleen::Stub::PrepareCore(_Boot_Drive, media, sect, plan)) Fail(reason);
-    // 进度行：实体机上只有屏能看到输出，此行之后若再无下文，说明卡在 Core 读盘上
-    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Debug);
+    // 装载计划已成
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Preparing the baleen core load");
+    // 输出计划参数，屏上此行之后再无下文，说明卡在 Core 读盘上
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("At=");
     Print::WriteHex(plan.fileOffset);
     Print::Write(" Bytes=");
@@ -176,8 +185,9 @@ extern "C" void _Stub_Main() {
     Print::WriteHex(plan.bounceAddress);
     Print::Write("\r\n");
     if (const char* reason = Baleen::Stub::ReadCore(plan, sect)) Fail(reason);
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Loading baleen core");
 
     // 交权与跳转：跳转前只能播报，进入 Core 由 Core 自己的输出证明
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Entering BaleenCore");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Entering baleen core");
     Baleen::Stub::EnterCore();
 }

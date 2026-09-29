@@ -15,6 +15,7 @@ namespace Baleen {
     namespace PrintTargets {
         // 诊断行前缀的标签：方括号内的内容，模块名与等级名同属一套写法
         enum class Tag : uint8_t {
+            Continue, // 延续上一行信息
             Stub,     // 模块名：Stub 阶段
             Info,     // 状态说明，与模块名同为白字黑底
             Debug,    // 诊断值
@@ -30,6 +31,7 @@ namespace Baleen {
             switch (tag) {
                 case Tag::Stub:
                 case Tag::Info: return Devices::Vga::kDefaultAttribute;
+                case Tag::Continue:
                 case Tag::Debug: return 0x07;   // 亮灰字黑底
                 case Tag::Ok: return 0x0A;      // 亮绿字黑底
                 case Tag::Warn: return 0x0E;    // 亮黄字黑底
@@ -42,6 +44,7 @@ namespace Baleen {
         // 标签的显示文本，不含方括号与两侧空格
         constexpr const char* TagName(Tag tag) {
             switch (tag) {
+                case Tag::Continue: return "...";
                 case Tag::Stub: return "STUB";
                 case Tag::Info: return "INFO";
                 case Tag::Debug: return "DEBUG";
