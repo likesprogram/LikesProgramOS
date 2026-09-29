@@ -45,11 +45,14 @@ make iso            # 只构建 ISO（make hdd 只构建磁盘镜像）
 make run            # 启动镜像：默认 hdd + qemu + 直接挂载 + BIOS，不开窗口
 make run-win        # 同上，但开本地窗口（QEMU 用 gtk/sdl，Bochs 用 wx）
 make run iso qemu built uefi    # 例：光盘 + QEMU + UEFI
+make compile-db     # 扫描各包写出 compile_commands.json，供 clangd 与 C/C++ 扩展取用
 Tools/Bin/CheckIpl --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 IPL，不依赖 Test 目录
 make help           # 全部目标与可用变量
 ```
 
 `make run` 不开窗口，串口输出打在终端上（QEMU 用 `-display none`，Bochs 画面走 VNC，从 5900 起）；要在本地窗口里看画面就用 `make run-win`，它接受与 `run` 完全相同的四个位置参数。窗口路径要求机器上有图形会话：QEMU 需要装了 `qemu-system-gui` 的 gtk/sdl 后端，Bochs 用 wx 显示库（配置界面同为 wx，否则 Bochs 会退回 rfb）。四个位置参数、载荷变量与其余目标见顶层 [Makefile](Makefile) 头部注释与 `make help`。
+
+编辑器配置在 `.vscode`：常用构建与运行操作做成了任务，clangd 与 C/C++ 扩展都读根目录的 `compile_commands.json`；该文件含本机绝对路径、不进 Git，Makefile 改过之后重跑 `make compile-db` 刷新。
 
 ## 文档索引
 

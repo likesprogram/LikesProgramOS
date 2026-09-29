@@ -1,0 +1,34 @@
+{
+    // —— C/C++ 语言服务 ——
+    // clangd：编译数据库由 make compile-db 写在项目根；本项目大半目标是 -m32 裸机代码，
+    // 允许它查询 g++ 才能取到 32 位与 freestanding 情形下的系统头路径
+    "clangd.arguments": [
+        "--background-index",
+        "--compile-commands-dir=${workspaceFolder}",
+        "--query-driver=/usr/bin/g++*,/usr/bin/gcc*"
+    ],
+    // clangd 与 C/C++ 扩展同时提供 IntelliSense 会互相打架，装了两个就按需关一个：
+    // 用 clangd 时取消下一行注释，只想用 C/C++ 扩展则保持注释（两边都读 compile_commands.json）
+    // "C_Cpp.intelliSenseEngine": "disabled",
+
+    // —— 构建产物 ——
+    // 搜索与文件监视跳过中间对象与镜像目录
+    "search.exclude": {
+        "**/Obj": true,
+        "**/Out": true,
+        "Tools/Bin": true
+    },
+    "files.watcherExclude": {
+        "**/Obj/**": true,
+        "**/Out/**": true
+    },
+
+    // 构建统一走 .vscode/tasks.json，Makefile Tools 不必在打开时弹配置向导
+    "makefile.configureOnOpen": false,
+
+    // 项目规范：汇编与 C++ 一样用 4 空格缩进
+    "[asm-intel-x86-generic]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4
+    }
+}

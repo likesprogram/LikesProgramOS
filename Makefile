@@ -154,7 +154,7 @@ RUN_WINDOWED := $(filter run-win,$(MAKECMDGOALS))
 RUN_LABEL := $(if $(RUN_WINDOWED),run-win,run)
 
 .DEFAULT_GOAL := all
-.PHONY: all images iso hdd packages tools payloads payload-report run run-win run-check run-uefi clean clean-all help qemu bochs built usb bios uefi
+.PHONY: all images iso hdd packages tools compile-db payloads payload-report run run-win run-check run-uefi clean clean-all help qemu bochs built usb bios uefi
 
 # 默认目标
 all: images
@@ -177,6 +177,10 @@ packages:
 # 构建 Tools 下的宿主工具
 tools:
 	@for dir in $(TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
+
+# 生成 compile_commands.json：扫描子包与工具的编译命令，供 clangd 与编辑器取用
+compile-db:
+	@Tools/Build/MakeCompileDb.sh
 
 # 先建子包与工具，再补齐缺失的占位载荷
 payloads: packages tools
@@ -317,6 +321,7 @@ help:
 	    '  make                   构建 $(ISO) 与 $(HDD)' \
 	    '  make iso | hdd         只构建其中一件' \
 	    '  make packages|tools    只跑子包或只建宿主工具' \
+	    '  make compile-db        扫描各包写出 compile_commands.json（clangd 与编辑器用）' \
 	    '  make run [介质] [模拟器] [形态] [固件]' \
 	    '                         介质 hdd|iso（默认 hdd）；模拟器 qemu|bochs（默认 qemu，Bochs 只支持 BIOS）；' \
 	    '                         形态 built|usb（默认 built）；固件 bios|uefi（默认 bios，uefi 用 OVMF）' \

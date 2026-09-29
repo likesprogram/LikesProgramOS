@@ -18,6 +18,10 @@ Out/
 !Tools/Bin/
 !Tools/Bin/*
 
+# 编辑器与语言服务产物：编译数据库含本机绝对路径，clangd 索引缓存同理
+compile_commands.json
+.cache/
+
 # 测试相关文件
 *Test
 Tools/Build/Payloads/

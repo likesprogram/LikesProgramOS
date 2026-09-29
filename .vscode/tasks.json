@@ -1,0 +1,66 @@
+{
+    // 构建入口都走顶层 Makefile；g++ 的报错由 $gcc 匹配成问题列表，
+    // 因此编译类任务统一把 LC_ALL 钉成 C，避免本地化消息让匹配失效
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "构建镜像",
+            "detail": "make —— 子包与宿主工具，再组装 Out/LikesProgram.iso 与 Out/LikesProgram.hdd",
+            "type": "shell",
+            "command": "make",
+            "options": { "env": { "LC_ALL": "C" } },
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$gcc"],
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+        },
+        {
+            "label": "只跑子包",
+            "detail": "make packages —— 只构建 Packages 下已有的子 Makefile",
+            "type": "shell",
+            "command": "make packages",
+            "options": { "env": { "LC_ALL": "C" } },
+            "problemMatcher": ["$gcc"],
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+        },
+        {
+            "label": "只建宿主工具",
+            "detail": "make tools —— 产物在 Tools/Bin，随源码交付",
+            "type": "shell",
+            "command": "make tools",
+            "options": { "env": { "LC_ALL": "C" } },
+            "problemMatcher": ["$gcc"],
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+        },
+        {
+            "label": "生成编译数据库",
+            "detail": "make compile-db —— 扫描各包写出 compile_commands.json（改过 Makefile 后重跑）",
+            "type": "shell",
+            "command": "make compile-db",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+        },
+        {
+            "label": "运行（QEMU / 磁盘 / BIOS）",
+            "detail": "make run —— 无窗口启动，串口与调试口日志走终端；退出模拟器即结束任务",
+            "type": "shell",
+            "command": "make run",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "shared" }
+        },
+        {
+            "label": "运行（QEMU / 光盘 / UEFI）",
+            "detail": "make run iso qemu built uefi —— 需要 OVMF",
+            "type": "shell",
+            "command": "make run iso qemu built uefi",
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "shared" }
+        },
+        {
+            "label": "清理产物",
+            "detail": "make clean —— 删除顶层 Out/",
+            "type": "shell",
+            "command": "make clean",
+            "problemMatcher": []
+        }
+    ]
+}
