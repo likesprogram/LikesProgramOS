@@ -17,6 +17,7 @@ namespace Baleen {
         enum class Tag : uint8_t {
             Continue, // 延续上一行信息
             Stub,     // 模块名：Stub 阶段
+            Core,     // 模块名：Core 阶段
             Info,     // 状态说明，与模块名同为白字黑底
             Debug,    // 诊断值
             Ok,       // 步骤已推进
@@ -30,6 +31,7 @@ namespace Baleen {
         constexpr uint8_t TagAttribute(Tag tag) {
             switch (tag) {
                 case Tag::Stub:
+                case Tag::Core:
                 case Tag::Info: return Devices::Vga::kDefaultAttribute;
                 case Tag::Continue:
                 case Tag::Debug: return 0x07;   // 亮灰字黑底
@@ -46,6 +48,7 @@ namespace Baleen {
             switch (tag) {
                 case Tag::Continue: return "...";
                 case Tag::Stub: return "STUB";
+                case Tag::Core: return "CORE";
                 case Tag::Info: return "INFO";
                 case Tag::Debug: return "DEBUG";
                 case Tag::Ok: return "OK";

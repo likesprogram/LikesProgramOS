@@ -41,13 +41,14 @@ namespace makeiso {
     }
 
     std::array<uint8_t, 32> EncodeBootDescriptor(const BootDescriptor& descriptor, uint32_t sector_bytes) {
-        if (sector_bytes != 512 && sector_bytes != 2048) throw std::runtime_error("引导介质扇区大小必须为 512 或 2048 字节");
-        // 先限制原始长度，再上取整，避免长度加法溢出；CD 最多读 0x8000，HDD 可读 0x8200
+        if (sector_bytes != 512 && sector_bytes != 2048 && sector_bytes != 4096) throw std::runtime_error("引导介质扇区大小必须为 512、2048 或 4096 字节");
+        // 先限制原始长度，再上取整，避免长度加法溢出；512 最多读 0x8200，4Kn / CD 最多读到 0x8000
         if (descriptor.stub_bytes == 0 || descriptor.stub_bytes > BootDescriptor::kMaxStubBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 0x10000-0x7E00");
         const uint64_t sectors = (descriptor.stub_bytes + sector_bytes - 1) / sector_bytes;
         if (sectors > BootDescriptor::kMaxStubBytes / sector_bytes) throw std::runtime_error("Stub 按介质扇区上取整后超过 0x10000-0x7E00");
-        if (descriptor.stub_offset < 0x800) throw std::runtime_error("Stub 偏移必须至少为 0x800，避开描述符所在扇区");
-        if (descriptor.stub_offset % 2048 != 0) throw std::runtime_error("Stub 偏移必须 2048 对齐（工具对两种介质的统一策略）");
+        // 统一策略：起点既避开描述符扇区，又同时满足 512 / 2048 / 4096 三种逻辑扇区的对齐
+        if (descriptor.stub_offset < 0x1000) throw std::runtime_error("Stub 偏移必须至少为 0x1000，避开描述符所在扇区");
+        if (descriptor.stub_offset % 4096 != 0) throw std::runtime_error("Stub 偏移必须 4096 对齐（工具对三种逻辑扇区的统一策略）");
         // 对应 IPL 的 32 位 ADD/JC：结束偏移恰好为 0x100000000 也必须拒绝
         if (descriptor.stub_offset > 0xFFFFFFFFull || descriptor.stub_bytes > 0xFFFFFFFFull - descriptor.stub_offset) throw std::runtime_error("Stub 偏移及偏移加长度必须不超过 0xFFFFFFFF");
         std::array<uint8_t, 32> out{};
@@ -61,10 +62,10 @@ namespace makeiso {
     }
 
     std::array<uint8_t, 32> EncodeCoreDescriptor(const CoreDescriptor& descriptor, uint32_t sector_bytes) {
-        if (sector_bytes != 512 && sector_bytes != 2048) throw std::runtime_error("引导介质扇区大小必须为 512 或 2048 字节");
+        if (sector_bytes != 512 && sector_bytes != 2048 && sector_bytes != 4096) throw std::runtime_error("引导介质扇区大小必须为 512、2048 或 4096 字节");
         if (descriptor.core_bytes == 0 || descriptor.core_bytes > CoreDescriptor::kMaxCoreBytes) throw std::runtime_error("Core 长度必须非 0 且不超过 0x400000");
-        if (descriptor.core_offset < 0x800) throw std::runtime_error("Core 偏移必须至少为 0x800，避开描述符所在扇区");
-        if (descriptor.core_offset % 2048 != 0) throw std::runtime_error("Core 偏移必须 2048 对齐（工具对两种介质的统一策略）");
+        if (descriptor.core_offset < 0x1000) throw std::runtime_error("Core 偏移必须至少为 0x1000，避开描述符所在扇区");
+        if (descriptor.core_offset % 4096 != 0) throw std::runtime_error("Core 偏移必须 4096 对齐（工具对三种逻辑扇区的统一策略）");
         // 对应 Stub 读盘路径的 32 位寻址：偏移加长度不得进位
         if (descriptor.core_offset > 0xFFFFFFFFull || descriptor.core_bytes > 0xFFFFFFFFull - descriptor.core_offset) throw std::runtime_error("Core 偏移及偏移加长度必须不超过 0xFFFFFFFF");
         std::array<uint8_t, 32> out{};
@@ -116,13 +117,14 @@ namespace makeiso {
         return catalog;
     }
 
-    void WriteMbrEntry(std::span<uint8_t, 512> mbr, std::size_t index, const MbrPartition& partition) {
+    void WriteMbrEntry(std::span<uint8_t, 512> mbr, std::size_t index, const MbrPartition& partition, uint32_t sector_bytes) {
         if (index > 3) throw std::runtime_error("MBR 分区项下标只能是 0..3");
+        if (sector_bytes != 512 && sector_bytes != 4096) throw std::runtime_error("MBR 分区 LBA 单位必须为 512 或 4096 字节");
         if (mbr[510] != 0x55 || mbr[511] != 0xAA) throw std::runtime_error("MBR 缺少 0xAA55 引导签名");
         if (partition.bytes == 0) throw std::runtime_error("分区长度不能为 0");
-        if (partition.offset % 512 != 0) throw std::runtime_error("分区起始偏移必须 512 对齐");
-        const uint64_t sectors = (partition.bytes + 511) / 512;
-        if (partition.offset / 512 > 0xFFFFFFFFull || sectors > 0xFFFFFFFFull) throw std::runtime_error("分区超出 MBR 的 32 位 LBA 范围");
+        if (partition.offset % sector_bytes != 0) throw std::runtime_error("分区起始偏移必须按 MBR 的 LBA 单位对齐");
+        const uint64_t sectors = (partition.bytes + sector_bytes - 1) / sector_bytes;
+        if (partition.offset / sector_bytes > 0xFFFFFFFFull || sectors > 0xFFFFFFFFull) throw std::runtime_error("分区超出 MBR 的 32 位 LBA 范围");
         uint8_t* entry = mbr.data() + 446 + 16 * index;
         entry[0] = 0x00;  // 不设活动标志
         entry[1] = 0xFE;  // 起始 CHS：无效值，强制按 LBA 访问
@@ -132,16 +134,16 @@ namespace makeiso {
         entry[5] = 0xFE;  // 结束 CHS：同上
         entry[6] = 0xFF;
         entry[7] = 0xFF;
-        Put32Le(entry + 8, static_cast<uint32_t>(partition.offset / 512));
+        Put32Le(entry + 8, static_cast<uint32_t>(partition.offset / sector_bytes));
         Put32Le(entry + 12, static_cast<uint32_t>(sectors));
     }
 
-    std::array<uint8_t, 512> PatchMbrPartitions(std::span<const uint8_t, 512> mbr, std::span<const MbrPartition> partitions) {
+    std::array<uint8_t, 512> PatchMbrPartitions(std::span<const uint8_t, 512> mbr, std::span<const MbrPartition> partitions, uint32_t sector_bytes) {
         if (mbr[510] != 0x55 || mbr[511] != 0xAA) throw std::runtime_error("MBR 缺少 0xAA55 引导签名");
         if (partitions.size() > 4) throw std::runtime_error("MBR 分区项最多 4 个");
         std::array<uint8_t, 512> out{};
         std::copy(mbr.begin(), mbr.end(), out.begin());
-        for (std::size_t i = 0; i < partitions.size(); ++i) WriteMbrEntry(out, i, partitions[i]);
+        for (std::size_t i = 0; i < partitions.size(); ++i) WriteMbrEntry(out, i, partitions[i], sector_bytes);
         return out;
     }
 }

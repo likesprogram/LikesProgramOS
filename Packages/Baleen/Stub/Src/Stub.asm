@@ -1,5 +1,5 @@
 ; Stub.asm
-;    Stub 实模式入口与运行期异常入口桩：IPL 跳到 0000:7E00 后经入口前缀进入，保存 DL/DH，切到 32 位后调用 _Stub_Main；
+;    Stub 实模式入口与运行期异常入口桩：IPL 跳到 0000:7E00 后经入口前缀进入，保存 DL/DH/CX，切到 32 位后调用 _Stub_Main；
 ;   异常桩把向量号压栈后交给 C++ 侧的停机诊断，整个文件须留在低 64KiB
 ;
 ;    文件偏移 0..2 是 16 位近跳转入口前缀，[0x03,0x10) 保留，[0x10,0x90) 是自身完整性头，
@@ -53,6 +53,7 @@ SECTION .text.start progbits alloc exec nowrite
 GLOBAL _Start
 GLOBAL _Boot_Drive
 GLOBAL _Boot_Media
+GLOBAL _Boot_Sector_Bytes
 GLOBAL _Stub_Exception_Stubs
 extern _Stub_Main
 extern _Stub_Exception_Handler
@@ -69,6 +70,7 @@ _Start:
     MOV ES, AX
     MOV SS, AX
     MOV SP, STACK_TOP
+    MOV BP, CX                  ; IPL 给出的本地扇区大小，清零 BSS 时 CX 会被使用
     CLD                         ; 下面的 REP 串操作按递增方向
     ; 未初始化区不落盘，介质上没有它的内容，这里在实模式下按链接脚本给出的边界整体清零
     ; 清零必须赶在下面写 GDT 工作副本之前：工作副本也在未初始化区
@@ -107,6 +109,7 @@ PM32:
     ; 驱动器与介质号写进未初始化区：自检要求镜像字节在装入后保持原样，落盘的变量不能在这里写
     MOV [_Boot_Drive], DL
     MOV [_Boot_Media], DH
+    MOV [_Boot_Sector_Bytes], BP
     CALL _Stub_Main
 .Hang:
     HLT
@@ -133,6 +136,7 @@ SECTION .bss
 Gdt_Work:      RESB Gdt_Template_End - Gdt_Template   ; 入口段表的工作副本
 _Boot_Drive:   RESB 1           ; BIOS 驱动器号，IPL 交权时的 DL
 _Boot_Media:   RESB 1           ; Boot::Media，IPL 交权时的 DH
+_Boot_Sector_Bytes: RESW 1      ; IPL 交权时的 CX：512 / 2048 / 4096
 
 ; Stub → Core 的交权入口：cdecl 参数为交权块指针与 Core 入口地址
 ; 入口状态在此固定：32 位保护模式、平坦段、分页关闭、IF=0、DF=0 都是调用前已有的状态，这里只补齐标志

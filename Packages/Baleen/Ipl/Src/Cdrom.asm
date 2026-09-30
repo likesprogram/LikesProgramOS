@@ -2,8 +2,9 @@
 ;    El Torito 无仿真光盘入口：产物恰好 2048 字节，运行必需内容全部落在前 510 字节
 ;
 ;    目录约定 LoadSize = 4（以 512 字节计），本地扇区 2048 字节。读盘必须整段落在
-;    前 512 字节，有的 BIOS 只装入 1 个 512 字节扇区；偏移 8 起 56 字节留给
-;    XORRISO -BOOT-INFO-TABLE，由固件/工具写入 ISO LBA，IPL 不读它的内容
+;    前 512 字节，有的 BIOS 只装入 1 个 512 字节扇区；偏移 8 起 56 字节按 El Torito
+;    的 Boot Info Table 位置保留，入口跳过该区；本项目不使用该表：IPL 不读它，
+;    混合镜像写入 U 盘后其中的 ISO LBA 也不再有效，该区保持全 0 并由 CheckIpl 核对
 
 BITS 16                         ; 十六位模式
 ORG 0
@@ -12,9 +13,9 @@ ORG 0
 %DEFINE IPL_MEDIA MEDIA_CDROM   ; DH = Cdrom
 %DEFINE IPL_CD                  ; 光盘仅通过 EDD 读取
 
-    JMP SHORT _Start            ; 跳过 BOOT-INFO-TABLE 空洞
+    JMP SHORT _Start            ; 跳过 Boot Info Table 保留区
     TIMES 8 - ($-$$) DB 0       ; 填到偏移 8
-    TIMES 56 DB 0               ; XORRISO -BOOT-INFO-TABLE 写入区（内容由工具填，IPL 不读）
+    TIMES 56 DB 0               ; El Torito 的 Boot Info Table 位置，本项目保持全 0（理由见文件头）
 
 %INCLUDE "Cd.inc"
 

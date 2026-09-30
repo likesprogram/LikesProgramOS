@@ -20,4 +20,5 @@ extern "C" uint32_t _Bios_E820(Boot::MemoryMapEntry* entries, uint32_t max_count
 
 // 读盘：从 lba 起读 count 个扇区到 dest，成功返回 1，失败返回 0
 // dest 须 16 字节对齐且整段落低 1MiB，且每批不跨 64KiB 窗口；块数超过一次传输上限时内部分批
+// sect_bytes 必须等于 IPL 交来的设备逻辑扇区大小，长度乘法或末端 LBA 溢出均拒绝
 extern "C" uint32_t _Bios_Read_Sectors(uint32_t lba, uint32_t count, void* dest, uint32_t sect_bytes);

@@ -516,7 +516,7 @@ namespace {
                 };
                 for (const auto& mutation : mutations) {
                     auto bad = ReadBytes(base);
-                    PutLe(bad, 0x300 + mutation.pos, mutation.width, mutation.value);
+                    PutLe(bad, 0x22000 + mutation.pos, mutation.width, mutation.value);
                     const auto image = m_work / "bad.img";
                     WriteBytes(image, bad);
                     Case(media + " " + mutation.name + " -> " + mutation.code, image, media, mutation.code, cd);
@@ -525,8 +525,9 @@ namespace {
             Case("混合 ISO 光盘入口", Build(true, 4096, true), "cd", "OK", true);
             auto hybridPath = Build(true, 4096, true);
             auto hybrid = ReadBytes(hybridPath);
-            const auto offset = GetLe(hybrid, 0x308, 8);
-            const auto size = GetLe(hybrid, 0x310, 8);
+            // 从描述符里取 Stub 的位置与长度（描述符在当前布局的固定偏移 0x22000）
+            const auto offset = GetLe(hybrid, 0x22008, 8);
+            const auto size = GetLe(hybrid, 0x22010, 8);
             const auto stub = ReadBytes(Probe(static_cast<uint32_t>(size), 2, 0x80));
             Require(offset <= hybrid.size() && size <= hybrid.size() - offset, "混合镜像 Stub 超出文件");
             std::copy(stub.begin(), stub.end(), hybrid.begin() + offset);
@@ -538,15 +539,27 @@ namespace {
             for (const bool cd : {false, true}) {
                 for (const auto& fault : std::vector<std::pair<unsigned, std::string>>{
                          {0, "寄存器破坏"}, {2, "批量失败/DAP改写"}, {3, "前两次失败后恢复"}, {4, "永久失败"},
-                         {cd ? 5u : 1u, cd ? "CD备用E1探测" : "无 EDD/CHS回退"}}) {
-                    Fault(cd, fault.first, fault.second, 4096, fault.first == 5 ? 0 : (cd ? 0xE0 : 0x80), fault.first == 5 ? 0xE1 : (cd ? 0xE0 : 0x80), fault.first == 4 ? (cd ? "D" : "R") : "OK");
+                         {cd ? 5u : 1u, cd ? "CD备用E1探测" : "无 EDD"}}) {
+                    // HDD 的"无 EDD"与"永久失败"都读不到描述符，期望 R；CD 的永久失败期望 D
+                    const std::string expected = fault.first == 4 ? (cd ? "D" : "R") : (fault.first == 1 ? "R" : "OK");
+                    Fault(cd, fault.first, fault.second, 4096, fault.first == 5 ? 0 : (cd ? 0xE0 : 0x80), fault.first == 5 ? 0xE1 : (cd ? 0xE0 : 0x80), expected);
                 }
             }
             Fault(false, 2, "最大 Stub 批量失败后完整重读/BX回绕", 0x8200, 0x80, 0x80, "OK");
             Fault(true, 2, "最大 Stub 批量失败后完整重读", 0x8000, 0xE0, 0xE0, "OK");
             Fault(true, 0, "原始 DL 无效，E0 回退", 4096, 0, 0xE0, "OK");
             Fault(true, 0, "原始 DL=90 优先并保留", 4096, 0x90, 0x90, "OK");
-            Require(m_count == 51, "内部回归用例数量不符");
+            // 全部候选失败时对 E1 只探测一轮：一次单扇区探测含 3 次批量尝试与 3 次逐扇区回退，
+            // 旧行为在 E0 失败后会重复探测 E1，计数翻倍
+            Fault(true, 6, "原始 DL=E1 只探测一轮 -> D", 4096, 0xE1, 0xE0, "D", 6);
+            // AH=48：失败回落 512，短表与未知大小拒绝，报告 4096 时整条链按 4Kn 装载
+            Fault(false, 0, "AH48 查询失败回落 512", 4096, 0x80, 0x80, "OK", 0, 512, 2);
+            Fault(false, 0, "AH48 短表 -> D", 4096, 0x80, 0x80, "D", 0, 512, 3);
+            Fault(false, 0, "AH48 未知扇区大小 -> D", 4096, 0x80, 0x80, "D", 0, 512, 4);
+            Fault(false, 0, "AH48 报告 4Kn 完整装载", 4096, 0x80, 0x80, "OK", 0, 4096, 1);
+            // 软盘与 USB-FDD 的 DL<0x80 不在支持范围：HDD 入口直接拒绝
+            Fault(false, 0, "HDD DL<0x80 -> D", 4096, 0x00, 0x00, "D");
+            Require(m_count == 57, "内部回归用例数量不符");
             std::cout << "CheckIpl: " << m_count << " 项全部通过（ENABLE_E9=" << m_options.e9 << "）" << std::endl;
         }
     private:
@@ -558,9 +571,12 @@ namespace {
             Run(command, m_work / "nasm.log");
         }
         // 生成校验载荷并返回路径；size 为文件字节数，media/drive 为期望的交接状态
-        fs::path Probe(uint32_t size, unsigned media, unsigned drive, unsigned resets = 0, unsigned chs = 0) {
+        // sector 为期望的 IPL 交接扇区大小；0 表示按介质推断：光盘 2048，磁盘 512
+        fs::path Probe(uint32_t size, unsigned media, unsigned drive, unsigned resets = 0, unsigned chs = 0, unsigned sector = 0) {
+            if (sector == 0) sector = media == 4 ? 2048 : 512;
             const auto path = m_work / "probe.bin";
-            Assemble(m_work / "Probe.asm", path, {{"PAYLOAD_BYTES", size}, {"EXPECT_MEDIA", media}, {"EXPECT_DRIVE", drive}, {"EXPECT_RESET", resets}, {"EXPECT_CHS", chs}});
+            Assemble(m_work / "Probe.asm", path, {{"PAYLOAD_BYTES", size}, {"EXPECT_MEDIA", media}, {"EXPECT_DRIVE", drive},
+                                                  {"EXPECT_RESET", resets}, {"EXPECT_CHS", chs}, {"EXPECT_SECTOR", sector}});
             return path;
         }
         // 用 MakeIso / MakeHdd 组装一份测试镜像并返回路径
@@ -577,28 +593,39 @@ namespace {
             Run(command, m_work / "image.log");
             return image;
         }
-        // 用故障夹具注入一类 BIOS 故障，核对 IPL 的反应
-        void Fault(bool cd, unsigned fault, const std::string& name, uint32_t size, unsigned entryDrive, unsigned expectedDrive, const std::string& expected) {
+        // 用故障夹具注入一类 BIOS 故障，核对 IPL 的反应；e1Tries 非零时另核对低内存里对 E1 的尝试次数
+        // sector 为本地逻辑扇区大小（0 = 按介质推断：CD 2048、HDD 512）；ah48 选择 AH=48 的夹具应答
+        void Fault(bool cd, unsigned fault, const std::string& name, uint32_t size, unsigned entryDrive, unsigned expectedDrive, const std::string& expected, unsigned e1Tries = 0, unsigned sector = 0, unsigned ah48 = 0) {
+            if (sector == 0) sector = cd ? 2048 : 512;
+            const unsigned shift = sector == 4096 ? 12u : (cd ? 11u : 9u);
+            // 描述符与载荷按当前布局：描述符在 0x22000，载荷自 0x23000 起（三种单位下同一字节位置）
+            constexpr std::size_t kDescriptorOffset = 0x22000;
+            const std::size_t stubOffset = 0x23000;
+            // fixture 缓冲排在 2048 字节 harness 之后：虚拟介质偏移 = 2048 + 缓冲偏移
+            constexpr std::size_t kHarnessBytes = 2048;
+            const std::size_t descriptorAt = kDescriptorOffset - kHarnessBytes;
+            const std::size_t stubAt = stubOffset - kHarnessBytes;
             const auto harness = m_work / "harness.bin";
-            Assemble(m_work / "BiosFault.asm", harness, {{"FAULT", fault}, {"SECT_SHIFT", cd ? 11u : 9u}, {"ENTRY_DRIVE", entryDrive}});
-            const auto stub = ReadBytes(Probe(size, cd ? 4 : 2, expectedDrive, fault == 3 ? 2 : 0, fault == 1 ? 9 : 0));
-            Bytes fixture(40960, 0);
+            Assemble(m_work / "BiosFault.asm", harness, {{"FAULT", fault}, {"SECT_SHIFT", shift}, {"ENTRY_DRIVE", entryDrive}, {"AH48_MODE", ah48}});
+            const auto stub = ReadBytes(Probe(size, cd ? 4 : 2, expectedDrive, fault == 3 ? 2 : 0, 0, sector));
+            Bytes fixture(0x30000, 0);
             const auto& firmware = cd ? m_cd : m_hdd;
             std::copy(firmware.begin(), firmware.end(), fixture.begin());
-            PutLe(fixture, 0x300, 4, 0x52445342);
-            PutLe(fixture, 0x304, 2, 1);
-            PutLe(fixture, 0x306, 2, 32);
-            PutLe(fixture, 0x308, 8, 2048);
-            PutLe(fixture, 0x310, 8, stub.size());
-            PutLe(fixture, 0x318, 8, 0);
-            Require(stub.size() <= fixture.size() - 2048, "故障夹具载荷越界");
-            std::copy(stub.begin(), stub.end(), fixture.begin() + 2048);
+            PutLe(fixture, descriptorAt, 4, 0x52445342);
+            PutLe(fixture, descriptorAt + 4, 2, 1);
+            PutLe(fixture, descriptorAt + 6, 2, 32);
+            PutLe(fixture, descriptorAt + 8, 8, stubOffset);
+            PutLe(fixture, descriptorAt + 16, 8, stub.size());
+            PutLe(fixture, descriptorAt + 24, 8, 0);
+            Require(stub.size() <= fixture.size() - stubAt, "故障夹具载荷越界");
+            std::copy(stub.begin(), stub.end(), fixture.begin() + static_cast<std::ptrdiff_t>(stubAt));
             auto image = ReadBytes(harness);
             Require(image.size() == 2048, "故障引导器必须为 2048 字节");
             image.insert(image.end(), fixture.begin(), fixture.end());
             image.resize(1 << 20, 0);
             const auto path = m_work / "fault.hdd";
             WriteBytes(path, image);
+            m_expectE1 = e1Tries;
             Case(std::string(cd ? "cd " : "hdd ") + name, path, "hdd", expected, cd);
         }
         // 跑一个启动用例并核对结果
@@ -608,8 +635,9 @@ namespace {
             fs::create_directory(local);
             WriteText(local / "case.txt", name + "\n期望=" + expected + "\n");
             RunQemu(image, media, expected, local, cdIpl);
+            m_expectE1 = 0;
             ++m_count;
-            std::cout << "CheckIpl: " << m_count << "/51 " << name << " 通过" << std::endl;
+            std::cout << "CheckIpl: " << m_count << "/57 " << name << " 通过" << std::endl;
         }
         // 启动 QEMU，按期望值核对退出码、串口输出、停机位置与 VGA 画面
         void RunQemu(const fs::path& image, const std::string& media, const std::string& expected, const fs::path& work, bool cdIpl) {
@@ -665,6 +693,17 @@ namespace {
                             WriteText(work / "vga.txt", screen);
                             Require(standalone, "VGA 未见独立错误码 " + expected + "\n" + screen);
                             Require(output == (m_options.e9 ? expected : ""), "错误码不符：" + Quote(output));
+                            // 需要核对 E1 尝试次数时读夹具写在低内存 0x504 的计数
+                            if (m_expectE1 != 0) {
+                                const auto memoryPath = work / "lowmem.bin";
+                                const auto lowResponse = qmp->Monitor("pmemsave 0x500 0x10 \"" + memoryPath.string() + "\"", qmpDeadline);
+                                Require(lowResponse.empty(), "低内存读取失败：" + lowResponse);
+                                const auto low = ReadBytes(memoryPath);
+                                Require(low.size() == 0x10, "低内存快照长度不符");
+                                const auto tries = static_cast<unsigned>(low[4] | (low[5] << 8));
+                                WriteText(work / "e1-tries.txt", std::to_string(tries) + "\n");
+                                Require(tries == m_expectE1, "对 E1 的尝试次数为 " + std::to_string(tries) + "，期望 " + std::to_string(m_expectE1));
+                            }
                             return;
                         }
                     }
@@ -679,6 +718,7 @@ namespace {
         std::chrono::seconds m_timeout{12};               // 每例启动的超时
         Bytes m_hdd, m_cd;                                // 两份 IPL 产物
         std::size_t m_hddHalt = 0, m_cdHalt = 0;          // 两份额外停机序列里 HLT 之后的 IP
+        unsigned m_expectE1 = 0;                          // 失败用例要核对的 E1 尝试次数；0 表示不核对
         unsigned m_count = 0;                             // 已通过的用例数
     };
 }

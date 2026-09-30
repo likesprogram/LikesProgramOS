@@ -12,7 +12,11 @@ _Read_Sectors:
     CALL Read_Range
     JC .Fail
     INC EAX
+%IFDEF IPL_CD
     ADD BX, (1 << SECT_SHIFT)
+%ELSE
+    ADD BX, [_Sector_Bytes]
+%ENDIF
     DEC BP
     JNZ .One
 .Ok:
@@ -20,21 +24,15 @@ _Read_Sectors:
 .Fail:
     RET
 
-; 每个请求至多尝试三次，中间复位；所有 BIOS 调用恢复通用和段寄存器
+; 每个请求至多尝试三次，失败之间复位；所有 BIOS 调用恢复通用和段寄存器
+; 只走 EDD：描述符与载荷位于 GPT 保留区之后（512 字节扇区下 LBA 272 起），
+; 超出 C0H0 兼容范围，CHS 回退不适用
 Read_Range:
     PUSH DI
     MOV DI, 3
 .Retry:
     CALL Read_Edd
     JNC .Done
-%IFNDEF IPL_CD
-    CMP CX, 1
-    JNE .Reset
-    CMP EAX, 63
-    JAE .Reset
-    CALL Read_Chs
-    JNC .Done
-%ENDIF
 .Reset:
     DEC DI
     JZ .Failed
@@ -51,8 +49,6 @@ Read_Edd:
     PUSHAD
     PUSH DS
     PUSH ES
-    PUSH CS
-    POP DS
     MOV SI, Dap
     MOV WORD [SI], 16
     MOV [SI + 2], CX
@@ -64,16 +60,12 @@ Read_Edd:
     JMP Disk_Int
 
 %IFNDEF IPL_CD
-; 单扇区 CHS 读取：只在 CX=1、LBA<63 时使用，固定 C=0、H=0、S=LBA+1
-; AH=42 的 AH 是返回状态，必须由保存的原始 EAX 恢复 LBA 后才能走 CHS
-Read_Chs:
+; AH=48 只查询参数，寄存器保护与读盘共用
+Read_Params:
     PUSHAD
     PUSH DS
     PUSH ES
-    MOV CX, AX
-    INC CX
-    XOR DH, DH
-    MOV AX, 0x0201
+    MOV AH, 0x48
     JMP Disk_Int
 %ENDIF
 
@@ -94,8 +86,12 @@ Disk_Int:
     POPAD
     RET
 
+%IFDEF IPL_CD
     ALIGN 16
-; 16 字节 EDD 磁盘地址包（DAP）：缓冲段:偏移与 LBA 由调用方填
+%ELSE
+    ALIGN 4
+%ENDIF
+; 16 字节 EDD 磁盘地址包（DAP）：地址按 DWORD 对齐，缓冲段:偏移与 LBA 由调用方填
 Dap:
     DB 16, 0
     DW 1
@@ -104,3 +100,8 @@ Dap:
 ; 固件给的驱动器号，所有 INT 13h 调用都用它；CD 候选探测会改写
 _Saved_Dl:
     DB 0
+%IFNDEF IPL_CD
+; 本地逻辑扇区字节数，AH=48 查询失败时保留传统硬盘的 512 字节约定
+_Sector_Bytes:
+    DW 512
+%ENDIF

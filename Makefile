@@ -20,8 +20,8 @@
 #      make clean                 删除顶层 Out/；make clean-all 连同子包与工具的产物
 #
 #    载荷来源：各子包的真实产物优先，缺失时用 Tools/Bin/MakePayloads 生成的占位件
-#    （Stub、Core、EFI 引导镜像、Ext4 系统卷、布局描述都还没实现，占位件只为把引导链
-#    跑通；每个占位件都写明身份，构建时会打印实际用到的那一份）
+#    （EFI 引导镜像、Ext4 系统卷、布局描述尚用占位件；Stub 与 Core 已有阶段性实现，
+#    每个占位件都写明身份，构建时会打印实际用到的那一份）
 
 # 顶层产物目录
 OUT_DIR       ?= Out
@@ -35,12 +35,14 @@ HDD           := $(OUT_DIR)/LikesProgram.hdd
 VOLUME_ID     ?= LIKESPROGRAM
 # 系统卷在 ISO 内的文件名
 SYSTEM_VOLUME_ISO_NAME ?= SystemVolume.img
+# 磁盘及混合 ISO 的 MBR 分区 LBA 单位；光盘 ISO9660 块仍为 2048
+DISK_SECTOR_BYTES ?= 512
 
 # —— 子包与宿主工具 ——
 # 所有子包的 Makefile
 SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
 # 需要构建的宿主工具目录
-TOOL_DIRS := Tools/Build/MakeIso Tools/Build/MakeHdd Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl
+TOOL_DIRS := Tools/Build/MakeIso Tools/Build/MakeHdd Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl Tools/Build/CheckStub
 
 # —— 载荷：真实产物优先，缺失时退到占位件 ——
 # 一级引导产物目录
@@ -192,13 +194,13 @@ $(ISO): payloads
 	Tools/Bin/MakeIso --out $@ --boot-image $(BOOT_IMAGE) --mbr $(MBR) \
 	    --stub $(STUB) --core $(CORE) --efi $(EFI_IMAGE) --esp $(ESP_IMAGE) \
 	    --system-volume $(SYSTEM_VOLUME) --iso-name $(SYSTEM_VOLUME_ISO_NAME) \
-	    --volume-id $(VOLUME_ID) --file BaleenLayout.bin=$(LAYOUT) \
+	    --volume-id $(VOLUME_ID) --sector-bytes $(DISK_SECTOR_BYTES) --file BaleenLayout.bin=$(LAYOUT) \
 	    --manifest $(OUT_DIR)/LikesProgram.iso.json
 
 # 组装磁盘镜像
 $(HDD): payloads
 	@$(MAKE) --no-print-directory payload-report
-	Tools/Bin/MakeHdd --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) --manifest $(OUT_DIR)/LikesProgram.hdd.json
+	Tools/Bin/MakeHdd --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) --manifest $(OUT_DIR)/LikesProgram.hdd.json
 
 # 打印实际用到的是真实产物还是占位件
 payload-report:
@@ -334,4 +336,5 @@ help:
 	    '                         显示方式可覆盖：QEMU_DISPLAY_WIN= / BOCHS_DISPLAY_WIN=' \
 	    '  make run-uefi          = make run iso qemu built uefi' \
 	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与工具' \
+	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；不改变 run 的虚拟设备参数' \
 	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME / LAYOUT（默认取真实产物，缺失时用占位件）'

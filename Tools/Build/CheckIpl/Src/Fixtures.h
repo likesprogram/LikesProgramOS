@@ -19,6 +19,9 @@ ORG 0x7E00
 %ifndef EXPECT_DRIVE
 %define EXPECT_DRIVE 0x80
 %endif
+%ifndef EXPECT_SECTOR
+%define EXPECT_SECTOR 512
+%endif
 %ifndef EXPECT_RESET
 %define EXPECT_RESET 0
 %endif
@@ -46,6 +49,8 @@ ORG 0x7E00
     CMP SP, 0x7C00
     JNE Fail
     CMP DX, (EXPECT_MEDIA << 8) | EXPECT_DRIVE
+    JNE Fail
+    CMP CX, EXPECT_SECTOR
     JNE Fail
 %if EXPECT_RESET
     CMP WORD [CS:0x500], EXPECT_RESET
@@ -91,10 +96,16 @@ Payload:
 
     // 引导夹具：先加载真实 IPL，再用 INT 13h 钩子注入有界 BIOS 故障
     // 0=破坏寄存器，1=无 EDD，2=批量失败并改写 DAP，3=前两次读取失败，
-    // 4=永久失败，5=只有 CD 驱动器 E1 可用
+    // 4=永久失败，5=只有 CD 驱动器 E1 可用，6=只有 CD 驱动器 E0 可用，E1 的尝试次数记到 0x504
     inline constexpr std::string_view kFaultAsm = R"ASM(
 BITS 16
 ORG 0x1000
+
+%ifndef AH48_MODE
+%define AH48_MODE 0
+%endif
+; 夹具介质覆盖 0x30000 字节：描述符在 0x22000、Stub 自 0x23000 起都落在其中
+%define FIXTURE_BYTES 0x30000
 
     JMP 0:0x7C00 + (Entry - $$)
 Entry:
@@ -124,6 +135,8 @@ Harness_Fail:
     HLT
     JMP $
     ALIGN 16
+; 读入 harness 自身的其余部分：故障用例的镜像挂在 512 字节扇区的 IDE 盘上，
+; 从 LBA 1 读 3 块（1536 字节）到 0x1200，覆盖文件偏移 512..2048
 Extension:
     DB 16, 0
     DW 3, 0x1200, 0
@@ -131,8 +144,20 @@ Extension:
     TIMES 510 - ($-$$) DB 0
     DW 0xAA55
 Loaded:
-    MOV SI, Fixture
+    MOV SI, Fixture1
     MOV DL, 0x80
+    MOV AH, 0x42
+    INT 0x13
+    JC Harness_Fail
+    MOV SI, Fixture2
+    MOV AH, 0x42
+    INT 0x13
+    JC Harness_Fail
+    MOV SI, Fixture3
+    MOV AH, 0x42
+    INT 0x13
+    JC Harness_Fail
+    MOV SI, Fixture4
     MOV AH, 0x42
     INT 0x13
     JC Harness_Fail
@@ -143,7 +168,8 @@ Loaded:
     REP STOSW
     MOV WORD [ES:0x13*4], Hook
     MOV WORD [ES:0x13*4+2], 0
-    MOV AX, 0x2000
+    ; 真实 IPL 排在 2048 字节 harness 之后：段取 0x2080，即内存 0x20000 + 2048
+    MOV AX, 0x2080
     MOV DS, AX
     XOR SI, SI
     MOV DI, 0x7C00
@@ -153,10 +179,25 @@ Loaded:
     JMP 0:0x7C00
 
     ALIGN 16
-Fixture:
+; 夹具介质（harness + fixture）按设备的 512 字节扇区分批读到 0x20000：
+; 内存 0x20000 起对应介质偏移 0，hook 的寻址才自洽；一批 127 块不跨段内 64KiB，
+; 四批 127 + 127 + 127 + 3 块覆盖 0..0x30000
+Fixture1:
     DB 16, 0
-    DW 80, 0, 0x2000
-    DQ 4
+    DW 127, 0, 0x2000
+    DQ 0
+Fixture2:
+    DB 16, 0
+    DW 127, 0, 0x2FE0
+    DQ 127
+Fixture3:
+    DB 16, 0
+    DW 127, 0, 0x3FC0
+    DQ 254
+Fixture4:
+    DB 16, 0
+    DW 3, 0, 0x4FA0
+    DQ 381
 Remaining: DB 2
 
 Hook:
@@ -171,7 +212,27 @@ Hook:
     JE .Edd
     CMP AH, 0x02
     JE .Chs
+    CMP AH, 0x48
+    JE .Params
     JMP .Error
+; AH=48 驱动器参数：按 AH48_MODE 给出 512 / 4096 / 短表 / 未知值 / 失败五种应答
+.Params:
+%if AH48_MODE = 2
+    JMP .Error
+%endif
+%if AH48_MODE = 3
+    MOV WORD [SI], 0x18
+%else
+    MOV WORD [SI], 0x1A
+%endif
+%if AH48_MODE = 1
+    MOV WORD [SI + 0x18], 4096
+%elif AH48_MODE = 4
+    MOV WORD [SI + 0x18], 1024
+%else
+    MOV WORD [SI + 0x18], 512
+%endif
+    JMP .Ok
 .Reset:
     INC WORD [CS:0x500]
     JMP .Ok
@@ -189,6 +250,12 @@ Hook:
 %if FAULT = 5
     CMP DL, 0xE1
     JNE .Error
+%endif
+%if FAULT = 6
+    CMP DL, 0xE1
+    JNE .Error
+    INC WORD [CS:0x504]
+    JMP .Error
 %endif
     CMP WORD [SI], 16
     JNE .Error
@@ -226,16 +293,20 @@ Hook:
     JZ .Error
     CMP CX, 127
     JA .Error
-    CMP EAX, 40960 >> SECT_SHIFT
+    CMP EAX, FIXTURE_BYTES >> SECT_SHIFT
     JAE .Error
     SHL EAX, SECT_SHIFT
     MOVZX EDX, CX
     SHL EDX, SECT_SHIFT
     ADD EDX, EAX
-    CMP EDX, 40960
+    CMP EDX, FIXTURE_BYTES
     JA .Error
+    ; 夹具数据在物理 0x20000 起：段随字节偏移增长，段内偏移取低 4 位
+    ; （夹具覆盖到 0x30000，超过一个段的 64KiB 跨度）
     MOV SI, AX
-    MOV AX, 0x2000
+    AND SI, 0xF
+    SHR EAX, 4
+    ADD AX, 0x2000
     MOV DS, AX
     SHL CX, SECT_SHIFT - 1
     CLD

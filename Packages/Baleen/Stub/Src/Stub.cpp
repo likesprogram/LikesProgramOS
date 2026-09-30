@@ -20,6 +20,7 @@
 // IPL 传入，Stub.asm 保存
 extern "C" uint8_t _Boot_Drive;
 extern "C" uint8_t _Boot_Media;
+extern "C" uint16_t _Boot_Sector_Bytes;
 // 异常入口桩地址表，由 Stub.asm 提供，索引即向量号
 extern "C" const uintptr_t _Stub_Exception_Stubs[32];
 
@@ -79,16 +80,12 @@ namespace {
         s_idt.Load();
     }
 
-    // 探测结果缓存：AH=48 是一条真机读命令，屏上诊断行再取一次没有意义
-    uint32_t s_probed_sector = 0;
-
-    // 探测设备扇区大小：光盘按 El Torito 固定 2048，其它取 AH=48，失败回落 512
-    uint32_t ProbeSectorSize(uint32_t media) {
-        if (media == static_cast<uint32_t>(Boot::Media::Cdrom)) return 2048;
-        if (s_probed_sector != 0) return s_probed_sector;
-        const uint32_t probed = _Bios_Sector_Size();
-        s_probed_sector = (probed == 512 || probed == 2048 || probed == 4096) ? probed : 512;
-        return s_probed_sector;
+    // 扇区大小取自完成 IPL 装载的同一会话，不重新探测后猜测回落到另一种单位
+    uint32_t HandoffSectorSize(uint32_t media) {
+        const uint32_t sector = _Boot_Sector_Bytes;
+        if (media == static_cast<uint32_t>(Boot::Media::Cdrom)) return sector == 2048 ? sector : 0;
+        if (media == static_cast<uint32_t>(Boot::Media::Hdd) && (sector == 512 || sector == 4096)) return sector;
+        return 0;
     }
 }
 
@@ -159,10 +156,11 @@ extern "C" void _Stub_Main() {
     Print::WriteHex(static_cast<uint32_t>(s_cpu.Mode()));
     Print::Write("\r\n");
 
-    // 探测设备扇区大小
+    // 核对 IPL 交来的设备逻辑扇区大小
     const uint32_t media = _Boot_Media;
-    const uint32_t sect = ProbeSectorSize(media);
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Probing sector size");
+    const uint32_t sect = HandoffSectorSize(media);
+    if (sect == 0) Fail("The IPL sector size isn't supported for this media");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Checking the IPL sector size");
     // 进度行：实体机上只有屏能看到输出，此行之后若再无下文，说明卡在描述符读取、E820 或 BaleenCore 装载这些要走 BIOS 的步骤上，而不是没跑起来
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Media=");
@@ -212,7 +210,9 @@ extern "C" void _Stub_Main() {
     Print::WriteHex(plan.imageBytes);
     Print::Write(" Load=");
     Print::WriteHex(plan.loadAddress);
-    Print::Write(" Entry=");
+    Print::Write("\r\n"); // 主动换行，防止溢出影响观察
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Entry=");
     Print::WriteHex(plan.loadAddress + plan.entryOffset);
     Print::Write(" Bounce=");
     Print::WriteHex(plan.bounceAddress);

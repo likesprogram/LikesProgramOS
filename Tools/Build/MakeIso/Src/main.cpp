@@ -52,6 +52,8 @@ namespace {
 
     constexpr uint64_t kBlock = 2048;                    // ISO9660 逻辑块大小
     constexpr uint64_t kSystemAreaBytes = 16 * kBlock;   // 系统区 16 个逻辑块
+    // 原始载荷与镜像总长按 4096 对齐：混合镜像写进 4Kn 存储后仍能整扇区读取
+    constexpr uint64_t kPayloadAlign = 4096;
     // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB
     constexpr uint64_t kEspPreferredOffset = 1u << 20;
 
@@ -72,6 +74,7 @@ namespace {
         std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移
         std::string manifest;                                              // 构建清单输出路径
         std::optional<uint64_t> timestamp;                                 // 卷时间戳；空 = 写全零
+        uint32_t sector_bytes = 512;                                       // 混合 MBR 的 LBA 单位：512 或 4096
         bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
         bool core_unchecked = false;                                       // 是否免除 Core 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
@@ -110,12 +113,13 @@ namespace {
             "  --system-volume PATH     系统卷镜像（Ext4）：作为连续 ISO 文件存放，并写 Ext4 分区项\n"
             "  --iso-name NAME          系统卷在 ISO 内的文件名，默认取源文件名\n"
             "  --file ISO路径=宿主路径   附加文件，可重复（中间目录自动建立）\n"
-            "  --raw 宿主路径[@偏移]     原始载荷，可重复；偏移须 2048 对齐，省略则自动分配\n"
+            "  --raw 宿主路径[@偏移]     原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
             "  --stub-unchecked         免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
             "  --core-unchecked         免除 Core 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
             "\n"
             "ISO 元数据：\n"
             "  --volume-id ID           卷标识，默认 LIKESPROGRAM\n"
+            "  --sector-bytes N         混合 MBR 的 LBA 单位：512（默认）或 4096；ISO 结构仍为 2048 字节块\n"
             "  --timestamp N            卷时间戳（UTC 秒）；默认取 SOURCE_DATE_EPOCH，未设则写全零\n"
             "  --manifest PATH          输出构建清单（JSON）\n"
             "  -h, --help               显示本说明\n";
@@ -154,7 +158,11 @@ namespace {
                 if (at != std::string::npos && at + 1 < value.size()) options.raw.emplace_back(value.substr(0, at), ParseNumber(value.substr(at + 1), "原始载荷偏移"));
                 else options.raw.emplace_back(value, std::nullopt);
             } else if (arg == "--manifest") options.manifest = needValue(i, arg);
-            else if (arg == "--timestamp") options.timestamp = ParseNumber(needValue(i, arg), "时间戳");
+            else if (arg == "--sector-bytes") {
+                const uint64_t value = ParseNumber(needValue(i, arg), "逻辑扇区大小");
+                if (value != 512 && value != 4096) throw std::runtime_error("--sector-bytes 只能是 512 或 4096");
+                options.sector_bytes = static_cast<uint32_t>(value);
+            } else if (arg == "--timestamp") options.timestamp = ParseNumber(needValue(i, arg), "时间戳");
             else if (arg == "--stub-unchecked") options.stub_unchecked = true;
             else if (arg == "--core-unchecked") options.core_unchecked = true;
             else throw std::runtime_error("无法识别的参数：" + arg);
@@ -256,13 +264,16 @@ namespace {
 
         Reservations reserved;
         reserved.Reserve("元数据区", 0, build.layout.metadata_end);
-        uint64_t cursor = build.layout.metadata_end;
-        // 按 2048 对齐分配一段连续空间并登记占用
+        // 描述符区（0x22000 起）不得被 ISO 元数据覆盖
+        if (build.layout.metadata_end > BootDescriptor::kImageOffset) throw std::runtime_error("ISO 元数据区越过描述符位置 0x22000，描述符布局需要后移");
+        // 载荷起点在元数据之后，且不早于描述符区之后：512 与 4096 两种单位下都安全
+        uint64_t cursor = std::max<uint64_t>(build.layout.metadata_end, 0x23000);
+        // 按 4096 对齐分配一段连续空间并登记占用：载荷在 512 / 2048 / 4096 逻辑扇区下都整扇区可读
         const auto place = [&](const std::string& name, uint64_t bytes) {
-            cursor = AlignUp(cursor, kBlock);
+            cursor = AlignUp(cursor, kPayloadAlign);
             const Placed placed{name, cursor, bytes};
-            reserved.Reserve(name, placed.offset, AlignUp(bytes, kBlock));
-            cursor = placed.offset + AlignUp(bytes, kBlock);
+            reserved.Reserve(name, placed.offset, AlignUp(bytes, kPayloadAlign));
+            cursor = placed.offset + AlignUp(bytes, kPayloadAlign);
             return placed;
         };
 
@@ -272,20 +283,20 @@ namespace {
         for (const auto& [hostPath, offset] : options.raw) {
             const uint64_t bytes = FileSize(hostPath);
             if (offset.has_value()) {
-                if (*offset % kBlock != 0) throw std::runtime_error("--raw 偏移未按 2048 对齐：" + hostPath);
+                if (*offset % kPayloadAlign != 0) throw std::runtime_error("--raw 偏移未按 4096 对齐：" + hostPath);
                 if (*offset < build.layout.metadata_end) throw std::runtime_error("--raw 偏移落在元数据区内：" + hostPath);
                 const Placed placed{hostPath, *offset, bytes};
-                reserved.Reserve(hostPath, placed.offset, AlignUp(bytes, kBlock));
-                cursor = std::max(cursor, placed.offset + AlignUp(bytes, kBlock));
+                reserved.Reserve(hostPath, placed.offset, AlignUp(bytes, kPayloadAlign));
+                cursor = std::max(cursor, placed.offset + AlignUp(bytes, kPayloadAlign));
                 build.raw.push_back(placed);
             } else build.raw.push_back(place(hostPath, bytes));
         }
         if (!options.esp.empty()) {
             const uint64_t bytes = FileSize(options.esp);
-            const uint64_t offset = cursor <= kEspPreferredOffset ? AlignUp(cursor, kEspPreferredOffset) : AlignUp(cursor, kBlock);
+            const uint64_t offset = cursor <= kEspPreferredOffset ? AlignUp(cursor, kEspPreferredOffset) : AlignUp(cursor, kPayloadAlign);
             const Placed placed{"ESP 的 FAT32 镜像", offset, bytes};
-            reserved.Reserve(placed.name, placed.offset, AlignUp(bytes, kBlock));
-            cursor = placed.offset + AlignUp(bytes, kBlock);
+            reserved.Reserve(placed.name, placed.offset, AlignUp(bytes, kPayloadAlign));
+            cursor = placed.offset + AlignUp(bytes, kPayloadAlign);
             build.esp = placed;
         }
 
@@ -299,9 +310,10 @@ namespace {
             build.files.push_back(placed);
         }
         iso.SetFileExtents(extents);
-        const uint64_t total = iso.TotalBytes();
+        // 总长按 4096 对齐：混合镜像写进 4Kn 存储后仍以整扇区结束
+        const uint64_t total = AlignUp(iso.TotalBytes(), kPayloadAlign);
 
-        // 引导镜像：混合镜像里位于 LBA 1，纯光盘镜像里位于 LBA 0（描述符都落在绝对偏移 0x300）
+        // 引导镜像：混合镜像里位于 LBA 1，纯光盘镜像里位于 LBA 0（描述符都落在绝对偏移 0x22000）
         if (image.CopyFile(static_cast<uint64_t>(build.boot_lba) * kBlock, options.boot_image) != FileSize(options.boot_image))
             throw std::runtime_error("引导镜像长度在写入时发生变化");
 
@@ -335,7 +347,7 @@ namespace {
         build.volume = volumePlaced;
         if (!options.mbr.empty()) {
             const std::vector<uint8_t> mbr = ReadFile(options.mbr);
-            const auto patched = makeiso::PatchMbrPartitions(std::span<const uint8_t, 512>(mbr.data(), mbr.size()), std::span<const MbrPartition>(partitions.data(), partitions.size()));
+            const auto patched = makeiso::PatchMbrPartitions(std::span<const uint8_t, 512>(mbr.data(), mbr.size()), std::span<const MbrPartition>(partitions.data(), partitions.size()), options.sector_bytes);
             image.Write(0, patched);
         } else if (!partitions.empty()) std::cerr << "MakeIso: 未提供 --mbr，跳过分区项（纯光盘镜像不需要）\n";
         if (!options.mbr.empty() && !build.esp.has_value()) std::cerr << "MakeIso: 未提供 --esp，混合镜像里没有 ESP 分区，U 盘上 UEFI 侧起不来\n";
@@ -364,6 +376,7 @@ namespace {
         manifest += "  \"tool\": \"MakeIso\",\n";
         manifest += "  \"volume_id\": \"" + JsonEscape(options.volume_id) + "\",\n";
         manifest += "  \"total_bytes\": " + std::to_string(total) + ",\n";
+        manifest += "  \"sector_bytes\": " + std::to_string(options.sector_bytes) + ",\n";
         manifest += "  \"total_sectors_2048\": " + std::to_string(total / kBlock) + ",\n";
         manifest += "  \"system_area_bytes\": " + std::to_string(kSystemAreaBytes) + ",\n";
         manifest += "  \"boot_image\": {\"lba\": " + std::to_string(build.boot_lba) +

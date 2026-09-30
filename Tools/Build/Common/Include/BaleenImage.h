@@ -28,6 +28,7 @@ namespace makeiso {
         static constexpr uint32_t kFlags = 0;                  // 当前不定义可选标志
         static constexpr uint16_t kDigestSha256 = 1;           // 摘要算法编号
         static constexpr uint16_t kBuildIdBytes = 32;          // BuildId 长度
+        static constexpr uint32_t kFieldMagic = 0x00;          // 头内字段偏移
         static constexpr uint32_t kFieldVersion = 0x08;        // 头内字段偏移
         static constexpr uint32_t kFieldHeaderBytes = 0x0A;
         static constexpr uint32_t kFieldFlags = 0x0C;
@@ -72,7 +73,7 @@ namespace makeiso {
     // 长度上限与静态内存落点按类别取：Stub 受低 64KiB 窗口约束，Core 按自己的上限
     void VerifyImage(std::span<const uint8_t> image, ImageKind kind);
 
-    // 带头镜像的 BuildId 前 4 字节，格式化为 8 位大写十六进制，供打印与清单使用
+    // 带头镜像的 BuildId 前 4 字节，按字节顺序格式化为 8 位大写十六进制，供构建输出打印使用
     std::string ImageBuildIdText(std::span<const uint8_t> image);
 
     // 组装用载荷门禁结果：占位内容没有可核对的来源，免除校验的载荷也没有

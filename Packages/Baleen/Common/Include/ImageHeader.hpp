@@ -85,14 +85,11 @@ namespace Baleen {
         uint32_t imageBytes;    // 头声明的文件字节数
         uint32_t memoryBytes;   // 头声明的静态内存跨度，含未落盘尾部
         uint32_t entryOffset;   // 早期入口的文件偏移
-        uint32_t buildId;       // BuildId 前 4 字节，仅用于诊断
+        uint32_t buildId;       // BuildId 前 4 字节按字节顺序装入的值，仅用于诊断
     };
 
     // 按小端读取 16 位
     uint16_t ReadU16(const uint8_t* field);
-
-    // 按小端读取 32 位
-    uint32_t ReadU32(const uint8_t* field);
 
     // 校验头的固定字段与入口前缀：格式标记、版本、头长、标志、摘要算法、BuildId 长度、
     // 保留区、长度与入口范围、入口前缀与 EntryOffset 一致

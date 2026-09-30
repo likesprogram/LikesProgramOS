@@ -4,7 +4,7 @@
 BITS 16                         ; 十六位模式
 ORG 0
 
-%DEFINE SECT_SHIFT 9            ; 512 字节扇区
+%DEFINE SECT_SHIFT 9            ; 512 字节兼容路径及文件上限；实际扇区大小由 AH=48 查询
 %DEFINE IPL_MEDIA MEDIA_HDD     ; DH 交给 Stub
 
 %INCLUDE "Hdd.inc"

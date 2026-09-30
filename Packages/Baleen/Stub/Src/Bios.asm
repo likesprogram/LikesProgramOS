@@ -27,6 +27,7 @@ GLOBAL _Bios_E820
 GLOBAL _Bios_Read_Sectors
 EXTERN _Boot_Drive
 EXTERN _Boot_Media
+EXTERN _Boot_Sector_Bytes
 
 ; 每扇区字节数在 AH=48 参数表里的偏移，表结构见 EDD 规范
 %DEFINE PARAM_SECTOR_BYTES_OFF 0x18
@@ -75,6 +76,8 @@ _Bios_Sector_Size:
     CALL Enter_Real
     TEST BYTE [Bios_Ok], 0xFF                        ; 已回到 32 位平坦段
     JZ .Zero
+    CMP WORD [Bios_Param_Table], 0x1A
+    JB .Zero
     MOVZX EAX, WORD [Bios_Param_Table + PARAM_SECTOR_BYTES_OFF]
     CMP EAX, 512
     JE .Out
@@ -168,6 +171,9 @@ _Bios_Read_Sectors:
     CMP DWORD [Bios_Count], 0
     JE .Reject
     MOV EAX, [Bios_Sect]
+    MOVZX ECX, WORD [_Boot_Sector_Bytes]
+    CMP EAX, ECX
+    JNE .Reject                         ; 长度单位必须与 IPL 完成装载时的设备会话一致
     CMP EAX, 512
     JE .Check_range
     CMP EAX, 2048
@@ -181,10 +187,15 @@ _Bios_Read_Sectors:
     JNZ .Reject                         ; DAP 的段基址是线性地址 >> 4，未对齐会丢低 4 位
     MOV ECX, [Bios_Count]
     IMUL ECX, [Bios_Sect]
+    JO .Reject                          ; 有效低地址请求不可能达到有符号乘法的上限
     ADD ECX, EAX
-    JC .Reject                          ; 字节数溢出
+    JC .Reject
     CMP ECX, REAL_CEIL
-    JA .Reject                          ; 超低 1MiB：需要 unreal 拷贝的路径另行实现
+    JA .Reject
+    MOV EAX, [Bios_Count]
+    DEC EAX
+    ADD EAX, [Bios_Lba]
+    JC .Reject                          ; DAP 高 LBA 固定为零，最后一个扇区不能进位
     MOV DWORD [Bios_Op], OP_READ
     CALL Enter_Real
     MOVZX EAX, BYTE [Bios_Ok]
@@ -352,14 +363,11 @@ Real_Read:
     JAE .Fill
     MOV [Bios_Blocks], EAX
 .Fill:
-    CALL Real_Fill_Dap
     MOV BYTE [Bios_Tries], READ_TRIES
 .Retry:
-    MOV DL, [_Boot_Drive]
-    MOV SI, Bios_Dap
+    CALL Real_Fill_Dap
     MOV AH, 42h
-    INT 13h
-    CLI
+    CALL Real_Disk_Int
     JNC .Batch_Ok
     CALL Real_Disk_Reset               ; 失败才复位再重试，正常路径一次都不发
     DEC BYTE [Bios_Tries]
@@ -402,14 +410,11 @@ Real_Read_Fallback:
     SUB EDX, ECX
     CMP EDX, [Bios_Sect]
     JB .Fail
-    CALL Real_Fill_Dap
     MOV BYTE [Bios_Tries], READ_TRIES
 .Retry:
-    MOV DL, [_Boot_Drive]
-    MOV SI, Bios_Dap
+    CALL Real_Fill_Dap
     MOV AH, 42h
-    INT 13h
-    CLI
+    CALL Real_Disk_Int
     JNC .Next
     CALL Real_Read_Chs                  ; 不适用或失败都返回 CF=1，继续走复位重试
     JNC .Next
@@ -426,11 +431,13 @@ Real_Read_Fallback:
     MOV BYTE [Bios_Ok], 1
     JMP Real_Leave
 
-; 单扇区 CHS 回退：EDD 失败后的兼容路径，只在 LBA<CHS_LAST_LBA、非光盘、
+; 单扇区 CHS 回退：EDD 失败后的兼容路径，只在 512 字节扇区、LBA<CHS_LAST_LBA、非光盘、
 ; 驱动器号 ≥ 0x80 时尝试，编码固定 C=0、H=0、S=LBA+1，不做任意几何换算
 ; LBA 与目的地一律取本文件的存储值：BIOS 返回后 AH 是状态、寄存器和 DAP 都不可信
 ; CF=1 表示不适用或读失败；返回前中断已恢复关闭
 Real_Read_Chs:
+    CMP DWORD [Bios_Sect], 512
+    JNE .Skip
     CMP DWORD [Bios_Lba], CHS_LAST_LBA
     JAE .Skip
     CMP BYTE [_Boot_Media], MEDIA_CDROM
@@ -447,10 +454,7 @@ Real_Read_Chs:
     INC CX                              ; 扇区号 = LBA+1；LBA<63 保证不进位到柱面位
     XOR DH, DH
     MOV AX, 0x0201
-    MOV DL, [_Boot_Drive]
-    STI
-    INT 13h
-    CLI
+    CALL Real_Disk_Int
     RET
 .Skip:
     STC
@@ -486,9 +490,23 @@ Real_Disk_Reset:
     JB .Done
     MOV BYTE [Bios_Reset], 1
     XOR AH, AH
+    CALL Real_Disk_Int
+.Done:
+    RET
+
+; 读盘与复位只消费 CF，保护寄存器与段后才能继续访问低地址会话状态
+Real_Disk_Int:
+    PUSHAD
+    PUSH DS
+    PUSH ES
+    MOV DL, [_Boot_Drive]
+    STI
+    STC
     INT 13h
     CLI
-.Done:
+    POP ES
+    POP DS
+    POPAD
     RET
 
 ; 回保护模式：装回运行期段表与 CR0，远跳转到 32 位代码段
@@ -504,6 +522,7 @@ Real_Leave:
 
 BITS 32
 Bios_Prot_Entry:
+    CLD
     LIDT [Bios_Saved_Idtr]      ; 还原保护模式 IDT，异常门才继续有效
     MOV AX, SEL_DATA32
     MOV DS, AX

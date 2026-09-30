@@ -20,6 +20,7 @@ namespace Baleen {
         static constexpr uint32_t kMagic = 0x484E4C42;             // 'BLNH'
         static constexpr uint32_t kVersion = 1;                    // 开发格式标记
         static constexpr uint32_t kBytes = 64;                     // 结构长度
+        static constexpr uint32_t kSectorBytes = 0x14;             // sectorBytes 字段
         static constexpr uint32_t kMemoryMap = 0x2C;               // memoryMap 指针
         static constexpr uint32_t kWrite = 0x30;                   // write 服务入口
         static constexpr uint32_t kReadSectors = 0x34;             // readSectors 服务入口
@@ -54,6 +55,7 @@ namespace Baleen {
     // 只有 32 位的 Stub 与 Core 受这套布局约束，宿主工具的指针宽度不同，不参与偏移断言
 #if UINTPTR_MAX == 0xFFFFFFFFu
     static_assert(sizeof(CoreHandoff) == CoreHandoffLayout::kBytes, "CoreHandoff 长度必须是 64 字节，见 Contract.inc 的 CORE_HANDOFF_BYTES");
+    static_assert(offsetof(CoreHandoff, sectorBytes) == CoreHandoffLayout::kSectorBytes, "CoreHandoff 字段偏移已变，须同步 Stub 与 Core 两侧");
     static_assert(offsetof(CoreHandoff, memoryMap) == CoreHandoffLayout::kMemoryMap, "CoreHandoff 字段偏移已变，须同步 Stub 与 Core 两侧");
     static_assert(offsetof(CoreHandoff, write) == CoreHandoffLayout::kWrite, "CoreHandoff 字段偏移已变，须同步 Stub 与 Core 两侧");
     static_assert(offsetof(CoreHandoff, readSectors) == CoreHandoffLayout::kReadSectors, "CoreHandoff 字段偏移已变，须同步 Stub 与 Core 两侧");

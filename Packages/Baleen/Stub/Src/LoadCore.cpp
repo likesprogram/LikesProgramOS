@@ -26,7 +26,9 @@ namespace Baleen {
             // —— 交权契约常量：取值必须与 Contract.inc 一致 ——
             // 汇编侧由 %INCLUDE 取 Contract.inc，C++ 侧包含不了 .inc，只能在此重申；
             // 描述符的格式标记与头长会拿介质内容实际比对，改动漏了一边会在启动时就暴露
-            constexpr uint32_t kDescriptorOffset = 0x340;       // CoreDescriptor 的介质绝对字节偏移
+            // CoreDescriptor 的介质绝对字节偏移：与 BootDescriptor 同扇区，紧随其后 32 字节
+            // 取值与 IPL 的 Const.inc 一致，在 512 / 2048 / 4096 三种逻辑扇区下都是同一字节位置
+            constexpr uint32_t kDescriptorOffset = 0x22020;
             constexpr uint32_t kDescriptorMagic = 0x52444342;   // 'BCDR'
             constexpr uint16_t kDescriptorVersion = 1;          // 开发格式标记
             constexpr uint16_t kDescriptorHeaderBytes = 32;     // 描述符固定总长
@@ -166,7 +168,7 @@ namespace Baleen {
             // 读 Core 文件首扇区并校验镜像头：头必须先于整段装载核对，装载区与入口都取自头字段
             // 头里的文件长度必须与描述符一致：一个来自组装布局、一个来自镜像内容，分歧即拒绝
             const char* ReadCoreHeader(uint32_t sectorBytes, uint32_t fileOffset, uint32_t descriptorBytes, ImageFacts& facts) {
-                if (_Bios_Read_Sectors(fileOffset / sectorBytes, 1, s_sector, sectorBytes) == 0) return "Read the BaleanCore header";
+                if (_Bios_Read_Sectors(fileOffset / sectorBytes, 1, s_sector, sectorBytes) == 0) return "Read the BaleenCore header";
                 if (const char* reason = CheckImageHeader(s_sector, kCoreImageMagic, facts)) return reason;
                 if (facts.imageBytes != descriptorBytes) return "The CoreDescriptor file bytes don't match the core header";
                 if (facts.memoryBytes > kCoreMaxMemory) return "The CoreMemoryBytes is beyond the limit";
@@ -245,7 +247,7 @@ namespace Baleen {
 
         // 按 plan 把 Core 读进高位，再清零头声明的未落盘尾部
         const char* ReadCore(const CoreLoadPlan& plan, uint32_t sectorBytes) {
-            if (!ReadCoreImage(sectorBytes, plan.bounceAddress, plan.fileOffset, plan.readBytes)) return "Read BaleanCore";
+            if (!ReadCoreImage(sectorBytes, plan.bounceAddress, plan.fileOffset, plan.readBytes)) return "Read BaleenCore";
             // BSS 由 Stub 清零：Core 不得依赖扇区填充或残留内容，尾部填充本身不属于 Core 内容
             ClearBytes(reinterpret_cast<uint8_t*>(plan.loadAddress + plan.imageBytes), plan.memoryBytes - plan.imageBytes);
             return nullptr;

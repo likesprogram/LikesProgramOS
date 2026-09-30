@@ -1,11 +1,14 @@
 # Makefile
-#    Packages/Common：Print 前端与平台原语的目标文件，供 Baleen 各阶段与内核共用
+#    Packages/Common：Print 前端、平台原语与存储抽象的目标文件，供 Baleen 各阶段与内核共用
+#
+#    存储抽象（Storage/）是接口与无设备依赖的纯逻辑：块设备、偏移视图、统一路径与
+#    文件系统；两侧的块设备实现与卷解析各自持有，不在这里编译
 
 # 产物根目录
 OUT_DIR   ?= Out
 # 对象目录
 OBJ_DIR   := $(OUT_DIR)/Obj
-# 源码目录；Platform 子目录由 vpath 一并为产物取平铺名
+# 源码目录；Platform 与 Storage 子目录由 vpath 一并为产物取平铺名
 SRC_DIR   := Src
 # 头文件目录
 INC_DIR   := Include
@@ -23,12 +26,14 @@ NASMFLAGS ?= -f elf32 -Werror
 
 # C++ 源与产物
 CPP_OBJS  := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Descriptor.o)
+# 存储抽象的产物：错误模型、统一路径、偏移视图与文件系统抽象
+STORAGE_OBJS := $(addprefix $(OBJ_DIR)/,Error.o Path.o SubDevice.o FileSystem.o)
 # 汇编源与产物；与同名 C++ 源以 _asm 后缀区分
 ASM_OBJS  := $(addprefix $(OBJ_DIR)/,Cpu_asm.o Descriptor_asm.o)
 # 全部产物
-OBJS      := $(CPP_OBJS) $(ASM_OBJS)
+OBJS      := $(CPP_OBJS) $(STORAGE_OBJS) $(ASM_OBJS)
 
-vpath %.cpp $(SRC_DIR) $(SRC_DIR)/Platform
+vpath %.cpp $(SRC_DIR) $(SRC_DIR)/Platform $(SRC_DIR)/Storage
 
 .DEFAULT_GOAL := all
 .PHONY: all clean help
@@ -55,9 +60,9 @@ clean:
 
 # 打印用法
 help:
-	@printf '%s\n' 'Packages/Common：Print 前端与平台原语' \
+	@printf '%s\n' 'Packages/Common：Print 前端、平台原语与存储抽象' \
 	  '  make [all]  构建 $(OBJS)' \
 	  '  make clean  删除 $(OUT_DIR)/' \
 	  '  变量：OUT_DIR / CXX / NASM / CXXFLAGS / NASMFLAGS 可覆盖'
 
--include $(CPP_OBJS:.o=.d)
+-include $(CPP_OBJS:.o=.d) $(STORAGE_OBJS:.o=.d)

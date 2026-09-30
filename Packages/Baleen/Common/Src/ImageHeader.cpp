@@ -21,12 +21,6 @@ namespace Baleen {
         return static_cast<uint16_t>(field[0] | (field[1] << 8));
     }
 
-    uint32_t ReadU32(const uint8_t* field) {
-        uint32_t value = 0;
-        for (uint32_t i = 0; i < 4; ++i) value |= static_cast<uint32_t>(field[i]) << (8 * i);
-        return value;
-    }
-
     const char* CheckImageHeader(const uint8_t* image, const uint8_t magic[8], ImageFacts& facts) {
         const ImageHeader* const header = reinterpret_cast<const ImageHeader*>(image + ImageHeaderLayout::kOffset);
         // 格式标记先行：不是本阶段认识的镜像时，后面的字段没有解释意义
@@ -49,7 +43,11 @@ namespace Baleen {
         facts.imageBytes = header->imageBytes;
         facts.memoryBytes = header->memoryBytes;
         facts.entryOffset = entry;
-        facts.buildId = ReadU32(header->buildId);
+        // BuildId 是不透明字节串：前 4 字节按字节顺序装入这个仅用于诊断的值，
+        // 使运行期打印与构建日志里的 BuildId 文本写法一致，不引入小端整数解释
+        uint32_t buildId = 0;
+        for (uint32_t i = 0; i < 4; ++i) buildId = (buildId << 8) | header->buildId[i];
+        facts.buildId = buildId;
         return nullptr;
     }
 

@@ -12,10 +12,13 @@ STACK_TOP        EQU 0x7C00      ; 实模式栈顶，交权时的 SS:SP，从 IP
 MEDIA_HDD        EQU 2           ; 交权时 DH 的介质编号：硬盘 / USB-HDD
 MEDIA_CDROM      EQU 4           ; 交权时 DH 的介质编号：光盘
 
+; IPL → Stub：CX 携带本次读取使用的本地逻辑扇区字节数
+; HDD / USB-HDD 为 512 或 4096，CD 为 2048；双方必须配套更新
+
 ; —— Stub → Core：介质上的 CoreDescriptor 与 Core 装载 ——
 ; CoreDescriptor 与 BootDescriptor 同扇区，由组装器写入、由 Stub 读取，字节表见 Stub/README.md 第二节
 ; 校验规则与 BootDescriptor 一致：格式标记、头长、偏移对齐与取值范围、偏移加长度不进位
-CORE_DESC_OFF    EQU 0x340       ; 描述符在介质上的绝对字节偏移
+CORE_DESC_OFF    EQU 0x22020     ; 描述符在介质上的绝对字节偏移
 CORE_DESC_MAGIC  EQU 0x52444342  ; 'BCDR'，介质字节为 42 43 44 52
 CORE_DESC_VER    EQU 1           ; 开发格式标记，未发布
 CORE_DESC_HEADER EQU 32          ; 描述符固定总长
