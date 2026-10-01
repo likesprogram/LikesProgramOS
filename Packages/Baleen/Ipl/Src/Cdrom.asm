@@ -19,14 +19,17 @@ ORG 0
 
 %INCLUDE "Cd.inc"
 
-; 代码区末端：CheckIpl 从汇编清单读这个地址，核对 510 字节与 16 字节余量
+; 代码区末端：CheckIpl 从汇编清单读这个地址，核对代码不越过描述符区槽与 510 字节代码区
 Code_End:
-%IF ($-$$) > 494
-%ERROR "光盘 IPL 须为 510 字节代码区保留至少 16 字节余量"
+%IF ($-$$) > DESC_SLOT_OFF
+%ERROR "光盘 IPL 代码越过描述符区槽"
 %ENDIF
 %IF ($-$$) > 510
 %ERROR "光盘 IPL 超过 510 字节"
 %ENDIF
+    ; 描述符区位置槽：512 字节基准地址，运行期按设备单位换算；装载器可覆盖，未覆盖时用本值
+    TIMES DESC_SLOT_OFF - ($-$$) DB 0
+    DD DESC_LBA_512
     TIMES 510 - ($-$$) DB 0
     DW 0xAA55                   ; 部分 BIOS 仍检查签名
     TIMES 2048 - ($-$$) DB 0    ; 凑满 1 个 CD 扇区，给 LoadSize 4

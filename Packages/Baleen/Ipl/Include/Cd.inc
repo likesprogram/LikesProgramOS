@@ -38,13 +38,15 @@ Cd_Try_Desc:
 
 ; 用当前候选号读描述符扇区并核魔数；命中时 SI 指向描述符、CF 清零
 Cd_Read_Desc:
-    MOV EAX, DESC_LBA_2048      ; 光盘固定 2048 字节扇区，描述符在 LBA 68，缓冲内偏移 0
+    MOV EAX, [DESC_SLOT_OFF]    ; 槽里是 512 字节基准地址，光盘单位固定 2048（= 512 × 4）
+    SHR EAX, 2                  ; 换算成本地 LBA
+    MOV [_Desc_Lba], EAX        ; 交权时经 ESI 交给 Stub，用于读同一个描述符区
     MOV CX, 1
     MOV BX, LOAD_TOP
     CALL _Read_Sectors
     JC .Bad
     MOV SI, LOAD_TOP - BIOS_LOAD
-    CMP DWORD [SI], DESC_MAGIC
+    CMP DWORD [SI], DESC_AREA_MAGIC
     JE .Done                    ; 相等时 CF 已清零，SI 交给共同校验段
 .Bad:
     STC

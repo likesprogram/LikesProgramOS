@@ -14,7 +14,7 @@ namespace Baleen {
     namespace Stub {
         // 装载计划：校验通过后由 PrepareCore 给出，供调用方打印进度行并按图装载
         struct CoreLoadPlan {
-            uint32_t fileOffset = 0;     // Core 文件在介质上的绝对字节偏移
+            uint32_t fileLba = 0;        // Core 文件的起始 LBA，按设备逻辑扇区单位；读盘按它递进
             uint32_t imageBytes = 0;     // Core 文件字节数，描述符与镜像头已核对一致
             uint32_t readBytes = 0;      // 按本地扇区上取整后的读入跨度，尾部填充也会写进内存
             uint32_t memoryBytes = 0;    // 头声明的静态内存跨度，含未落盘尾部；由 Stub 清零
@@ -29,8 +29,9 @@ namespace Baleen {
         uint32_t QueryMemoryMap(uint32_t& truncated);
 
         // 读取并校验 CoreDescriptor 与 Core 镜像头、校验装载区、挑弹跳窗口，并填好交权块
+        // descriptorLba 是 IPL 交来的描述符扇区号，CoreDescriptor 与它同扇区
         // 成功返回空指针并把结果写进 plan，失败返回原因文本：打印与停机由调用方决定
-        const char* PrepareCore(uint32_t drive, uint32_t media, uint32_t sectorBytes, CoreLoadPlan& plan);
+        const char* PrepareCore(uint32_t drive, uint32_t media, uint32_t sectorBytes, uint32_t descriptorLba, CoreLoadPlan& plan);
 
         // 按 plan 把 Core 读进高位，并清零头声明的未落盘尾部
         // 成功返回空指针，读盘失败返回原因文本

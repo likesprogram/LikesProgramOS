@@ -13,13 +13,13 @@ Tools/Bin/MakePayloads Out/Payload
 | --- | --- |
 | `BaleenStub.bin` | 16 位占位程序，向 COM1、0xE9 和 BIOS 文本输出写 `PLACEHOLDER-STUB` 后停留；不含 `BaleenStubHeader`，组装器按“未验证载荷”放行 |
 | `BaleenCore.bin` | 32 位占位映像（68 KiB），带头入口：入口在文件偏移 `0x90`，本工具组装入口前缀、`BaleenCore` 完整性头并填好 BuildId 与 Digest，由 Stub 校验头与摘要后装入 1 MiB 并跳入；代码核对交权块的格式标记后经 Stub 的控制台打印 `PLACEHOLDER-CORE-IMAGE` 并停机；标记不可用时退回直接写 0xE9 与 COM1，并写明走的是退路 |
-| `Efi.img` | 36 MiB FAT32，含 `/EFI/BOOT/BOOTX64.EFI`；只输出 `MAKEISO-EFI-BOOT-OK` 和 `PLACEHOLDER-EFI` 后停留 |
+| `Efi.img` | 4 MiB FAT16，含 `/EFI/BOOT/BOOTX64.EFI`；只输出 `MAKEIMAGE-EFI-BOOT-OK` 和 `PLACEHOLDER-EFI` 后停留 |
 | `SystemVolume.img` | 16 MiB 空 Ext4，不含内核或发行内容 |
 | `BaleenLayout.bin` | 512 字节占位说明，不定义正式布局格式 |
 
 工具不实现 Stub、Core、UEFI 加载器或内核。顶层 Makefile 优先使用各子包真实产物，缺失时才选择这些占位件。占位 Core 是可被 Stub 真正装入并跳入的映像：它用来证明定位、高位装载与交权这条链真的走通，但**不是 Core 实现**，也不代表 Baleen 已能引导内核。
 
-占位汇编内嵌于 C++ 源码，NASM 输出裸代码；占位 Core 的装入地址与交权块偏移取自 `Packages/Baleen/Common/Include/CoreHandoff.hpp`，不在工具里另写一份。C++ 生成 PE32+ 封装与重定位表，并直接更新空 FAT32 的目录、FAT 和主/备 FSInfo，无需挂载或 mtools。生成使用独立临时目录，正常退出及异常路径会清理临时件。
+占位汇编内嵌于 C++ 源码，NASM 输出裸代码；占位 Core 的装入地址与交权块偏移取自 `Packages/Baleen/Common/Include/CoreHandoff.hpp`，不在工具里另写一份。C++ 生成 PE32+ 封装与重定位表，并直接更新空 FAT16 的目录与 FAT，无需挂载或 mtools。生成使用独立临时目录，正常退出及异常路径会清理临时件。
 
 占位件的格式变化会让旧文件认不出来：`BaleenCore.bin` 从文本改为可执行映像后，标记从 `PLACEHOLDER-CORE` 变为 `PLACEHOLDER-CORE-IMAGE`；占位 Core 现在已经带完整性头，旧的无头文件同样认不出来。两者都会被当作“不是当前格式的占位件”拒绝，需要先删除再重新生成。
 

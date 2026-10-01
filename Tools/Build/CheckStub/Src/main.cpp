@@ -3,7 +3,7 @@
 
     用真实的 IPL 与 Stub 产物加内嵌探针 Core 组装镜像，在 QEMU 里核对三类行为：
     成功路径的完整步骤、摘要校验与交权块四个服务在 Core 运行期的可用性；
-    Stub 自身自检、CoreDescriptor 与 Core 镜像头各字段的拒绝路径；读盘失败与装载区约束
+    Stub 自身自检、描述符区与 Core 段、Core 镜像头各字段的拒绝路径；读盘失败与装载区约束
     失败用例读 0xE9 调试口输出的 FATAL 原因文本，成功用例核对 isa-debug-exit 的退出码
 */
 
@@ -209,26 +209,34 @@ namespace {
     }
 
     // —— 介质与镜像常量：与一级引导契约、Stub 说明及 CoreHandoff.hpp 一致 ——
-    constexpr std::size_t kBootDescriptorOffset = 0x22000;  // BootDescriptor 的介质绝对偏移
-    constexpr std::size_t kCoreDescriptorOffset = 0x22020;  // CoreDescriptor 的介质绝对偏移
+    // 描述符区独占一个扇区：头部之后是段序列，每段自带长度；位置只按扇区表达
+    constexpr std::size_t kAreaOffset = 0x22000;           // 描述符区在介质上的字节偏移（LBA 272 / 68 / 34）
+    constexpr std::size_t kStubSegmentOffset = 0x22010;    // Stub 段：头部 16 字节之后
+    constexpr std::size_t kCoreSegmentOffset = 0x22020;    // Core 段：紧随 Stub 段
     constexpr uint32_t kCoreLoad = 0x100000;               // Core 装入的物理地址
     // 探针 Core 的映像长度：跨过 64KiB，让 Stub 的高位装载分批与拷贝路径也被走到
     constexpr std::size_t kProbeImageBytes = 0x11000;
     // isa-debug-exit：写 0x10 时 QEMU 以 (0x10 << 1) | 1 退出
     constexpr int kExitOk = (0x10 << 1) | 1;
-    // 描述符字段偏移，两个描述符共用同一套字节表
-    constexpr std::size_t kDescMagic = 0x00;
-    constexpr std::size_t kDescVersion = 0x04;
-    constexpr std::size_t kDescHeaderBytes = 0x06;
-    constexpr std::size_t kDescFileOffset = 0x08;
-    constexpr std::size_t kDescImageBytes = 0x10;
-    constexpr std::size_t kDescReserved = 0x18;
+    // 描述符区头部字段偏移
+    constexpr std::size_t kHeadMagic = 0x00;
+    constexpr std::size_t kHeadBytes = 0x06;
+    constexpr std::size_t kHeadLba = 0x08;
+    constexpr std::size_t kHeadEndLba = 0x0C;
+    // 段内字段偏移，各段共用同一套字节表
+    constexpr std::size_t kSegMagic = 0x00;
+    constexpr std::size_t kSegVersion = 0x04;
+    constexpr std::size_t kSegLength = 0x06;
+    constexpr std::size_t kSegLba = 0x08;
+    constexpr std::size_t kSegEndLba = 0x0C;
     // 用例总数，Execute 末尾核对，防止用例被误删
-    constexpr unsigned kCaseCount = 30;
+    constexpr unsigned kCaseCount = 28;
 
-    // 篡改目标：描述符本身、镜像里的 Stub 文件或 Core 文件
+    // 篡改目标：描述符区头部、两枚段、镜像里的 Stub 文件或 Core 文件
     enum class Target {
-        CoreDescriptor,   // 介质上的 CoreDescriptor
+        DescriptorArea,   // 描述符区头部
+        StubSegment,      // Stub 段
+        CoreSegment,      // Core 段
         StubFile,         // 镜像里的 Stub 文件
         CoreFile,         // 镜像里的 Core 文件
     };
@@ -258,7 +266,7 @@ namespace {
                     "\n"
                     "  --stub-dir  BaleenStub.bin 所在目录，通常是 Packages/Baleen/Stub/Out/Bin\n"
                     "  --ipl-dir   BaleenIPL.bin 与 BaleenIPLCd.bin 所在目录，通常是 Packages/Baleen/Ipl/Out/Bin\n"
-                    "  --root      项目根；缺省时从可执行文件同目录找 MakeHdd / MakeIso\n"
+                    "  --root      项目根；缺省时从可执行文件同目录找 MakeImage / TestInstaller\n"
                     "  --keep      保留每例的日志与证据目录\n"
                     "\n"
                     "环境变量：NASM、QEMU、CHECKSTUB_TEST_TIMEOUT（每例秒数，1..300，默认 12）\n";
@@ -284,8 +292,8 @@ namespace {
             const auto timeout = Number(Env("CHECKSTUB_TEST_TIMEOUT", "12"));
             Require(timeout >= 1 && timeout <= 300, "CHECKSTUB_TEST_TIMEOUT 必须在 1..300 秒内");
             m_timeout = std::chrono::seconds(timeout);
-            for (const auto* tool : {"MakeHdd", "MakeIso"}) Require(::access((m_tools / tool).c_str(), X_OK) == 0, "缺少可执行镜像工具 " + (m_tools / tool).string());
-            Require(m_stub.size() > makeiso::ImageHeaderLayout::kEntryOffset, "Stub 产物过小");
+            for (const auto* tool : {"MakeImage", "TestInstaller"}) Require(::access((m_tools / tool).c_str(), X_OK) == 0, "缺少可执行镜像工具 " + (m_tools / tool).string());
+            Require(m_stub.size() > hostbuild::ImageHeaderLayout::kEntryOffset, "Stub 产物过小");
             for (const auto* ipl : {"BaleenIPL.bin", "BaleenIPLCd.bin"}) Require(fs::exists(m_options.iplDir / ipl), "缺少 IPL 产物 " + (m_options.iplDir / ipl).string());
             WriteText(m_work / "ProbeCore.asm", checkstub::kProbeCoreAsm);
         }
@@ -307,21 +315,24 @@ namespace {
             Mutate(Target::StubFile, "stub image bytes", 0x20, 4, 0x1000, "The stub image size doesn't match the linked layout");
             Mutate(Target::StubFile, "stub memory bytes", 0x24, 4, 0x9000, "The stub memory size doesn't match the linked layout");
 
-            // CoreDescriptor：格式标记、版本、保留、偏移与长度
-            Mutate(Target::CoreDescriptor, "core descriptor magic", kDescMagic, 4, 0, "The CoreDescriptor magic doesn't match");
-            Mutate(Target::CoreDescriptor, "core descriptor version", kDescVersion, 2, 2, "The CoreDescriptor version or header length isn't supported");
-            Mutate(Target::CoreDescriptor, "core descriptor header", kDescHeaderBytes, 2, 31, "The CoreDescriptor version or header length isn't supported");
-            Mutate(Target::CoreDescriptor, "core descriptor reserved", kDescReserved, 4, 1, "The CoreDescriptor reserved or high half isn't zero");
-            Mutate(Target::CoreDescriptor, "core descriptor offset high", kDescFileOffset, 8, 0x100000000ull, "The CoreDescriptor reserved or high half isn't zero");
-            Mutate(Target::CoreDescriptor, "core descriptor unaligned", kDescFileOffset, 8, 0x481, "The CoreDescriptor file offset isn't sector aligned");
-            Mutate(Target::CoreDescriptor, "core descriptor overlap", kDescFileOffset, 8, 0x200, "The CoreDescriptor file offset overlaps the descriptor sector");
-            Mutate(Target::CoreDescriptor, "core descriptor size zero", kDescImageBytes, 8, 0, "The CoreImageBytes is zero or beyond the limit");
-            Mutate(Target::CoreDescriptor, "core descriptor size high", kDescImageBytes, 8, 0x100000000ull, "The CoreDescriptor reserved or high half isn't zero");
-            Mutate(Target::CoreDescriptor, "core descriptor size over", kDescImageBytes, 8, 0x400001, "The CoreImageBytes is zero or beyond the limit");
-            Mutate(Target::CoreDescriptor, "core descriptor overflow", kDescFileOffset, 8, 0xFFFFF000ull, "The CoreDescriptor file range doesn't fit in 32 bits");
+            // 描述符区头部：IPL 先于 Stub 校验，破坏在这里会由 IPL 以 D 停机
+            Mutate(Target::DescriptorArea, "area magic", kHeadMagic, 4, 0, "D");
+            Mutate(Target::DescriptorArea, "area head bytes", kHeadBytes, 2, 4, "D");
+            Mutate(Target::DescriptorArea, "area sector", kHeadLba, 4, 1, "D");
+            // 本区结束扇区只由 Stub 校验
+            Mutate(Target::DescriptorArea, "area end inverted", kHeadEndLba, 4, 0, "The CoreDescriptor area range is inverted");
+
+            // Stub 段：段长与标记由 IPL 的遍历先看到
+            Mutate(Target::StubSegment, "stub segment length", kSegLength, 2, 0, "D");
+            Mutate(Target::StubSegment, "stub segment magic", kSegMagic, 4, 0, "D");
+
+            // Core 段：IPL 不读它，由 Stub 校验
+            Mutate(Target::CoreSegment, "core segment lba zero", kSegLba, 4, 0, "The CoreDescriptor LBA is zero");
+            Mutate(Target::CoreSegment, "core segment lba overlap", kSegLba, 4, 272, "The CoreDescriptor overlaps the descriptor sector");
+            Mutate(Target::CoreSegment, "core segment end inverted", kSegEndLba, 4, 0, "The CoreDescriptor range is inverted");
 
             // Core 镜像头：与 Stub 同构的头字段与入口前缀
-            using Head = makeiso::ImageHeaderLayout;
+            using Head = hostbuild::ImageHeaderLayout;
             Mutate(Target::CoreFile, "core magic", Head::kOffset + Head::kFieldMagic, 4, 0, "The image header magic doesn't match");
             Mutate(Target::CoreFile, "core version", Head::kOffset + Head::kFieldVersion, 2, 2, "The image header version or header length isn't supported");
             Mutate(Target::CoreFile, "core flags", Head::kOffset + Head::kFieldFlags, 4, 1, "The image header flags aren't supported");
@@ -329,16 +340,18 @@ namespace {
             Mutate(Target::CoreFile, "core build id length", Head::kOffset + Head::kFieldBuildIdBytes, 2, 16, "The image header build id length isn't supported");
             Mutate(Target::CoreFile, "core reserved", Head::kOffset + Head::kFieldReserved, 4, 1, "The image header reserved bytes aren't zero");
             Mutate(Target::CoreFile, "core entry prefix", 0x00, 1, 0x90, "The image entry prefix doesn't match the entry offset");
-            Mutate(Target::CoreFile, "core image bytes", Head::kOffset + Head::kFieldImageBytes, 4, 0x1000, "The CoreDescriptor file bytes don't match the core header");
+            Mutate(Target::CoreFile, "core image bytes", Head::kOffset + Head::kFieldImageBytes, 4, 0x1000, "The CoreDescriptor sector count doesn't match the core header");
             Mutate(Target::CoreFile, "core memory bytes", Head::kOffset + Head::kFieldMemoryBytes, 4, 0x400001, "The CoreMemoryBytes is beyond the limit");
 
             // 摘要不符：只改代码字节，头与描述符保持一致
             Mutate(Target::CoreFile, "core digest mismatch", 0x100, 4, 0, "The image digest doesn't match");
 
-            // 读盘失败：Core 文件偏移指向介质之外
+            // 读盘失败：Core 段的起止扇区一起指向介质之外，两者保持自洽
             {
                 Bytes image = m_hddBase;
-                PutLe(image, kCoreDescriptorOffset + kDescFileOffset, image.size(), 8);
+                const uint64_t outside = static_cast<uint64_t>(image.size()) / 512;
+                PutLe(image, kCoreSegmentOffset + kSegLba, outside, 4);
+                PutLe(image, kCoreSegmentOffset + kSegEndLba, outside + 4, 4);
                 Case("core unreadable", image, std::nullopt, {"Read the BaleenCore header"});
             }
 
@@ -362,7 +375,7 @@ namespace {
         Bytes BuildProbe(uint32_t sectorBytes, uint32_t memoryBytes) {
             const auto code = m_work / "probe-core-code.bin";
             Assemble(checkstub::kProbeCoreAsm, code, {
-                {"CORE_ENTRY", kCoreLoad + makeiso::ImageHeaderLayout::kEntryOffset},
+                {"CORE_ENTRY", kCoreLoad + hostbuild::ImageHeaderLayout::kEntryOffset},
                 {"EXPECT_SECT", sectorBytes},
                 {"HANDOFF_MAGIC", Baleen::CoreHandoffLayout::kMagic},
                 {"HANDOFF_VERSION", Baleen::CoreHandoffLayout::kVersion},
@@ -374,29 +387,29 @@ namespace {
                 {"HANDOFF_QUERY", Baleen::CoreHandoffLayout::kMemoryMapQuery},
             });
             const Bytes body = ReadBytes(code);
-            const std::size_t entryAt = makeiso::ImageHeaderLayout::kEntryOffset;
+            const std::size_t entryAt = hostbuild::ImageHeaderLayout::kEntryOffset;
             Require(body.size() + entryAt <= kProbeImageBytes, "探针 Core 代码超出映像长度上限");
             Bytes image(kProbeImageBytes, 0);
             // 入口前缀与头字段：与 MakePayloads 组装的占位 Core 同一套布局与填充顺序
-            image[0] = makeiso::ImageHeaderLayout::kNearJumpOpcode;
-            PutLe(image, 1, entryAt - makeiso::ImageHeaderLayout::kPrefixBytes, 2);
+            image[0] = hostbuild::ImageHeaderLayout::kNearJumpOpcode;
+            PutLe(image, 1, entryAt - hostbuild::ImageHeaderLayout::kPrefixBytes, 2);
             std::copy(body.begin(), body.end(), image.begin() + static_cast<std::ptrdiff_t>(entryAt));
-            const std::size_t head = makeiso::ImageHeaderLayout::kOffset;
+            const std::size_t head = hostbuild::ImageHeaderLayout::kOffset;
             const uint8_t magic[8] = {'B', 'L', 'N', 'C', 'O', 'R', 'E', 0};
             std::copy(std::begin(magic), std::end(magic), image.begin() + static_cast<std::ptrdiff_t>(head));
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldVersion, makeiso::ImageHeaderLayout::kVersion, 2);
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldHeaderBytes, makeiso::ImageHeaderLayout::kBytes, 2);
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldFlags, makeiso::ImageHeaderLayout::kFlags, 4);
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldImageBytes, image.size(), 4);
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldMemoryBytes, memoryBytes, 4);
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldEntryOffset, entryAt, 4);
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldDigestAlgorithm, makeiso::ImageHeaderLayout::kDigestSha256, 2);
-            PutLe(image, head + makeiso::ImageHeaderLayout::kFieldBuildIdBytes, makeiso::ImageHeaderLayout::kBuildIdBytes, 2);
-            makeiso::FillImageIdentity(image);
-            makeiso::VerifyImage(image, makeiso::ImageKind::Core);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldVersion, hostbuild::ImageHeaderLayout::kVersion, 2);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldHeaderBytes, hostbuild::ImageHeaderLayout::kBytes, 2);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldFlags, hostbuild::ImageHeaderLayout::kFlags, 4);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldImageBytes, image.size(), 4);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldMemoryBytes, memoryBytes, 4);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldEntryOffset, entryAt, 4);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldDigestAlgorithm, hostbuild::ImageHeaderLayout::kDigestSha256, 2);
+            PutLe(image, head + hostbuild::ImageHeaderLayout::kFieldBuildIdBytes, hostbuild::ImageHeaderLayout::kBuildIdBytes, 2);
+            hostbuild::FillImageIdentity(image);
+            hostbuild::VerifyImage(image, hostbuild::ImageKind::Core);
             return image;
         }
-        // 用 MakeHdd / MakeIso 组装一份镜像：真实 Stub 加探针 Core
+        // 用 MakeImage / TestInstaller 组装一份镜像：真实 Stub 加探针 Core
         // sectorBytes 为本地逻辑扇区大小；0 表示按介质推断：光盘 2048、磁盘 512
         fs::path Assemble(bool cd, uint32_t memoryBytes, uint32_t sectorBytes = 0) {
             if (sectorBytes == 0) sectorBytes = cd ? 2048 : 512;
@@ -405,7 +418,7 @@ namespace {
             const auto stub = m_work / "stub.bin";
             WriteBytes(stub, m_stub);
             const auto image = m_work / (cd ? "base.iso" : "base.hdd");
-            std::vector<std::string> command{(m_tools / (cd ? "MakeIso" : "MakeHdd")).string(), "--out", image.string()};
+            std::vector<std::string> command{(m_tools / (cd ? "MakeImage" : "TestInstaller")).string(), "--out", image.string()};
             if (cd) command.insert(command.end(), {"--boot-image", (m_options.iplDir / "BaleenIPLCd.bin").string()});
             else command.insert(command.end(), {"--mbr", (m_options.iplDir / "BaleenIPL.bin").string()});
             // 4Kn 用例：分区表按 4096 编码，镜像留足容量（固件不从小容量 NVMe 引导）
@@ -419,9 +432,12 @@ namespace {
             Bytes image = m_hddBase;
             std::size_t base = 0;
             switch (target) {
-                case Target::CoreDescriptor: base = kCoreDescriptorOffset; break;
-                case Target::StubFile: base = static_cast<std::size_t>(GetLe(image, kBootDescriptorOffset + kDescFileOffset, 8)); break;
-                case Target::CoreFile: base = static_cast<std::size_t>(GetLe(image, kCoreDescriptorOffset + kDescFileOffset, 8)); break;
+                case Target::DescriptorArea: base = kAreaOffset; break;
+                case Target::StubSegment: base = kStubSegmentOffset; break;
+                case Target::CoreSegment: base = kCoreSegmentOffset; break;
+                // 载荷位置只按扇区存：从段里取起始扇区，按本地单位换算成字节位置
+                case Target::StubFile: base = static_cast<std::size_t>(GetLe(image, kStubSegmentOffset + kSegLba, 4)) * 512; break;
+                case Target::CoreFile: base = static_cast<std::size_t>(GetLe(image, kCoreSegmentOffset + kSegLba, 4)) * 512; break;
             }
             PutLe(image, base + pos, value, width);
             Case(name, image, std::nullopt, {expected});

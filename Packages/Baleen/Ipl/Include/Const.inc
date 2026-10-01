@@ -4,24 +4,32 @@
 ; 装载窗口、实模式栈顶与介质编号是交权契约的一部分，由 Baleen 共享定义提供
 %INCLUDE "Contract.inc"
 
-; 描述符的介质绝对字节偏移：取 512 / 2048 / 4096 三种逻辑扇区的公倍数，
-; 落在 GPT 保留区（LBA 1..33，4Kn 下到 0x22000 之前）之后，三种单位下都是扇区边界
-; 同一份镜像在三种单位下的描述符字节位置一致，不随介质单位变化
-DESC_OFFSET      EQU 0x22000     ; BootDescriptor 偏移；CoreDescriptor 紧随其后 32 字节
-DESC_CORE_DELTA  EQU 32          ; CoreDescriptor 相对 BootDescriptor 的偏移
-DESC_MAGIC       EQU 0x52445342  ; 描述符魔数 'BSDR'
-DESC_VERSION     EQU 1           ; 当前开发格式标记
-DESC_HEADER      EQU 32          ; 描述符总长
-DESC_VER         EQU 4           ; Version 与 HeaderBytes 字段偏移（同一个 DWORD）
-DESC_LOFF        EQU 8           ; StubFileOffset 字段偏移
-DESC_LBYTES      EQU 16          ; StubImageBytes 字段偏移
-DESC_RESV        EQU 24          ; Reserved 字段偏移
-; 描述符所在逻辑扇区号，按本地扇区单位换算
-DESC_LBA_512     EQU DESC_OFFSET >> 9    ; 512 字节扇区：272
-DESC_LBA_2048    EQU DESC_OFFSET >> 11   ; 2048 字节扇区（光盘）：68
-DESC_LBA_4096    EQU DESC_OFFSET >> 12   ; 4096 字节扇区：34
-; Stub 文件偏移的下限：描述符之后，且 512 与 4096 两种单位下都安全
-STUB_MIN_OFFSET  EQU 0x23000
+; 描述符区位置槽：IPL 二进制里留给装载器回填的位置
+; 槽里是描述符区的 512 字节基准地址（值 = 字节偏移 / 512），与目标设备的逻辑扇区单位无关；
+; 运行期按探测到的本地单位右移换算成本地 LBA，所以同一份字节在 512e、4Kn 与 2048 字节单位的光盘上
+; 都指向同一处物理位置，写入方不需要按目标设备回填
+; 槽的位置在代码之后、分区表或签名之前，由下面的常量固定
+%IFDEF IPL_CD
+DESC_SLOT_OFF    EQU 494         ; 光盘：代码之后、510 字节代码区之内（其后留 16 字节余量）
+%ELSE
+DESC_SLOT_OFF    EQU 440         ; 磁盘：代码之后、446 字节分区表之前
+%ENDIF
+DESC_LBA_512     EQU 272         ; 描述符区在字节偏移 0x22000：0x22000 / 512 = 272
+
+; 位置字段的基准单位是 512 字节：本地 LBA = 字段值 >> _Sect_Shift，字段移位量见 Read.inc
+BASE_SHIFT       EQU 9
+
+; —— 描述符区：头部与段的字段偏移，与 Packages/Baleen/Common/Include/Desc.inc 一致 ——
+DESC_AREA_MAGIC      EQU 0x43534442  ; 'BDSC'，头部标记
+DESC_AREA_HEAD_BYTES EQU 6           ; 头部长度字段，2 字节小端
+DESC_AREA_LBA        EQU 8           ; 本区起始扇区，4 字节小端
+DESC_AREA_END_LBA    EQU 12          ; 本区结束扇区，4 字节小端，含
+DESC_AREA_HEAD_LEN   EQU 16          ; 头部固定长度，段序列从它之后开始
+DESC_SEG_LEN         EQU 6           ; 段内段长，2 字节小端，含段头
+DESC_SEG_HEAD_BYTES  EQU 8           ; 段头长度
+DESC_SEG_LBA         EQU 8           ; 段内载荷起始扇区，4 字节小端
+DESC_SEG_END_LBA     EQU 12          ; 段内载荷结束扇区，4 字节小端，含
+DESC_BOOT_MAGIC      EQU 0x52445342  ; 'BSDR'，Stub 段标记
 ; 单幅读取的字节上限：窗口按本地扇区向下取整到整扇区（512 字节扇区下 0x8200，光盘 0x8000）
 MAX_STUB_BYTES   EQU ((LOAD_CEIL - LOAD_TOP) >> SECT_SHIFT) << SECT_SHIFT
 

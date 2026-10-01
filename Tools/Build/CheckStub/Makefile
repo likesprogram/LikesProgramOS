@@ -7,7 +7,7 @@ OBJ_DIR  ?= Obj
 BIN_DIR  ?= ../../Bin
 # 本工具的源目录
 SRC_DIR  := Src
-# 与 PackImage / MakeIso / MakeHdd / MakePayloads 共享的代码目录
+# 与 PackImage / MakeImage / TestInstaller / MakePayloads 共享的代码目录
 COMMON_DIR := ../Common
 
 # C++ 编译器

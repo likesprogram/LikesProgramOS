@@ -100,6 +100,12 @@ Dap:
 ; 固件给的驱动器号，所有 INT 13h 调用都用它；CD 候选探测会改写
 _Saved_Dl:
     DB 0
+; 描述符所在扇区的 LBA：入口读描述符时记下，交权时经 ESI 交给 Stub
+_Desc_Lba:
+    DD 0
+; 位置字段换算的右移量：512 字节基准 → 本地 LBA（512 不移、2048 右移 2、4096 右移 3）
+_Sect_Shift:
+    DB 0
 %IFNDEF IPL_CD
 ; 本地逻辑扇区字节数，AH=48 查询失败时保留传统硬盘的 512 字节约定
 _Sector_Bytes:

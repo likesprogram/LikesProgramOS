@@ -1,46 +1,45 @@
 # Baleen Stub — 约定与结构
 
-`Stub` 是 BIOS 路径中承接 IPL 的实模式服务层：IPL 把它读到 `0000:7E00` 后直接跳过来，机器此时仍是 16 位实模式；Stub 的入口保存 IPL 交来的介质身份，由自己切到 32 位保护模式，随后自检自身完整性、打开 A20、建立运行期段表与中断表、取内存图、探测并读取启动设备，最后按第二节的契约定位 `BaleenCore`、校验其镜像头与整幅摘要，再把它装到高位、通过交权块交给它。源码分工：`Src/Stub.asm` 与 `Src/Stub.cpp` 是入口与主流程，`Src/SelfCheck.cpp` 是自身完整性自检，`Src/LoadCore.cpp` 是 Core 的描述符、镜像头、装载、摘要校验与交权机制，`Src/Bios.asm` 是 BIOS 服务。`make` 产出 `Out/Bin/BaleenStub.bin`：`objcopy` 之后由 `Tools/Bin/PackImage` 填头里的 BuildId 与 Digest，再由顶层组装进镜像。`Src/Bios.asm` 经实模式弹跳提供扇区探测、E820 内存图与低地址读盘，磁盘服务只读不写；读盘批量失败后从原始 LBA 与目标地址逐扇区重读，读盘只走 EDD，服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转。第三节的 `BaleenStubHeader` 随镜像发布，字段由链接器与打包器共同填出；它与 Core 的镜像头同构，布局的单点定义在 `Packages/Baleen/Common/Include/ImageHeader.hpp`。`Include/Const.inc` 只放本包私有常量，交权契约常量取自 `Packages/Baleen/Common/Include/Contract.inc`。
+`Stub` 是 BIOS 路径中承接 IPL 的实模式服务层：IPL 把它读到 `0000:7E00` 后直接跳过来，机器此时仍是 16 位实模式；Stub 的入口保存 IPL 交来的介质身份，由自己切到 32 位保护模式，随后自检自身完整性、打开 A20、建立运行期段表与中断表、取内存图、探测并读取启动设备，最后按第二节的契约定位 `BaleenCore`、校验其镜像头与整幅摘要，再把它装到高位、通过交权块交给它。源码分工：`Src/Stub.asm` 与 `Src/Stub.cpp` 是入口与主流程，`Src/SelfCheck.cpp` 是自身完整性自检，`Src/LoadCore.cpp` 是 Core 段、镜像头、装载、摘要校验与交权机制，`Src/Bios.asm` 是 BIOS 服务。`make` 产出 `Out/Bin/BaleenStub.bin`：`objcopy` 之后由 `Tools/Bin/PackImage` 填头里的 BuildId 与 Digest，再由顶层组装进镜像。`Src/Bios.asm` 经实模式弹跳提供扇区探测、E820 内存图与低地址读盘，磁盘服务只读不写；读盘批量失败后从原始 LBA 与目标地址逐扇区重读，读盘只走 EDD，服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转。第三节的 `BaleenStubHeader` 随镜像发布，字段由链接器与打包器共同填出；它与 Core 的镜像头同构，布局的单点定义在 `Packages/Baleen/Common/Include/ImageHeader.hpp`。`Include/Const.inc` 只放本包私有常量，交权契约常量取自 `Packages/Baleen/Common/Include/Contract.inc`。
 
-IPL 的当前行为以 [Baleen 一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 为准；整个引导器的职责见 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md)。本文的 `BaleenStubHeader` 与介质上的 `BootDescriptor` 是两个独立结构；头里的 `Version=1` 与 `HeaderBytes=0x80` 标识当前格式。
+IPL 的当前行为以 [Baleen 一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 为准；整个引导器的职责见 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md)。本文的 `BaleenStubHeader` 与介质上的描述符区是两个独立结构；头里的 `Version=1` 与 `HeaderBytes=0x80` 标识当前格式。
 
 **源码分工是一条硬约束**：`_Stub_Main` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都在这一段里，步骤变多也不会散到别的文件；`Src/LoadCore.cpp` 只提供机制（读描述符与镜像头、查内存图、挑弹跳窗口、高位拷贝、摘要校验、填交权块），不打印也不停机，失败只回报原因文本。文件与类型名取「装载 Core」这个动作，避免与 Baleen 的 `Core` 阶段混同；`Src/Bios.asm` 同理，只做固件调用，不做诊断排版。
 
 ## 一、职责与进入条件
 
-IPL 校验 `BootDescriptor` 并读入 Stub 文件，然后固定跳转到 `0000:7E00`。它不解释任何 Stub 头，也不按头中的入口字段跳转。进入时 `DS=07C0`、`ES=0`、`SS:SP=0000:7C00`，`DL` 为实际读取驱动器号，`DH=2` 表示 HDD / USB-HDD、`DH=4` 表示 CD，`CX` 为本次读取的逻辑扇区字节数（HDD 为 512 / 4096、CD 为 2048），`IF=1`、`DF=0`；其他寄存器、其他标志及 A20 状态不承诺。
+IPL 校验描述符区并读入 Stub 文件，然后固定跳转到 `0000:7E00`。它不解释任何 Stub 头，也不按头中的入口字段跳转。进入时 `DS=07C0`、`ES=0`、`SS:SP=0000:7C00`，`DL` 为实际读取驱动器号，`DH=2` 表示 HDD / USB-HDD、`DH=4` 表示 CD，`CX` 为本次读取的逻辑扇区字节数（HDD 为 512 / 4096、CD 为 2048），`IF=1`、`DF=0`；其他寄存器、其他标志及 A20 状态不承诺。
 
 Stub 在清零 BSS 前保存 `CX`，之后将它写入 `_Boot_Sector_Bytes`；启动读盘始终使用这个会话单位，并核对它与介质类型一致。AH=48 的再次查询仅作为交权块服务保留，不用查询失败后的 512 猜测覆盖 IPL 已确认的 4Kn 单位。新增 `CX` 契约要求 IPL 与 Stub 配套重新构建、组装，旧 IPL 不满足此入口。
 
-描述符位于介质绝对偏移 `0x22000`。其读盘缓冲在装入 Stub 时被覆盖，不能假设收到持久有效的描述符指针。Stub 必须保存仍需使用的驱动器与介质身份，并自行建立数据段、内存占用和运行环境。
+描述符独占介质上的一个扇区（LBA 按本地单位取 272 / 68 / 34）。其读盘缓冲在装入 Stub 时被覆盖，不能假设收到持久有效的描述符指针。Stub 必须保存仍需使用的驱动器与介质身份，并自行建立数据段、内存占用和运行环境。
 
 Stub 的职责与实现位置：
 
 - 完成 BSS 初始化，在实模式下按链接脚本给出的边界清零；校验自身完整性头字段与整幅镜像的摘要，并核对头里的 `ImageBytes`、`MemoryBytes` 与实际链接布局一致（三、四节）。
 - 建立并核验 A20 状态、取得内存图、维护 BIOS 磁盘会话及必要的调用状态；读盘是有界的两层策略：批量 EDD 请求各自至多 3 次尝试，失败时按会话一次的复位策略处理；某批耗尽后从原始 LBA 与目标地址把整段范围逐扇区重读，单扇区请求在 HDD、逻辑扇区 512 字节且 `LBA<63` 时保留 `AH=02h` 的 C0H0 回退，失败只返回 0。`Src/Bios.asm` 提供扇区探测、E820 内存图与读盘，`Platform::Cpu` 提供 A20 开关与模式识别。
-- 按第二节的契约读取 `CoreDescriptor` 与 Core 镜像头、校验装载边界与整幅摘要，把 `BaleenCore` 装到高位、清零头声明的未落盘尾部并交权；Core 内部的代码、段与运行期内存仍由 Core 自己负责。
+- 按第二节的契约读取描述符区的 Core 段与 Core 镜像头、校验装载边界与整幅摘要，把 `BaleenCore` 装到高位、清零头声明的未落盘尾部并交权；Core 内部的代码、段与运行期内存仍由 Core 自己负责。
 - 无法完成必要初始化或装载时报告本阶段错误并停止；诊断行按[输出通道与Print](../../../Docs/Specs/输出通道与Print.md)的标签约定输出，失败以 `FATAL` 标签给出原因文本后停机。
 
 `BaleenLayout.bin` 的系统卷语义、Ext4、内核集选版、签名策略和引导状态持久化属于 Core / UEFI。Stub 不承担这些策略。它对自身与 Core 的完整性检查都不是签名认证，也不等于实现了内核集签名链。
 
 ## 二、Core 的介质定位、装载与交权
 
-这一节是 Stub → Core 的当前 ABI，两侧由 `Packages/Baleen/Common/Include/Contract.inc` 的 `CORE_*` 常量、`CoreHandoff.hpp` 的交权块结构与 `ImageHeader.hpp` 的镜像头布局共同约束，改一处必须两边同时改。与 `BootDescriptor` 一样，本节格式的改动必须两侧同步。
+这一节是 Stub → Core 的当前 ABI，两侧由 `Packages/Baleen/Common/Include/Contract.inc` 的 `CORE_*` 常量、`CoreHandoff.hpp` 的交权块结构与 `ImageHeader.hpp` 的镜像头布局共同约束，改一处必须两边同时改。与描述符区一样，本节格式的改动必须两侧同步。
 
-### 2.1 介质上的 CoreDescriptor
+### 2.1 介质上的 Core 段
 
-`CoreDescriptor` 固定 32 字节，位于**整个引导介质的绝对字节偏移 `0x22020`**，与 `BootDescriptor` 落在同一扇区（512 / 2048 / 4096 单位下都是同一字节位置，扇区内偏移 32）。Stub 按 IPL 交来的逻辑扇区大小读取。
+`CoreDescriptor` 是描述符区里的一个段：与 Stub 段同处一个扇区，段头之后是 Core 载荷的起止位置（512 字节基准）。Stub 按 IPL 交来的描述符区扇区号读入该扇区，按段长遍历、按标记找到它，再按会话单位把位置字段换算成本地扇区号。
 
 | 偏移 | 字节数 | 字段 | 当前要求 |
 | --- | --- | --- | --- |
 | `0x00` | 4 | Magic | `0x52444342`，介质字节为 `BCDR` |
 | `0x04` | 2 | Version | 当前值 `1` |
-| `0x06` | 2 | HeaderBytes | `32` |
-| `0x08` | 8 | CoreFileOffset | 介质绝对字节偏移；高 32 位为 0；低 32 位非零且按本地扇区对齐 |
-| `0x10` | 8 | CoreImageBytes | 文件字节数；高 32 位为 0；非 0 且不超过 `0x400000` |
-| `0x18` | 8 | Reserved | 8 字节全部为 0 |
+| `0x06` | 2 | Length | 段长，含段头；至少 `16` |
+| `0x08` | 4 | CoreLba | Core 载荷的起始位置，512 字节基准；换算成本地 LBA 后必须大于描述符区扇区 |
+| `0x0C` | 4 | CoreEndLba | 结束位置，512 字节基准，含；换算后不得早于起始，扇区数不超过 `0x400000` 按单位上取整 |
 
-校验与一级引导对 `BootDescriptor` 的校验同构：格式标记、版本与头长、保留字段、高 32 位、扇区对齐、起点落在描述符扇区之后（512 B HDD `>= 0x400`、4Kn HDD `>= 0x1000`、CD `>= 0x800`），以及偏移加长度不进位。任一项不通过即打印原因并停机，不装载、不跳转。
+**位置字段以 512 字节为基准（值 = 字节偏移 / 512）。** 校验与 IPL 对描述符区的校验同构：段头标记、段长范围、本区位置一致、起止位置次序与窗口上限。任一项不通过即打印原因并停机，不装载、不跳转。
 
 **`CoreDescriptor` 只定位文件。** 装载地址固定，入口与内存跨度来自 Core 镜像头（2.3）；描述符不装这些字段，也不装摘要与签名：它们由镜像头承载、由 Stub 校验，把策略性字段塞进描述符会与后续阶段的设计冲突。
 
@@ -73,7 +72,7 @@ Stub 分两步核对，任一项不通过都停机，不跳转：
 
 ### 2.4 交权块
 
-只跳转不构成交权：Core 需要介质身份、内存图与可用的固件服务入口，而 `BootDescriptor` 缓冲区早已被 Stub 覆盖。这些事实由交权块传递，定义在 `Packages/Baleen/Common/Include/CoreHandoff.hpp`，长度固定 64 字节；入口时 `ESI` 指向它，指针是物理地址（分页关闭，虚拟地址等于物理地址）。
+只跳转不构成交权：Core 需要介质身份、内存图与可用的固件服务入口，而描述符区的读盘缓冲早已被 Stub 覆盖。这些事实由交权块传递，定义在 `Packages/Baleen/Common/Include/CoreHandoff.hpp`，长度固定 64 字节；入口时 `ESI` 指向它，指针是物理地址（分页关闭，虚拟地址等于物理地址）。
 
 | 块内偏移 | 字段 | 含义 |
 | --- | --- | --- |
@@ -165,7 +164,7 @@ Digest = SHA-256(F[0x00:0x50] || 32 个零字节 || F[0x70:ImageBytes])
 
 这里的切片右端均不含，`||` 表示字节串拼接。`Magic`、版本、长度、入口、BuildId、所有保留字节、入口前缀、代码和落盘数据均被覆盖；只有摘要本身按规则归零，避免自引用。SHA-256 的标准依据为 NIST [Hash Functions](https://csrc.nist.gov/projects/hash-functions) 与其列出的 [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)；目标侧实现在 `Packages/Baleen/Common/Src/Sha256.cpp`，宿主侧实现在 `Tools/Build/Common/Src/Sha256.cpp`。
 
-覆盖范围不包含介质上的 `BootDescriptor`、最后一个本地扇区的文件外填充、BSS、其他运行时缓冲、Core、`BaleenLayout.bin` 或内核集。
+覆盖范围不包含介质上的描述符区、最后一个本地扇区的文件外填充、BSS、其他运行时缓冲、Core、`BaleenLayout.bin` 或内核集。
 
 打包顺序：链接器填好长度字段、`objcopy` 产出平坦镜像、`PackImage` 先按第五节规则填 `BuildId`，再把 `Digest` 置零并按上式填入摘要，最后复核整幅镜像；占位 Core 由 `MakePayloads` 组装同样的头并调用同一套填充与校验。摘要写入后修改任何被覆盖字节都必须重跑打包器；校验器流式代入零字节，不改写被校验的代码或头。
 
@@ -189,13 +188,13 @@ Stub 与 Core 的 BuildId 各自独立，且都覆盖在各自摘要的范围内
 
 | 执行方 | 检查责任 | 限制 |
 | --- | --- | --- |
-| IPL（当前） | 驱动器与逻辑扇区确认、`BootDescriptor` 结构、文件偏移与长度、全部必要扇区的读盘结果 | 不读取 Stub 头、不检查 BSS、BuildId 或摘要，也不读 `CoreDescriptor`；只通过 `CX` 补充逻辑扇区事实 |
-| 打包与组装器（当前） | `PackImage` 填 Stub 与 Core 的 BuildId 与 Digest 并校验头字段、长度、入口前缀与摘要；`MakeHdd` / `MakeIso` 对带头 Stub 与 Core 复核同样内容并把 BuildId 打进构建输出；`MakePayloads` 组装的占位 Core 带头并经同一套校验 | 只做构建期检查；无头的开发占位件与 `--stub-unchecked` / `--core-unchecked` 免除校验的载荷不构成对正式产物的检查 |
-| Stub（当前） | 先自检头字段、布局一致性与摘要，再有界检查 `CoreDescriptor` 与 Core 镜像头、校验装载区落在 E820 可用区与 Core 摘要，随后装载、清零未落盘尾部并交权 | 描述符缓冲已被覆盖，不能假设能从传入指针独立复核 IPL 实际读取的文件字节数；自检只覆盖 Stub 自己的镜像字节 |
+| IPL（当前） | 驱动器与逻辑扇区确认、描述符区与 Stub 段结构、起止扇区、全部必要扇区的读盘结果 | 不读取 Stub 头、不检查 BSS、BuildId 或摘要，也不读 Core 段；只通过 `CX` 补充逻辑扇区事实 |
+| 打包与组装器（当前） | `PackImage` 填 Stub 与 Core 的 BuildId 与 Digest 并校验头字段、长度、入口前缀与摘要；`MakeImage` / `TestInstaller` 对带头 Stub 与 Core 复核同样内容并把 BuildId 打进构建输出；`MakePayloads` 组装的占位 Core 带头并经同一套校验 | 只做构建期检查；无头的开发占位件与 `--stub-unchecked` / `--core-unchecked` 免除校验的载荷不构成对正式产物的检查 |
+| Stub（当前） | 先自检头字段、布局一致性与摘要，再有界检查描述符区的 Core 段与 Core 镜像头、校验装载区落在 E820 可用区与 Core 摘要，随后装载、清零未落盘尾部并交权 | 描述符缓冲已被覆盖，不能假设能从传入指针独立复核 IPL 实际读取的文件字节数；自检只覆盖 Stub 自己的镜像字节 |
 | Stub 回归（`Tools/Bin/CheckStub`，当前） | 用真实 IPL 与 Stub 加内嵌探针 Core 组装镜像，在 QEMU 里核对成功路径、交权块四个服务在 Core 运行期的可用性、自身自检与 Core 装载的各类拒绝路径 | 手工执行；不覆盖依赖内存图注入的“找不到弹跳窗口” |
 | Core（当前入口 / 后续装载） | 核对交权块的格式标记与长度；镜像头与摘要已由 Stub 在交权前核对，不重复取摘要；交权块里没有的项自行探测或拒绝，并核对自身运行期内存需求 | 不能从文件名或寄存器残留推导事实；不把 Stub 已做的核对当成对运行期环境的保证 |
 
-组装器必须保证 `BootDescriptor.StubImageBytes` 与实际 Stub 文件长度一致；`CoreDescriptor` 的字段与 Stub 读取时执行的校验一致（`EncodeCoreDescriptor` 与 `Src/LoadCore.cpp` 各有一份，取值同源）。Stub 的本地检查可使用 `DH` 选择文件上限，但它没有来自 IPL 的持久描述符副本；这不构成对原描述符和镜像匹配关系的独立证明。若未来需要重新读取并核对描述符，其过程、缓冲和失败语义另行设计，不能暗增 IPL 参数。
+组装器必须保证描述符区里 Stub 段的起止扇区与实际 Stub 文件长度按本地扇区上取整后一致；`CoreDescriptor` 段的字段与 Stub 读取时执行的校验一致（段产物 `Src/Descs/CoreDescriptor.asm` 与 `Src/LoadCore.cpp` 各有一份，取值同源）。Stub 的本地检查可使用 `DH` 选择文件上限，但它没有来自 IPL 的持久描述符副本；这不构成对原描述符和镜像匹配关系的独立证明。若未来需要重新读取并核对描述符，其过程、缓冲和失败语义另行设计，不能暗增 IPL 参数。
 
 **Stub 自校验发生在 IPL 已经跳入并执行 Stub 之后，不能构成执行前认证，也不是信任根。** Core 的摘要由 Stub 在跳转前比对，检测的同样是非预期字节变化：攻击者若能同时改写 Core 与头里的摘要就能绕过。无密钥摘要最多用于检测非预期字节变化；真实的执行前认证需要可信的更早阶段或外部认证链，该方案尚未定义，不以扩大 IPL 职责冒充已经解决。
 

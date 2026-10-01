@@ -1,5 +1,5 @@
 # Makefile
-#    MakeHdd —— 宿主侧磁盘镜像组装器（C++20）
+#    TestInstaller —— 宿主侧测试安装器（C++20）
 
 # 中间对象目录
 OBJ_DIR    ?= Obj
@@ -9,7 +9,7 @@ BIN_DIR    ?= ../../Bin
 SRC_DIR    := Src
 # 本工具的头文件目录
 INC_DIR    := Include
-# 与 MakeIso 共享的代码目录
+# 与 MakeImage 共享的代码目录
 COMMON_DIR := ../Common
 
 # C++ 编译器
@@ -22,7 +22,7 @@ CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
-BIN  := $(BIN_DIR)/MakeHdd
+BIN  := $(BIN_DIR)/TestInstaller
 # 目标文件
 OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/Image.o $(OBJ_DIR)/Baleen.o $(OBJ_DIR)/HostIo.o $(OBJ_DIR)/Fat.o $(OBJ_DIR)/BaleenImage.o $(OBJ_DIR)/Sha256.o
 # 头文件依赖清单
@@ -45,7 +45,7 @@ $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 $(BIN_DIR) $(OBJ_DIR):
 	mkdir -p $@
 
-# Bin 目录与 MakeIso 共用，clean 只删本工具的可执行文件
+# Bin 目录与 MakeImage 共用，clean 只删本工具的可执行文件
 clean:
 	@test -n "$(OBJ_DIR)" || { echo "clean: OBJ_DIR 为空，拒绝执行"; exit 1; }
 	rm -rf $(OBJ_DIR)
@@ -53,7 +53,7 @@ clean:
 	rm -f $(BIN)
 
 help:
-	@echo "MakeHdd（宿主工具）"
+	@echo "TestInstaller（宿主工具）"
 	@echo "  make [all]   构建 $(BIN)"
 	@echo "  make clean   删除 $(OBJ_DIR) 与本工具的可执行文件"
 

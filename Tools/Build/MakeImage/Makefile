@@ -1,5 +1,5 @@
 # Makefile
-#    MakeIso —— 宿主侧 ISO 组装器（C++20）
+#    MakeImage —— 宿主侧通用镜像制作器（C++20）
 
 # 中间对象目录
 OBJ_DIR    ?= Obj
@@ -9,7 +9,7 @@ BIN_DIR    ?= ../../Bin
 SRC_DIR    := Src
 # 本工具的头文件目录
 INC_DIR    := Include
-# 与 MakeHdd 共享的代码目录
+# 与 TestInstaller 共享的代码目录
 COMMON_DIR := ../Common
 
 # C++ 编译器
@@ -22,7 +22,7 @@ CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
-BIN  := $(BIN_DIR)/MakeIso
+BIN  := $(BIN_DIR)/MakeImage
 # 目标文件
 OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/Iso9660.o $(OBJ_DIR)/Image.o $(OBJ_DIR)/Baleen.o $(OBJ_DIR)/HostIo.o $(OBJ_DIR)/Fat.o $(OBJ_DIR)/BaleenImage.o $(OBJ_DIR)/Sha256.o
 # 头文件依赖清单
@@ -58,7 +58,7 @@ clean:
 
 # 打印用法
 help:
-	@echo "MakeIso（宿主工具）"
+	@echo "MakeImage（宿主工具）"
 	@echo "  make [all]   构建 $(BIN)"
 	@echo "  make clean   删除 $(OBJ_DIR) 与本工具的可执行文件"
 

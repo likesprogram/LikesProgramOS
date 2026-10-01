@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace makeiso {
+namespace hostbuild {
     Image::Image(const std::string& path) : m_file(path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc) {
         if (!m_file) throw std::runtime_error("无法创建镜像：" + path);
     }

@@ -13,6 +13,8 @@
 #                                         模拟把镜像写进 U 盘后的样子）
 #                                   固件：bios（默认）| uefi（用 OVMF）
 #                                 例：make run iso qemu usb uefi / make run hdd bochs built bios
+#                                 usb 形态模拟 4Kn 设备：RUN_USB_BLOCK_BYTES=4096（同一份镜像即可，镜像里已含
+#                                 1 MiB 与 8 MiB 两份 ESP；SeaBIOS 不枚举 4Kn USB，此用例必须配 uefi 固件）
 #      make run-win [介质] [模拟器] [形态] [固件]
 #                                 与 run 同一套位置参数，区别只在画面：run 不开窗口，
 #                                 run-win 开本地窗口（QEMU 挑可用的 gtk/sdl，Bochs 用 wx）
@@ -35,14 +37,16 @@ HDD           := $(OUT_DIR)/LikesProgram.hdd
 VOLUME_ID     ?= LIKESPROGRAM
 # 系统卷在 ISO 内的文件名
 SYSTEM_VOLUME_ISO_NAME ?= SystemVolume.img
-# 磁盘及混合 ISO 的 MBR 分区 LBA 单位；光盘 ISO9660 块仍为 2048
+# Ext4 分区项（0x83）的 LBA 单位；0xEF 项固定按 512 单位写（双 ESP 布局），光盘 ISO9660 块仍为 2048
 DISK_SECTOR_BYTES ?= 512
+# 描述符段产物目录：头部与各段拆开输出，由组装器回填起止位置后写回
+DESC_DIR      ?= Packages/Baleen/Common/Out/Descs
 
 # —— 子包与宿主工具 ——
 # 所有子包的 Makefile
 SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
 # 需要构建的宿主工具目录
-TOOL_DIRS := Tools/Build/MakeIso Tools/Build/MakeHdd Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl Tools/Build/CheckStub
+TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl Tools/Build/CheckStub
 
 # —— 载荷：真实产物优先，缺失时退到占位件 ——
 # 一级引导产物目录
@@ -110,6 +114,9 @@ RUN_EMU      := $(firstword $(filter qemu bochs,$(RUN_GIVEN)) qemu)
 RUN_MODE     := $(firstword $(filter built usb,$(RUN_GIVEN)) built)
 # 固件：bios 或 uefi
 RUN_FIRMWARE := $(firstword $(filter bios uefi,$(RUN_GIVEN)) bios)
+# USB 形态的设备块大小：512（默认）或 4096（4Kn）；4Kn 需要按 4096 单位组装的镜像
+# 且 SeaBIOS 不枚举 4Kn USB 存储，只有 UEFI 固件能看到该设备
+RUN_USB_BLOCK_BYTES ?= 512
 # 多给的位置参数，由 run-check 报错
 RUN_EXTRA    := $(filter-out hdd iso qemu bochs built usb bios uefi,$(RUN_GIVEN))
 # 本次要启动的镜像
@@ -122,7 +129,9 @@ endif
 # 形态：built 直接按光盘/磁盘挂载；usb 挂成 USB 存储（模拟写入 U 盘后的样子）
 # 挂给 QEMU 的介质参数
 ifeq ($(RUN_MODE),usb)
-QEMU_MEDIA := -device usb-ehci,id=ehci -drive if=none,id=usbstick,format=raw,file=$(RUN_TARGET_IMAGE) -device usb-storage,bus=ehci.0,drive=usbstick -boot order=c
+# QEMU 要求物理块不小于逻辑块：4Kn 时两个一起写 4096
+QEMU_USB_BLOCK := $(if $(filter 4096,$(RUN_USB_BLOCK_BYTES)),$(comma)logical_block_size=4096$(comma)physical_block_size=4096)
+QEMU_MEDIA := -device usb-ehci,id=ehci -drive if=none,id=usbstick,format=raw,file=$(RUN_TARGET_IMAGE) -device usb-storage,bus=ehci.0,drive=usbstick$(QEMU_USB_BLOCK) -boot order=c
 else ifeq ($(RUN_IMAGE),iso)
 QEMU_MEDIA := -cdrom $(RUN_TARGET_IMAGE) -boot d
 else
@@ -188,19 +197,19 @@ compile-db:
 payloads: packages tools
 	@Tools/Bin/MakePayloads "$(PAYLOAD_DIR)"
 
-# 组装光盘镜像
+# 组装通用镜像（MakeImage）：一份字节供刻录光盘、写入 U 盘 / 移动硬盘与虚拟机挂载
 $(ISO): payloads
 	@$(MAKE) --no-print-directory payload-report
-	Tools/Bin/MakeIso --out $@ --boot-image $(BOOT_IMAGE) --mbr $(MBR) \
-	    --stub $(STUB) --core $(CORE) --efi $(EFI_IMAGE) --esp $(ESP_IMAGE) \
+	Tools/Bin/MakeImage --out $@ --boot-image $(BOOT_IMAGE) --mbr $(MBR) \
+	    --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --efi $(EFI_IMAGE) --esp $(ESP_IMAGE) \
 	    --system-volume $(SYSTEM_VOLUME) --iso-name $(SYSTEM_VOLUME_ISO_NAME) \
 	    --volume-id $(VOLUME_ID) --sector-bytes $(DISK_SECTOR_BYTES) --file BaleenLayout.bin=$(LAYOUT) \
 	    --manifest $(OUT_DIR)/LikesProgram.iso.json
 
-# 组装磁盘镜像
+# 组装整盘镜像（TestInstaller，测试安装器）：供写入内置硬盘 / 移动硬盘 / U 盘
 $(HDD): payloads
 	@$(MAKE) --no-print-directory payload-report
-	Tools/Bin/MakeHdd --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) --manifest $(OUT_DIR)/LikesProgram.hdd.json
+	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) --manifest $(OUT_DIR)/LikesProgram.hdd.json
 
 # 打印实际用到的是真实产物还是占位件
 payload-report:
@@ -219,6 +228,7 @@ run-check:
 	@if [ -n "$(RUN_EXTRA)" ]; then echo "$(RUN_LABEL): 无法识别的参数 $(RUN_EXTRA)；用法 make $(RUN_LABEL) <hdd|iso> <qemu|bochs> <built|usb> <bios|uefi>" >&2; exit 2; fi
 	@if [ "$(RUN_EMU)" = bochs ] && [ "$(RUN_MODE)" = usb ]; then echo "$(RUN_LABEL): Bochs 没有 USB 存储仿真；usb 形态请用 qemu" >&2; exit 2; fi
 	@if [ "$(RUN_EMU)" = bochs ] && [ "$(RUN_FIRMWARE)" = uefi ]; then echo "$(RUN_LABEL): Bochs 侧只支持 BIOS 路径，uefi 固件请用 qemu" >&2; exit 2; fi
+	@if [ "$(RUN_MODE)" = usb ] && [ "$(RUN_USB_BLOCK_BYTES)" = 4096 ] && [ "$(RUN_FIRMWARE)" = bios ]; then echo "$(RUN_LABEL): 提示：SeaBIOS 不枚举 4Kn USB 存储，BIOS 路径看不到该设备（固件限制，不是镜像问题）；4Kn 用例请配 uefi 固件" >&2; fi
 	@if [ "$(RUN_EMU)" = bochs ]; then \
 	    test -r "$(BOCHS_ROM)" || { echo "$(RUN_LABEL): 缺少 BIOS ROM，可用 BOCHS_ROM= 指定" >&2; exit 1; }; \
 	    test -r "$(BOCHS_VGAROM)" || { echo "$(RUN_LABEL): 缺少 VGA ROM，可用 BOCHS_VGAROM= 指定" >&2; exit 1; }; \
@@ -327,6 +337,8 @@ help:
 	    '  make run [介质] [模拟器] [形态] [固件]' \
 	    '                         介质 hdd|iso（默认 hdd）；模拟器 qemu|bochs（默认 qemu，Bochs 只支持 BIOS）；' \
 	    '                         形态 built|usb（默认 built）；固件 bios|uefi（默认 bios，uefi 用 OVMF）' \
+	    '                         usb 形态可配 RUN_USB_BLOCK_BYTES=4096 模拟 4Kn 设备（同一份镜像即可，已含两份 ESP）' \
+	    '                         SeaBIOS 不枚举 4Kn USB，此用例必须配 uefi）' \
 	    '                         不开窗口：QEMU 用 -display none，Bochs 用 rfb（VNC 从 5900 起）' \
 	    '                         例：make run iso qemu usb uefi / make run hdd bochs built bios' \
 	    '  make run-win [介质] [模拟器] [形态] [固件]' \
@@ -336,5 +348,5 @@ help:
 	    '                         显示方式可覆盖：QEMU_DISPLAY_WIN= / BOCHS_DISPLAY_WIN=' \
 	    '  make run-uefi          = make run iso qemu built uefi' \
 	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与工具' \
-	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；不改变 run 的虚拟设备参数' \
+	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；只影响 Ext4 分区项，ESP 固定双份' \
 	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME / LAYOUT（默认取真实产物，缺失时用占位件）'

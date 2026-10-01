@@ -10,7 +10,7 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | --- | --- | --- |
 | **Baleen**（引导器） | `Packages/Baleen` | 从不同硬件找到指定 Ext4 文件系统的指定路径，装载系统内核并完成交接 |
 | **LikesProgramOS**（系统本体） | `Packages/LikesProgramOS` | 操作系统本体：`LikesProgram.os` 内核 + 发行配置选择的 `.osm` 模块 |
-| 宿主侧构建工具 | `Tools/Build` | 介质镜像组装器 MakeIso / MakeHdd 与共享代码，可执行文件在 `Tools/Bin` |
+| 宿主侧构建工具 | `Tools/Build` | 通用镜像制作器 MakeImage、测试安装器 TestInstaller 与共享代码，可执行文件在 `Tools/Bin` |
 | 规格文档 | `Docs/Specs` | 各领域的正式定义；与本 README 不一致时以规格为准 |
 
 ## 设计取向
@@ -28,7 +28,7 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | 部分 | 状态 |
 | --- | --- |
 | Baleen 一级引导（`Packages/Baleen/Ipl`） | 已实现：硬盘 / USB-HDD 与 El Torito 光盘两种形态，NASM 汇编，构建含尺寸硬约束检查（NASM 3.01 下 `make check` 通过）；磁盘入口按 `AH=48` 接受 512 / 4096 逻辑扇区，软盘与 USB-FDD 明确拒绝；源码、产物与运行期契约见 [Ipl 说明](Packages/Baleen/Ipl/README.md) |
-| 宿主构建工具（`Tools/Build`） | 已实现：MakeIso 与 MakeHdd 组装可引导的 ISO 与磁盘镜像，MakePayloads 生成开发占位载荷；构建不依赖测试目录；用法见[工具 README](Tools/Build/MakeIso/README.md) |
+| 宿主构建工具（`Tools/Build`） | 已实现：通用镜像制作器 `MakeImage` 产出可刻录、可写盘、可挂载的 `LikesProgram.iso`，测试安装器 `TestInstaller` 产出可写入内置硬盘 / 移动硬盘 / U 盘的整盘镜像，`MakePayloads` 生成开发占位载荷；构建不依赖测试目录；用法见[工具 README](Tools/Build/MakeImage/README.md) |
 | Baleen Stub（`Packages/Baleen/Stub`） | 阶段性实现：切保护模式、开 A20、建立运行期 GDT/IDT、异常诊断，BIOS 服务经实模式弹跳提供扇区探测、E820 内存图与低地址读盘；并按 [Stub 说明](Packages/Baleen/Stub/README.md)第二节的契约读取介质上的 `CoreDescriptor`、校验装载区、把 `BaleenCore` 装到 1MiB 并经交权块交给它（QEMU 已验证 HDD / ISO / USB 到 Core，Bochs 已验证 ATA HDD / ATAPI 光盘；两者均使用本机 SeaBIOS）；`CheckStub` 回归覆盖成功路径、交权块四个服务与失败注入 |
 | Baleen Core（`Packages/Baleen/Core`） | 阶段性实现：入口、横幅与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、介质与内存图事实播报（见 [Core 说明](Packages/Baleen/Core/README.md)）；`BaleenLayout.bin`、Ext4 卷访问与内核装载尚未实现 |
 | Baleen UEFI 侧（`Packages/Baleen/Uefi`） | 骨架，尚未实现 |
@@ -56,13 +56,13 @@ make help           # 全部目标与可用变量
 
 `make run` 不开窗口，串口输出打在终端上（QEMU 用 `-display none`，Bochs 画面走 VNC，从 5900 起）；要在本地窗口里看画面就用 `make run-win`，它接受与 `run` 完全相同的四个位置参数。窗口路径要求机器上有图形会话：QEMU 需要装了 `qemu-system-gui` 的 gtk/sdl 后端，Bochs 用 wx 显示库（配置界面同为 wx，否则 Bochs 会退回 rfb）。四个位置参数、载荷变量与其余目标见顶层 [Makefile](Makefile) 头部注释与 `make help`。
 
-BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP 不在范围。默认镜像的分区表按 512 单位生成；目标为 4Kn 盘时用 `make images DISK_SECTOR_BYTES=4096` 重新组装（该变量只影响分区表单位，`make run` 的虚拟设备参数需另行指定 4Kn 设备）。各类启动模式的当前支持状态见[启动介质与文件系统](Docs/Specs/Common/启动介质与文件系统.md) 1.1。
+BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP 不在范围。**引导区（描述符区与载荷）的位置字段以 512 字节为基准，装载方按运行期探测到的单位换算**，因此同一份 `LikesProgram.iso` 可直接刻录到光盘、写入 512e 或 4Kn 的 U 盘 / 移动硬盘；**ESP 双份、分区项起点固定写 LBA 2048**：512e 固件读到 1 MiB、4Kn 固件读到 8 MiB，两处各有一份同样的 FAT16 卷，所以同一份镜像的 UEFI 路径在两种设备上都通；Ext4 那一项（`0x83`）仍按 `DISK_SECTOR_BYTES` 生成，内核对系统卷用布局描述定位、不依赖它。各类启动模式的当前支持状态见[启动介质与文件系统](Docs/Specs/Common/启动介质与文件系统.md) 1.1。
 
 编辑器配置在 `.vscode`：常用构建与运行操作做成了任务，clangd 与 C/C++ 扩展都读根目录的 `compile_commands.json`；该文件含本机绝对路径、不进 Git，Makefile 改过之后重跑 `make compile-db` 刷新。
 
 ## 文档索引
 
-规格文档位于 `Docs/Specs`，按主题分组：`Baleen/` 收录引导器专属规格，`Common/` 收录跨模块通用规格（介质与文件系统、文件系统抽象与 VFS、ABI 兼容与外部契约），其余为各领域规格：
+规格文档位于 `Docs/Specs`，按主题分组：`Baleen/` 收录引导器专属规格，`Common/` 收录跨模块通用规格（介质与文件系统、文件系统抽象与 VFS、ABI 兼容与外部契约），其余为各领域规格；面向实现者的手册在 `Docs/Manuals`：
 
 | 文档 | 内容 |
 | --- | --- |
@@ -74,17 +74,18 @@ BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP �
 | [内核模块与驱动清单](Docs/Specs/内核模块与驱动清单.md) | 内核模块、驱动、SDK 与契约层的名称、交付形态和职责 |
 | [模块与驱动装载](Docs/Specs/模块与驱动装载.md) | 模块与驱动的装载流程、执行上下文、归属登记与热替换边界 |
 | [启动介质与文件系统](Docs/Specs/Common/启动介质与文件系统.md) | 启动介质与访问链、ISO 的三种投递方式、必备文件系统、阶段切换与写入启用 |
-| [文件系统抽象与 VFS](Docs/Specs/Common/文件系统抽象与VFS.md) | Baleen 与内核共用的块设备、偏移视图、统一路径索引与文件系统接口；S1 共用件已实现，共用边界与阶段划分 |
+| [文件系统抽象与 VFS](Docs/Specs/Common/文件系统抽象与VFS.md) | Baleen 与内核共用的块设备、偏移视图、统一路径索引与文件系统接口；共用边界与阶段划分 |
 | [内核集更新与回滚](Docs/Specs/内核集更新与回滚.md) | 内核集构成、试启动状态机、确认与失败处理、各类更新对象的生效边界 |
 | [用户空间与常驻服务](Docs/Specs/用户空间与常驻服务.md) | 用户态程序与常驻服务清单、安装包与安装事务、构建期配套工具 |
 | [后缀设计](Docs/Specs/后缀设计.md) | 容器后缀的语义、总表与命名规则 |
 | [ABI 兼容与外部契约](Docs/Specs/Common/ABI兼容与外部契约.md) | 内核集内部与对外边界的兼容规则：引导交接契约、DriveSDK、AppSDK |
+| [镜像制作器与安装器实现手册](Docs/Manuals/镜像制作器与安装器实现手册.md) | 产出可引导介质的实现指南：描述符区格式、需要写回的信息与位置、建议流程，以及通用镜像制作器与测试安装器的定位与能力边界 |
 
 各子项目与工具目录的 README 描述各自的源码、构建与产物：
 
 - [Baleen 子项目](Packages/Baleen/README.md)
 - [一级引导 Ipl](Packages/Baleen/Ipl/README.md)
-- [MakeIso：ISO / 混合镜像组装器](Tools/Build/MakeIso/README.md) 、[MakeHdd：磁盘镜像组装器](Tools/Build/MakeHdd/README.md)
+- [MakeImage：通用镜像制作器](Tools/Build/MakeImage/README.md) 、[TestInstaller：测试安装器](Tools/Build/TestInstaller/README.md)
 - [Tools/Build/Common：宿主工具共享代码](Tools/Build/Common/README.md)
 - [CheckIpl：IPL 回归工具](Tools/Build/CheckIpl/README.md) 、[CheckStub：Stub 回归工具](Tools/Build/CheckStub/README.md)
 

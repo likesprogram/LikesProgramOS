@@ -19,17 +19,29 @@ CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-p
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR) -I$(COMMON_DIR)/Include
 
+# 汇编器与选项：描述符段输出扁平二进制，-I 让 Src/Descs 里的 %INCLUDE 找到本包 Include
+NASM      ?= nasm
+NASMFLAGS ?= -f bin -Werror -I$(INC_DIR)/
+
 # 源与产物
 CPP_OBJS  := $(addprefix $(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o Sha256.o ImageHeader.o)
+# 描述符段的产物：头部与各段分别输出，不合并；顺序即段表顺序，位置字段待写入程序回填
+DESC_DIR  := $(OUT_DIR)/Descs
+DESC_BINS := $(DESC_DIR)/Head.bin $(DESC_DIR)/BootDescriptor.bin $(DESC_DIR)/CoreDescriptor.bin
 
 .DEFAULT_GOAL := all
 .PHONY: all clean help
 
-all: $(CPP_OBJS)
+all: $(CPP_OBJS) $(DESC_BINS)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# 描述符段：每个段一个独立产物，位置字段留 0 待写入程序回填
+$(DESC_DIR)/%.bin: $(SRC_DIR)/Descs/%.asm $(INC_DIR)/Desc.inc
+	@mkdir -p $(DESC_DIR)
+	$(NASM) $(NASMFLAGS) $< -o $@
 
 # 删除产物目录
 clean:
@@ -38,9 +50,9 @@ clean:
 
 # 打印用法
 help:
-	@printf '%s\n' 'Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法与镜像完整性头' \
-	  '  make [all]  构建 $(CPP_OBJS)' \
+	@printf '%s\n' 'Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法、镜像完整性头与描述符段' \
+	  '  make [all]  构建 $(CPP_OBJS) 与 $(DESC_BINS)' \
 	  '  make clean  删除 $(OUT_DIR)/' \
-	  '  变量：OUT_DIR / CXX / CXXFLAGS 可覆盖'
+	  '  变量：OUT_DIR / CXX / CXXFLAGS / NASM / NASMFLAGS 可覆盖'
 
 -include $(CPP_OBJS:.o=.d)

@@ -1,5 +1,5 @@
 /* Fat.cpp
-    FAT 引导扇区类型判定与 FAT32 校验实现
+    FAT 引导扇区类型判定与 FAT16 校验实现
 */
 
 #include <Fat.h>
@@ -7,7 +7,7 @@
 
 #include <stdexcept>
 
-namespace makeiso {
+namespace hostbuild {
     namespace {
         // 按小端序读取整数
         uint16_t GetLe16(std::span<const uint8_t> bytes, std::size_t offset) {
@@ -101,10 +101,10 @@ namespace makeiso {
         return FatType::Fat32;
     }
 
-    void RequireFat32Image(const std::string& path, const std::string& role) {
+    void RequireFat16Image(const std::string& path, const std::string& role) {
         std::string detail;
         const FatType type = DetectFatType(ReadHead(path, 512), detail);
-        if (type == FatType::Fat32) return;
-        throw std::runtime_error(role + "必须是 FAT32（" + TypeName(type) + "：" + detail + "）：" + path);
+        if (type == FatType::Fat16) return;
+        throw std::runtime_error(role + "必须是 FAT16（" + TypeName(type) + "：" + detail + "）：" + path);
     }
 }

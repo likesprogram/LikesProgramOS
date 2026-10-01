@@ -16,15 +16,8 @@ MEDIA_CDROM      EQU 4           ; 交权时 DH 的介质编号：光盘
 ; HDD / USB-HDD 为 512 或 4096，CD 为 2048；双方必须配套更新
 
 ; —— Stub → Core：介质上的 CoreDescriptor 与 Core 装载 ——
-; CoreDescriptor 与 BootDescriptor 同扇区，由组装器写入、由 Stub 读取，字节表见 Stub/README.md 第二节
-; 校验规则与 BootDescriptor 一致：格式标记、头长、偏移对齐与取值范围、偏移加长度不进位
-CORE_DESC_OFF    EQU 0x22020     ; 描述符在介质上的绝对字节偏移
-CORE_DESC_MAGIC  EQU 0x52444342  ; 'BCDR'，介质字节为 42 43 44 52
-CORE_DESC_VER    EQU 1           ; 开发格式标记，未发布
-CORE_DESC_HEADER EQU 32          ; 描述符固定总长
-CORE_DESC_FILE   EQU 0x08        ; 描述符内文件偏移字段，8 字节小端
-CORE_DESC_BYTES  EQU 0x10        ; 描述符内文件字节数字段，8 字节小端
-CORE_DESC_RESV   EQU 0x18        ; 描述符内保留字段，8 字节全 0
+; CoreDescriptor 是描述符区里的 Core 段，其布局的单点定义在 Packages/Baleen/Common/Include/Desc.inc
+; 起止位置由组装器或安装器按 512 字节基准写入（值 = 字节偏移 / 512），读取方按运行期单位换算，不必按目标设备回填
 
 CORE_LOAD        EQU 0x100000    ; Core 映像装入的物理地址，即镜像基址；交权入口 = 它 + 头里的 EntryOffset
 CORE_MAX_BYTES   EQU 0x400000    ; Core 文件字节数上限

@@ -7,7 +7,7 @@ OBJ_DIR    ?= Obj
 BIN_DIR    ?= ../../Bin
 # 本工具的源目录
 SRC_DIR    := Src
-# 与 MakeIso / MakeHdd 共享的代码目录
+# 与 MakeImage / TestInstaller 共享的代码目录
 COMMON_DIR := ../Common
 
 # C++ 编译器
@@ -42,7 +42,7 @@ $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 $(BIN_DIR) $(OBJ_DIR):
 	mkdir -p $@
 
-# Bin 目录与 MakeIso / MakeHdd 共用，clean 只删本工具的可执行文件
+# Bin 目录与 MakeImage / TestInstaller 共用，clean 只删本工具的可执行文件
 clean:
 	@test -n "$(OBJ_DIR)" || { echo "clean: OBJ_DIR 为空，拒绝执行"; exit 1; }
 	rm -rf $(OBJ_DIR)

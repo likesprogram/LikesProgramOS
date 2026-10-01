@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <span>
 
-namespace makeiso {
+namespace hostbuild {
     // SHA-256 摘要长度，字节
     constexpr std::size_t kSha256Bytes = 32;
 

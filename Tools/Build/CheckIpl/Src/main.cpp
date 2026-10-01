@@ -41,6 +41,8 @@ namespace {
     using namespace std::chrono_literals;
     // 收到终止信号时记下的信号号，主循环轮询它并退出
     volatile std::sig_atomic_t interrupted = 0;
+    // 启动回归的用例总数，Execute 末尾核对，防止用例被误删
+    constexpr unsigned kCaseCount = 49;
 
     // 信号处理：只记录信号号，不在处理函数里做其他事
     void OnSignal(int value) { interrupted = value; }
@@ -406,7 +408,10 @@ namespace {
             Require(end <= limit, name + "：代码越界");
             // 判断一段字节是否全为 0
             const auto zero = [](auto first, auto last) { return std::all_of(first, last, [](uint8_t b) { return b == 0; }); };
-            Require(zero(data.begin() + end, data.begin() + limit), name + "：尾部填充错误");
+            // 描述符区位置槽：代码之后 4 字节，512 字节基准地址，装载器按运行期单位换算；槽之外的填充必须为 0
+            const std::size_t slot = cd ? 494 : 440;
+            Require(zero(data.begin() + end, data.begin() + slot), name + "：代码与槽之间的填充错误");
+            Require(zero(data.begin() + slot + 4, data.begin() + limit), name + "：槽之后的填充错误");
             if (cd) {
                 Require(limit - end >= 16, "CD 代码余量低于 16 字节");
                 Require(zero(data.begin() + 8, data.begin() + 64), "CD Boot Info Table 保留区被占用");
@@ -437,6 +442,7 @@ namespace {
         fs::path iplDir;    // IPL 产物目录（.../Out/Bin）
         fs::path root;      // 项目根；空 = 从可执行文件同目录找工具
         fs::path layout;    // 只做静态检查时的 IPL 输出目录
+        fs::path descs = "Packages/Baleen/Common/Out/Descs";  // 描述符段产物目录：夹具只取它需要的段
         bool e9 = true;     // 是否要求 0xE9 也有错误码
         bool keep = false;  // 是否保留临时工作目录
     };
@@ -452,6 +458,7 @@ namespace {
             };
             if (option == "--ipl-dir") options.iplDir = fs::absolute(value());
             else if (option == "--root") options.root = fs::absolute(value());
+            else if (option == "--descs") options.descs = fs::absolute(value());
             else if (option == "--layout-only") options.layout = fs::absolute(value());
             else if (option == "--keep") options.keep = true;
             else if (option == "--e9") {
@@ -461,7 +468,7 @@ namespace {
             } else if (option == "--help") {
                 std::cout << "CheckIpl --layout-only <IplOut>\n"
                           << "CheckIpl --ipl-dir <IplOut/Bin> [--e9 0|1] [--keep] [--root <项目根>]\n"
-                          << "默认从可执行文件同目录寻找 MakeHdd/MakeIso；--root 改用其 Tools/Bin。\n"
+                          << "默认从可执行文件同目录寻找 MakeImage/TestInstaller；--root 改用其 Tools/Bin。\n"
                           << "NASM/QEMU 可指定外部程序，IPL_TEST_TIMEOUT 为每例启动秒数（默认 12）。\n"
                           << "手工运行，不构成默认构建依赖；失败保留临时证据。\n";
                 std::exit(0);
@@ -481,7 +488,7 @@ namespace {
             const auto timeout = Number(Env("IPL_TEST_TIMEOUT", "12"));
             Require(timeout >= 1 && timeout <= 300, "IPL_TEST_TIMEOUT 必须在 1..300 秒内");
             m_timeout = std::chrono::seconds(timeout);
-            for (const auto* tool : {"MakeHdd", "MakeIso"}) Require(::access((m_tools / tool).c_str(), X_OK) == 0, "缺少可执行镜像工具 " + (m_tools / tool).string());
+            for (const auto* tool : {"MakeImage", "TestInstaller"}) Require(::access((m_tools / tool).c_str(), X_OK) == 0, "缺少可执行镜像工具 " + (m_tools / tool).string());
             m_hdd = ReadBytes(m_options.iplDir / "BaleenIPL.bin");
             m_cd = ReadBytes(m_options.iplDir / "BaleenIPLCd.bin");
             Require(m_hdd.size() == 512 && m_cd.size() == 2048, "IPL 产物尺寸不符");
@@ -505,14 +512,13 @@ namespace {
                     uint64_t value;    // 写入值
                     const char* code;  // 期望的 IPL 错误码
                 };
+                // 描述符区：头部 16 字节 + Stub 段 16 字节（段头 8 + 起止扇区 8）
                 const std::vector<Mutation> mutations{
-                    {"magic", 0, 4, 0, "D"}, {"version", 4, 2, 2, "D"}, {"header", 6, 2, 31, "D"},
-                    {"reserved-low", 24, 4, 1, "D"}, {"reserved-high", 28, 4, 1, "D"},
-                    {"unaligned", 8, 8, 2049, "D"}, {"offset-high", 8, 8, 0x100000000ull, "D"},
-                    {"offset-overlap", 8, 8, 0, "D"}, {"offset-overflow", 8, 8, 0xFFFFF800, "D"},
-                    {"size-zero", 16, 8, 0, "S"}, {"size-high", 16, 8, 0x100000000ull, "S"},
-                    {"size-over-limit", 16, 8, maximum + 1, "S"}, {"size-round-overflow", 16, 8, 0xFFFFFFFF, "S"},
-                    {"unreadable-stub", 8, 8, 0x20000000, "L"}
+                    {"area-magic", 0, 4, 0, "D"}, {"area-head-short", 6, 2, 4, "D"},
+                    {"area-sector", 8, 4, 1, "D"},
+                    {"segment-magic", 16, 4, 0, "D"}, {"segment-length", 22, 2, 0, "D"},
+                    {"stub-lba-zero", 24, 4, 0, "D"}, {"stub-lba-overlap", 24, 4, 1, "D"},
+                    {"stub-end-inverted", 28, 4, 0, "D"}, {"stub-end-huge", 28, 4, 0x100000, "S"}
                 };
                 for (const auto& mutation : mutations) {
                     auto bad = ReadBytes(base);
@@ -521,17 +527,29 @@ namespace {
                     WriteBytes(image, bad);
                     Case(media + " " + mutation.name + " -> " + mutation.code, image, media, mutation.code, cd);
                 }
+                // 读盘失败：起止扇区一起改到介质之外，描述符校验通过、读盘失败
+                {
+                    auto bad = ReadBytes(base);
+                    PutLe(bad, 0x22018, 4, 0x20000000);
+                    PutLe(bad, 0x2201C, 4, 0x20000008);
+                    WriteBytes(m_work / "bad.img", bad);
+                    Case(media + " unreadable-stub -> L", m_work / "bad.img", media, "L", cd);
+                }
             }
             Case("混合 ISO 光盘入口", Build(true, 4096, true), "cd", "OK", true);
             auto hybridPath = Build(true, 4096, true);
             auto hybrid = ReadBytes(hybridPath);
-            // 从描述符里取 Stub 的位置与长度（描述符在当前布局的固定偏移 0x22000）
-            const auto offset = GetLe(hybrid, 0x22008, 8);
-            const auto size = GetLe(hybrid, 0x22010, 8);
-            const auto stub = ReadBytes(Probe(static_cast<uint32_t>(size), 2, 0x80));
+            hybrid.resize(std::max<std::size_t>(hybrid.size(), 1 << 20), 0);
+            // 镜像里的位置字段是 512 字节基准，写入任何单位的设备都指向同一物理位置，
+            // 装载方自行换算；这里只把夹具的 Stub 载荷放进镜像，位置取自描述符区
+            const auto stubBase = static_cast<uint32_t>(GetLe(hybrid, 0x22018, 4));
+            const std::size_t offset = static_cast<std::size_t>(stubBase) * 512;
+            // 夹具载荷用自己的固定长度，探针校验的是它自己的范围；
+            // U 盘形态下固件给的驱动器号不是固定值，探针按 0xFF 跳过该项
+            const std::size_t size = 4096;
+            const auto stub = ReadBytes(Probe(static_cast<uint32_t>(size), 2, 0xFF));
             Require(offset <= hybrid.size() && size <= hybrid.size() - offset, "混合镜像 Stub 超出文件");
             std::copy(stub.begin(), stub.end(), hybrid.begin() + offset);
-            hybrid.resize(std::max<std::size_t>(hybrid.size(), 1 << 20), 0);
             WriteBytes(hybridPath, hybrid);
             Case("混合 ISO USB/BIOS", hybridPath, "usb", "OK", false);
             Case("HDD USB/BIOS", Build(false), "usb", "OK", false);
@@ -559,7 +577,7 @@ namespace {
             Fault(false, 0, "AH48 报告 4Kn 完整装载", 4096, 0x80, 0x80, "OK", 0, 4096, 1);
             // 软盘与 USB-FDD 的 DL<0x80 不在支持范围：HDD 入口直接拒绝
             Fault(false, 0, "HDD DL<0x80 -> D", 4096, 0x00, 0x00, "D");
-            Require(m_count == 57, "内部回归用例数量不符");
+            Require(m_count == kCaseCount, "内部回归用例数量不符");
             std::cout << "CheckIpl: " << m_count << " 项全部通过（ENABLE_E9=" << m_options.e9 << "）" << std::endl;
         }
     private:
@@ -579,17 +597,24 @@ namespace {
                                                   {"EXPECT_RESET", resets}, {"EXPECT_CHS", chs}, {"EXPECT_SECTOR", sector}});
             return path;
         }
-        // 用 MakeIso / MakeHdd 组装一份测试镜像并返回路径
+        // 用 MakeImage / TestInstaller 组装一份测试镜像并返回路径
         fs::path Build(bool cd, uint32_t size = 4096, bool hybrid = false) {
             const auto stub = Probe(size, cd ? 4 : 2, cd ? 0xE0 : 0x80);
             const auto image = m_work / (cd ? "base.iso" : "base.hdd");
-            std::vector<std::string> command{(m_tools / (cd ? "MakeIso" : "MakeHdd")).string(), "--out", image.string()};
+            std::vector<std::string> command{(m_tools / (cd ? "MakeImage" : "TestInstaller")).string(), "--out", image.string()};
             if (cd) {
                 command.insert(command.end(), {"--boot-image", (m_options.iplDir / "BaleenIPLCd.bin").string()});
                 if (hybrid) command.insert(command.end(), {"--mbr", (m_options.iplDir / "BaleenIPL.bin").string()});
             } else command.insert(command.end(), {"--mbr", (m_options.iplDir / "BaleenIPL.bin").string()});
             // 校验载荷是内嵌夹具而不是 BaleenStub 正式产物：显式免除组装器的头与摘要校验
             command.insert(command.end(), {"--stub", stub.string(), "--stub-unchecked"});
+            // 夹具只装 Stub 段：为它准备一个只含头部与 Stub 段的段产物目录
+            const fs::path descs = m_work / "descs";
+            fs::create_directories(descs);
+            for (const char* name : {"Head.bin", "BootDescriptor.bin"}) {
+                fs::copy_file(m_options.descs / name, descs / name, fs::copy_options::overwrite_existing);
+            }
+            command.insert(command.end(), {"--descs", descs.string()});
             Run(command, m_work / "image.log");
             return image;
         }
@@ -611,12 +636,24 @@ namespace {
             Bytes fixture(0x30000, 0);
             const auto& firmware = cd ? m_cd : m_hdd;
             std::copy(firmware.begin(), firmware.end(), fixture.begin());
-            PutLe(fixture, descriptorAt, 4, 0x52445342);
-            PutLe(fixture, descriptorAt + 4, 2, 1);
-            PutLe(fixture, descriptorAt + 6, 2, 32);
-            PutLe(fixture, descriptorAt + 8, 8, stubOffset);
-            PutLe(fixture, descriptorAt + 16, 8, stub.size());
-            PutLe(fixture, descriptorAt + 24, 8, 0);
+            // 描述符区：头部 16 字节 + Stub 段 16 字节，位置字段一律 512 字节基准（与 Desc.inc 一致），
+            // 与模拟的设备单位无关：装载方按 AH=48 报告的单位换算
+            constexpr std::size_t kBase = 512;
+            const std::size_t descriptorBase = kDescriptorOffset / kBase;
+            const std::size_t stubBase = stubOffset / kBase;
+            const std::size_t stubBaseSectors = (stub.size() + kBase - 1) / kBase;
+            PutLe(fixture, descriptorAt, 4, 0x43534442);               // 'BDSC'，头部标记
+            PutLe(fixture, descriptorAt + 4, 2, 1);                    // 版本
+            PutLe(fixture, descriptorAt + 6, 2, 16);                   // 头部长度
+            PutLe(fixture, descriptorAt + 8, 4, descriptorBase);       // 本区起始位置，512 字节基准
+            PutLe(fixture, descriptorAt + 12, 4, descriptorBase);      // 本区结束位置，512 字节基准，含
+            PutLe(fixture, descriptorAt + 16, 4, 0x52445342);          // 'BSDR'，Stub 段
+            PutLe(fixture, descriptorAt + 20, 2, 1);                   // 段版本
+            PutLe(fixture, descriptorAt + 22, 2, 16);                  // 段长
+            PutLe(fixture, descriptorAt + 24, 4, stubBase);            // 载荷起始位置，512 字节基准
+            PutLe(fixture, descriptorAt + 28, 4, stubBase + stubBaseSectors - 1);  // 载荷结束位置，512 字节基准，含
+            // IPL 副本里的描述符区位置槽：同样是 512 字节基准，装载器按运行期单位换算后定位
+            PutLe(fixture, cd ? 494 : 440, 4, descriptorBase);
             Require(stub.size() <= fixture.size() - stubAt, "故障夹具载荷越界");
             std::copy(stub.begin(), stub.end(), fixture.begin() + static_cast<std::ptrdiff_t>(stubAt));
             auto image = ReadBytes(harness);
@@ -637,7 +674,7 @@ namespace {
             RunQemu(image, media, expected, local, cdIpl);
             m_expectE1 = 0;
             ++m_count;
-            std::cout << "CheckIpl: " << m_count << "/57 " << name << " 通过" << std::endl;
+            std::cout << "CheckIpl: " << m_count << "/" << kCaseCount << " " << name << " 通过" << std::endl;
         }
         // 启动 QEMU，按期望值核对退出码、串口输出、停机位置与 VGA 画面
         void RunQemu(const fs::path& image, const std::string& media, const std::string& expected, const fs::path& work, bool cdIpl) {

@@ -8,7 +8,7 @@
 
 #include <algorithm>
 
-namespace makeiso {
+namespace hostbuild {
     namespace {
         // 初始链接变量：前八个素数平方根小数部分的前 32 位
         constexpr uint32_t kInitial[8] = {

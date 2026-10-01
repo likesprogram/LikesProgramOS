@@ -16,7 +16,7 @@
 
 #include <Sha256.h>
 
-namespace makeiso {
+namespace hostbuild {
     // 完整性头的固定布局与取值，与目标侧 ImageHeaderLayout 一致
     struct ImageHeaderLayout {
         static constexpr uint32_t kOffset = 0x10;              // 头相对文件起点的偏移

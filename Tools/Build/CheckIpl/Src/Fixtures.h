@@ -29,27 +29,37 @@ ORG 0x7E00
 %define EXPECT_CHS 0
 %endif
 
+    MOV BH, '1'
     PUSHF
     POP AX
     AND AX, 0x0600
     CMP AX, 0x0200
     JNE Fail
+    MOV BH, '2'
     MOV AX, CS
     OR AX, AX
     JNZ Fail
+    MOV BH, '3'
     MOV AX, DS
     CMP AX, 0x07C0
     JNE Fail
+    MOV BH, '4'
     MOV AX, ES
     OR AX, AX
     JNZ Fail
+    MOV BH, '5'
     MOV AX, SS
     OR AX, AX
     JNZ Fail
+    MOV BH, '6'
     CMP SP, 0x7C00
     JNE Fail
+%if EXPECT_DRIVE != 0xFF
+    MOV BH, '7'
     CMP DX, (EXPECT_MEDIA << 8) | EXPECT_DRIVE
     JNE Fail
+%endif
+    MOV BH, '8'
     CMP CX, EXPECT_SECTOR
     JNE Fail
 %if EXPECT_RESET
@@ -60,6 +70,7 @@ ORG 0x7E00
     CMP WORD [CS:0x502], EXPECT_CHS
     JB Fail
 %endif
+    MOV BH, '9'
     MOV DI, Payload
     MOV CX, PAYLOAD_BYTES - (Payload - $$) - 4
     MOV AL, 0xA5
@@ -71,6 +82,12 @@ ORG 0x7E00
     MOV BL, 0x10
     JMP Print
 Fail:
+    MOV AL, BH
+    OUT 0xE9, AL
+    MOV AL, DH                  ; 实际介质号
+    OUT 0xE9, AL
+    MOV AL, DL                  ; 实际驱动器号
+    OUT 0xE9, AL
     MOV SI, Bad
     MOV BL, 0x11
 Print:

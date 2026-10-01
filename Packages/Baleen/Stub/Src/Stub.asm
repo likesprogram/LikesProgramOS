@@ -54,6 +54,7 @@ GLOBAL _Start
 GLOBAL _Boot_Drive
 GLOBAL _Boot_Media
 GLOBAL _Boot_Sector_Bytes
+GLOBAL _Boot_Desc_Lba
 GLOBAL _Stub_Exception_Stubs
 extern _Stub_Main
 extern _Stub_Exception_Handler
@@ -83,6 +84,8 @@ _Start:
     MOV CX, BX
     AND CX, 1
     REP STOSB
+    ; IPL 交权时的 ESI：描述符所在扇区的 LBA，用来定位同扇区的 CoreDescriptor
+    MOV [_Boot_Desc_Lba], ESI
     ; 段表模板在镜像里只读；CPU 加载段选择子会置位描述符的 Accessed 位并写回，
     ; 把副本拷进未初始化区再加载，写回就落在镜像之外
     MOV SI, Gdt_Template
@@ -137,6 +140,7 @@ Gdt_Work:      RESB Gdt_Template_End - Gdt_Template   ; 入口段表的工作副
 _Boot_Drive:   RESB 1           ; BIOS 驱动器号，IPL 交权时的 DL
 _Boot_Media:   RESB 1           ; Boot::Media，IPL 交权时的 DH
 _Boot_Sector_Bytes: RESW 1      ; IPL 交权时的 CX：512 / 2048 / 4096
+_Boot_Desc_Lba: RESD 1          ; IPL 交权时的 ESI：描述符所在扇区的 LBA
 
 ; Stub → Core 的交权入口：cdecl 参数为交权块指针与 Core 入口地址
 ; 入口状态在此固定：32 位保护模式、平坦段、分页关闭、IF=0、DF=0 都是调用前已有的状态，这里只补齐标志

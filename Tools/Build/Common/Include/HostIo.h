@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace makeiso {
+namespace hostbuild {
     // 返回文件字节数，读取失败时报错
     uint64_t FileSize(const std::string& path);
 

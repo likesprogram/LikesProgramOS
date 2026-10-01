@@ -14,13 +14,19 @@ Code_End:
 %IF ($ - $$) > 446
 %ERROR "MBR IPL 代码超过 446 字节"
 %ENDIF
-    TIMES 446 - ($ - $$) DB 0   ; 填充到分区表；前 446 字节为引导代码
+    ; 描述符区位置槽：512 字节基准地址，运行期按设备单位换算；装载器可覆盖，未覆盖时用本值
+    TIMES DESC_SLOT_OFF - ($ - $$) DB 0
+    DD DESC_LBA_512
+%IF ($ - $$) > 446
+%ERROR "描述符区槽越过 446 字节分区表"
+%ENDIF
+    TIMES 446 - ($ - $$) DB 0   ; 填充到分区表；前 446 字节为引导代码与槽
 
-    ; 分区项 0：ESP（类型 0xEF），LBA 2048，放 EFI 启动 FAT；大小由 MakeHdd / MakeIso 按 Efi.img 写实
+    ; 分区项 0：ESP（类型 0xEF），LBA 2048，放 EFI 启动 FAT；大小由 MakeImage / TestInstaller 按 Efi.img 写实
     DB 0x00, 0x00, 0x02, 0x00   ; 非活动 + 起始 CHS（占位）
     DB 0xEF, 0xFE, 0xFF, 0xFF   ; 类型（EFI System Partition）+ 结束 CHS
     DD 2048                     ; 起始 LBA
-    DD 0                        ; 扇区数（MakeHdd / MakeIso 写入）
+    DD 0                        ; 扇区数（MakeImage / TestInstaller 写入）
 
     ; 分区项 1..3 由构建期写盘工具填写（当前 ESP 与 Ext4 系统卷）；先置空
     TIMES 16 * 3 DB 0           ; 其余三个分区项空

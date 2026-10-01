@@ -14,7 +14,7 @@
 #include <set>
 #include <stdexcept>
 
-namespace makeiso {
+namespace hostbuild {
     namespace {
         constexpr uint32_t kBlock = 2048;            // 逻辑块大小（字节）
         constexpr uint32_t kPvdLba = 16;             // 主卷描述符所在 LBA
@@ -198,7 +198,7 @@ namespace makeiso {
             // 扩展描述：说明文字，取短值以控制记录长度
             static constexpr std::string_view kDesc = "THE ROCK RIDGE INTERCHANGE PROTOCOL";
             // 扩展来源：本写入器名
-            static constexpr std::string_view kSource = "MAKEISO";
+            static constexpr std::string_view kSource = "MAKEIMAGE";
             // ER：标识长度、描述长度、来源长度、扩展版本四个字段在前，三个字符串依次在后
             std::vector<uint8_t> data;
             data.push_back(static_cast<uint8_t>(kId.size()));

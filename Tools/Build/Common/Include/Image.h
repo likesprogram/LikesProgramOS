@@ -8,7 +8,7 @@
 #include <span>
 #include <string>
 
-namespace makeiso {
+namespace hostbuild {
     // 输出镜像：只按绝对字节偏移写入，长度由自身跟踪
     // 孔洞一律显式写零，同一输入产出同样的字节，满足可度量、可复现的要求
     class Image {

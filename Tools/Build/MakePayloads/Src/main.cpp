@@ -225,7 +225,7 @@ _MsgDirect: DB "PLACEHOLDER-CORE-IMAGE (handoff unavailable)", 13, 10, 0
         return text;
     }
 
-    // 占位 EFI 应用：往串口打印 MAKEISO-EFI-BOOT-OK，然后停机
+    // 占位 EFI 应用：往串口打印 MAKEIMAGE-EFI-BOOT-OK，然后停机
     constexpr std::string_view EfiAssembly = R"ASM(BITS 64
 ORG 0
 _Entry:
@@ -258,7 +258,7 @@ _Entry:
     JMP .Next
 .Hang:
     JMP .Hang
-_Msg: DB "MAKEISO-EFI-BOOT-OK", 13, 10
+_Msg: DB "MAKEIMAGE-EFI-BOOT-OK", 13, 10
       DB "PLACEHOLDER-EFI (BaleenUefi not implemented yet)", 13, 10, 0
 ALIGN 8
 _RelocSlot: DQ 0
@@ -286,9 +286,9 @@ _RelocSlot: DQ 0
         // 长度按补零后的文件算：占位件没有未落盘的静态内存，MemoryBytes 与文件长度相同
         Put(image, head + Baleen::ImageHeaderLayout::kFieldImageBytes, image.size(), 4);
         Put(image, head + Baleen::ImageHeaderLayout::kFieldMemoryBytes, image.size(), 4);
-        makeiso::FillImageIdentity(image);
+        hostbuild::FillImageIdentity(image);
         // 自己先验一遍：占位件不经过 PackImage，任何字段写错都在这里暴露
-        makeiso::VerifyImage(image, makeiso::ImageKind::Core);
+        hostbuild::VerifyImage(image, hostbuild::ImageKind::Core);
         return image;
     }
 
@@ -354,34 +354,39 @@ _RelocSlot: DQ 0
         return pe;
     }
 
-    // 只接受本工具刚格式化的 FAT32；不提供通用文件系统编辑接口
+    // 只接受本工具刚格式化的 FAT16；不提供通用文件系统编辑接口
+    // ESP 用 FAT16 而不是 FAT32：分区表在 512e 与 4Kn 下从同一分区项读到相差 8 倍的位置，
+    // 两份 ESP 必须都塞进 7 MiB 窗口，而 FAT32 的最小卷是 32 MiB
     void InstallEfi(const fs::path& image, const Bytes& efi) {
         Bytes fat = Read(image);
-        Require(Get(fat, 510, 2) == 0xaa55 && Get(fat, 11, 2) == 512 && Get(fat, 13, 1) == 1 && Get(fat, 22, 2) == 0, "mkfs.vfat 未生成预期 FAT32");
+        // FAT16 特征：扇区 512、每簇 1 扇区、FATSz16 与根目录项数非 0（偏移 36 起是 EBPB，不能用它判定）
+        Require(Get(fat, 510, 2) == 0xaa55 && Get(fat, 11, 2) == 512 && Get(fat, 13, 1) == 1 && Get(fat, 22, 2) != 0 && Get(fat, 17, 2) != 0, "mkfs.vfat 未生成预期 FAT16");
         const uint32_t reserved = Get(fat, 14, 2);
         const uint32_t copies = Get(fat, 16, 1);
-        const uint32_t sectorsPerFat = Get(fat, 36, 4);
-        const uint32_t root = Get(fat, 44, 4);
+        const uint32_t rootEntries = Get(fat, 17, 2);
+        const uint32_t sectorsPerFat = Get(fat, 22, 2);
         const size_t fatStart = size_t(reserved) * 512;
         const size_t fatSize = size_t(sectorsPerFat) * 512;
-        const size_t dataStart = fatStart + size_t(copies) * fatSize;
-        Require(copies == 2 && root == 2 && sectorsPerFat > 0 && dataStart < fat.size(), "FAT32 布局非法");
+        // FAT16 的根目录是固定区，不是簇链；数据区从它之后开始
+        const size_t rootStart = fatStart + size_t(copies) * fatSize;
+        const size_t rootBytes = (size_t(rootEntries) * 32 + 511) / 512 * 512;
+        const size_t dataStart = rootStart + rootBytes;
+        Require(copies == 2 && sectorsPerFat > 0 && rootEntries > 0 && dataStart < fat.size(), "FAT16 布局非法");
         const size_t clusters = (fat.size() - dataStart) / 512;
         const size_t fileClusters = (efi.size() + 511) / 512;
         const uint32_t firstFile = 5;
-        const size_t used = 2 + fileClusters;
-        Require(clusters >= 65525 && firstFile + fileClusters < clusters + 2 && (clusters + 2) * 4 <= fatSize, "FAT32 空间不足");
+        Require(clusters >= 4085 && firstFile + fileClusters < clusters + 2, "FAT16 空间不足");
         // 簇号到字节偏移
         auto offset = [&](uint32_t cluster) { return dataStart + size_t(cluster - 2) * 512; };
+        // FAT16 簇链：每项 2 字节，链尾 0xFFFF
         for (uint32_t cluster = 3; cluster < firstFile + fileClusters; ++cluster) {
-            Require((Get(fat, fatStart + cluster * 4, 4) & 0x0fffffff) == 0, "FAT32 卷不是空白卷");
-            const uint32_t next = cluster >= firstFile && cluster + 1 < firstFile + fileClusters ? cluster + 1 : 0x0fffffff;
-            for (uint32_t copy = 0; copy < copies; ++copy) Put(fat, fatStart + copy * fatSize + cluster * 4, next, 4);
+            Require(Get(fat, fatStart + cluster * 2, 2) == 0, "FAT16 卷不是空白卷");
+            const uint16_t next = cluster >= firstFile && cluster + 1 < firstFile + fileClusters ? uint16_t(cluster + 1) : 0xffff;
+            for (uint32_t copy = 0; copy < copies; ++copy) Put(fat, fatStart + copy * fatSize + cluster * 2, next, 2);
         }
-        // 写一个 FAT 目录项
-        auto entry = [&](uint32_t directory, size_t slot, std::string_view name, uint8_t attributes, uint32_t cluster, uint32_t size) {
-            Require(name.size() <= 11 && slot < 16, "FAT 目录项非法");
-            const size_t at = offset(directory) + slot * 32;
+        // 写一个 FAT 目录项到指定字节位置
+        auto entry = [&](size_t at, std::string_view name, uint8_t attributes, uint32_t cluster, uint32_t size) {
+            Require(name.size() <= 11, "FAT 目录项非法");
             std::fill_n(fat.begin() + at, 32, 0);
             std::fill_n(fat.begin() + at, 11, ' ');
             Text(fat, at, name);
@@ -390,34 +395,21 @@ _RelocSlot: DQ 0
             Put(fat, at + 16, date, 2);
             Put(fat, at + 18, date, 2);
             Put(fat, at + 24, date, 2);
-            Put(fat, at + 20, cluster >> 16, 2);
             Put(fat, at + 26, cluster & 0xffff, 2);
             Put(fat, at + 28, size, 4);
         };
+        // 根目录项：EFI 子目录；子目录项在各自的簇里
         size_t rootSlot = 0;
-        while (rootSlot < 16 && fat[offset(root) + rootSlot * 32] != 0) ++rootSlot;
-        entry(root, rootSlot, "EFI", 0x10, 3, 0);
-        entry(3, 0, ".", 0x10, 3, 0);
-        entry(3, 1, "..", 0x10, 0, 0); // FAT 根目录的父簇必须是 0
-        entry(3, 2, "BOOT", 0x10, 4, 0);
-        entry(4, 0, ".", 0x10, 4, 0);
-        entry(4, 1, "..", 0x10, 3, 0);
-        entry(4, 2, "BOOTX64 EFI", 0x20, firstFile, uint32_t(efi.size()));
+        while (rootSlot < rootEntries && fat[rootStart + rootSlot * 32] != 0) ++rootSlot;
+        Require(rootSlot < rootEntries, "FAT16 根目录已满");
+        entry(rootStart + rootSlot * 32, "EFI", 0x10, 3, 0);
+        entry(offset(3), ".", 0x10, 3, 0);
+        entry(offset(3) + 32, "..", 0x10, 0, 0); // FAT16 规定根目录的父簇写 0
+        entry(offset(3) + 64, "BOOT", 0x10, 4, 0);
+        entry(offset(4), ".", 0x10, 4, 0);
+        entry(offset(4) + 32, "..", 0x10, 3, 0);
+        entry(offset(4) + 64, "BOOTX64 EFI", 0x20, firstFile, uint32_t(efi.size()));
         std::copy(efi.begin(), efi.end(), fat.begin() + offset(firstFile));
-        // 更新主/备 FSInfo 的空闲计数与 next-free 提示
-        const uint32_t info = Get(fat, 48, 2);
-        const uint32_t backup = Get(fat, 50, 2);
-        for (uint32_t sector : {info, backup + info}) {
-            Require(sector < reserved, "FSInfo 超出保留区");
-            const size_t at = size_t(sector) * 512;
-            Require(Get(fat, at, 4) == 0x41615252 && Get(fat, at + 484, 4) == 0x61417272, "FSInfo 签名非法");
-            const uint32_t free = Get(fat, at + 488, 4);
-            if (free != 0xffffffff) {
-                Require(free >= used, "FSInfo 空闲计数不足");
-                Put(fat, at + 488, free - used, 4);
-            }
-            Put(fat, at + 492, firstFile + fileClusters, 4);
-        }
         Write(image, fat);
     }
 
@@ -448,12 +440,16 @@ _RelocSlot: DQ 0
                 placeholder = data.size() == 16 * 1024 * 1024 && Get(data, 1024 + 56, 2) == 0xef53 && std::equal(std::begin(uuid), std::end(uuid), data.begin() + 1024 + 104);
             } else if (std::string_view(name) == "BaleenStub.bin" || std::string_view(name) == "BaleenCore.bin") {
                 // 按完整性头与占位标识判定：占位 Core 带头，旧格式（无头）要删掉重生成
-                const makeiso::ImageClass cls = makeiso::ClassifyImage(data);
-                const makeiso::ImageKind expected = std::string_view(name) == "BaleenStub.bin" ? makeiso::ImageKind::Stub : makeiso::ImageKind::Core;
-                placeholder = cls.kind == expected && cls.placeholder && (expected == makeiso::ImageKind::Stub || cls.header);
+                const hostbuild::ImageClass cls = hostbuild::ClassifyImage(data);
+                const hostbuild::ImageKind expected = std::string_view(name) == "BaleenStub.bin" ? hostbuild::ImageKind::Stub : hostbuild::ImageKind::Core;
+                placeholder = cls.kind == expected && cls.placeholder && (expected == hostbuild::ImageKind::Stub || cls.header);
+            } else if (std::string_view(name) == "Efi.img") {
+                // ESP 占位件按体积与 FAT 类型判定：双 ESP 布局要求它是 4 MiB 的 FAT16，
+                // 旧的 36 MiB FAT32 认不出来，要删掉重生成
+                const bool fat16 = data.size() >= 0x40 && Get(data, 510, 2) == 0xaa55 && Get(data, 11, 2) == 512 && Get(data, 13, 1) == 1 && Get(data, 22, 2) != 0 && Get(data, 17, 2) != 0;
+                placeholder = data.size() == 4 * 1024 * 1024 && fat16 && bytes.find("MAKEIMAGE-EFI-BOOT-OK") != std::string_view::npos;
             } else {
-                const std::string_view marker = std::string_view(name) == "Efi.img" ? "MAKEISO-EFI-BOOT-OK" : "PLACEHOLDER BaleenLayout.bin";
-                placeholder = bytes.find(marker) != std::string_view::npos;
+                placeholder = bytes.find("PLACEHOLDER BaleenLayout.bin") != std::string_view::npos;
             }
             // 占位件换过格式时旧文件认不出来，这里只说明要删：本工具不覆写已有文件
             Require(placeholder, "已有文件不是当前格式的占位件（旧格式占位件需先删除），或请使用专门输出目录：" + path.string());
@@ -481,8 +477,8 @@ _RelocSlot: DQ 0
         Write(dir / "BaleenCore.bin", BuildCoreImage(Read(dir / "coreapp.bin")));
         Assemble(dir, "efiapp", EfiAssembly);
         const Bytes efi = EfiPe(Read(dir / "efiapp.bin"));
-        CreateEmpty(dir / "Efi.img", 36 * 1024 * 1024);
-        Run({"mkfs.vfat", "-F", "32", "-s", "1", "-n", "ESP", "--invariant", (dir / "Efi.img").string()});
+        CreateEmpty(dir / "Efi.img", 4 * 1024 * 1024);
+        Run({"mkfs.vfat", "-F", "16", "-s", "1", "-n", "ESP", "--invariant", (dir / "Efi.img").string()});
         InstallEfi(dir / "Efi.img", efi);
         CreateEmpty(dir / "SystemVolume.img", 16 * 1024 * 1024);
         Run({"mkfs.ext4", "-q", "-F", "-U", "11111111-2222-3333-4444-555555555555", "-E", "hash_seed=66666666-7777-8888-9999-aaaaaaaaaaaa,root_owner=0:0,lazy_itable_init=0,lazy_journal_init=0", (dir / "SystemVolume.img").string()});

@@ -12,7 +12,7 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace makeiso {
+namespace hostbuild {
     namespace {
         // 两种镜像的格式标记，含终止零，与目标侧 ImageHeader.hpp 一致
         constexpr uint8_t kStubMagic[8] = { 'B', 'L', 'N', 'S', 'T', 'U', 'B', 0 };

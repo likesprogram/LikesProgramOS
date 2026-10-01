@@ -1,5 +1,5 @@
 /* Baleen.h
-    Baleen 引导结构的宿主侧编码：BootDescriptor、CoreDescriptor、El Torito 引导目录与 MBR 分区项
+    Baleen 引导结构的宿主侧编码：描述符区、El Torito 引导目录与 MBR 分区项
 */
 
 #pragma once
@@ -10,42 +10,37 @@
 #include <string>
 #include <vector>
 
-namespace makeiso {
-    // BootDescriptor：一级引导在介质绝对字节偏移 0x22000 读的 32 字节说明，数值与
-    // Packages/Baleen/Ipl/Include/Const.inc、Body.inc 保持一致
-    // 该偏移是 512 / 2048 / 4096 三种逻辑扇区的公倍数并落在 GPT 保留区之后，
-    // 同一份镜像在三种单位下的描述符字节位置一致
-    struct BootDescriptor {
-        static constexpr uint32_t kMagic = 0x52445342;               // 'BSDR'
-        static constexpr uint16_t kVersion = 1;                      // 当前开发格式标记
-        static constexpr uint16_t kHeaderBytes = 32;                 // 描述符固定总长
-        static constexpr uint64_t kImageOffset = 0x22000;            // 镜像内的绝对字节偏移
+#include <HostIo.h>
+
+namespace hostbuild {
+    // 描述符区：写进引导介质的约定位置，由段产物拼接而成，头部不含段表
+    // 位置字段一律以 512 字节为单位写入（值 = 字节偏移 / 512），与目标设备的逻辑扇区单位无关；
+    // 读取方按运行期探测到的单位右移换算成本地 LBA（512 不移，2048 右移 2，4096 右移 3），
+    // 因此同一份字节在 512e、4Kn 与 2048 字节单位的光盘上都指向同一处物理位置
+    // 头部之后是段序列，每段以统一的段头开头；读取方按段长遍历、按段标记认段，顺序不作要求
+    struct DescriptorArea {
+        static constexpr uint64_t kWriteOffset = 0x22000;    // 写入介质时的字节位置（512 字节基准 272）
+        static constexpr uint32_t kSlotOffset = 440;         // 磁盘 IPL 里描述符区位置槽的偏移，与 Ipl/Const.inc 的 DESC_SLOT_OFF 一致
+        static constexpr uint32_t kBaseShift = 9;            // 位置字段的基准单位：1 << 9 = 512 字节
+        static constexpr uint32_t kMaxAreaBytes = 512;       // 描述符区必须落在一个 512 字节扇区之内，读取方只读一个扇区
+        static constexpr uint32_t kHeadBytes = 16;           // 头部长度：标记 4 + 版本 2 + 头长 2 + 起止扇区 8
+        static constexpr uint32_t kSegmentHeadBytes = 8;     // 段头长度：标记 4 + 版本 2 + 段长 2
+        static constexpr uint32_t kAreaMagic = 0x43534442;   // 'BDSC'，头部标记
+        static constexpr uint32_t kStubMagic = 0x52445342;   // 'BSDR'，Stub 段标记
+        static constexpr uint32_t kCoreMagic = 0x52444342;   // 'BCDR'，Core 段标记
+        static constexpr uint32_t kFieldDescLba = 8;         // 头部内：本区起始位置，512 字节基准
+        static constexpr uint32_t kFieldDescEndLba = 12;     // 头部内：本区结束位置，512 字节基准，含
+        static constexpr uint32_t kFieldSegmentLba = 8;      // 段内：载荷起始位置，512 字节基准
+        static constexpr uint32_t kFieldSegmentEndLba = 12;  // 段内：载荷结束位置，512 字节基准，含
         static constexpr uint64_t kMaxStubBytes = 0x10000 - 0x7E00;  // Stub 装入空间[0x7E00,0x10000)，含整扇区读取
-
-        uint64_t stub_offset = 0;  // 低 32 位字节偏移，至少 0x1000 且 4096 对齐（工具统一策略）
-        uint64_t stub_bytes = 0;   // 非 0，按介质扇区上取整后不超过 kMaxStubBytes；offset + bytes <= 0xFFFFFFFF
+        static constexpr uint64_t kMaxCoreBytes = 0x400000;          // Core 文件字节数上限
     };
 
-    // 把 BootDescriptor 编码为 32 字节的二进制表示
-    // sector_bytes 为本地介质扇区大小：HDD 512/4096、CD 2048；仅用于校验，不写入描述符
-    std::array<uint8_t, 32> EncodeBootDescriptor(const BootDescriptor& descriptor, uint32_t sector_bytes);
-
-    // CoreDescriptor：Stub 在介质绝对字节偏移 0x22020 读的 32 字节说明，与 BootDescriptor 落在同一扇区；
-    // 数值与 Packages/Baleen/Common/Include/Contract.inc、Stub/Src/LoadCore.cpp 保持一致
-    struct CoreDescriptor {
-        static constexpr uint32_t kMagic = 0x52444342;        // 'BCDR'
-        static constexpr uint16_t kVersion = 1;               // 当前开发格式标记
-        static constexpr uint16_t kHeaderBytes = 32;          // 描述符固定总长
-        static constexpr uint64_t kImageOffset = 0x22020;     // 镜像内的绝对字节偏移，紧随 BootDescriptor
-        static constexpr uint64_t kMaxCoreBytes = 0x400000;   // Core 文件字节数上限
-
-        uint64_t core_offset = 0;  // 低 32 位字节偏移，至少 0x1000 且 4096 对齐（工具统一策略）
-        uint64_t core_bytes = 0;   // 非 0，且偏移加长度不超过 0xFFFFFFFF
-    };
-
-    // 把 CoreDescriptor 编码为 32 字节的二进制表示
-    // sector_bytes 为本地介质扇区大小：HDD 512/4096、CD 2048；仅用于校验，不写入描述符
-    std::array<uint8_t, 32> EncodeCoreDescriptor(const CoreDescriptor& descriptor, uint32_t sector_bytes);
+    // 按段产物拼装描述符区并回填起止位置，返回完整映像
+    // descs 为段产物目录：Head.bin 是头部，其余 *.bin 按文件名排序即为段序列
+    // 按段头的格式标记决定回填哪个载荷的起止位置；不认识的段原样保留，新增段不必改本函数
+    // 位置字段按 512 字节基准写（见 DescriptorArea），载荷起点必须 4096 对齐
+    std::vector<uint8_t> BuildDescriptorArea(const std::string& descs, const Placed* stub, const Placed* core);
 
     // El Torito 引导目录的一项；sector_count 只有 16 位，表达不了的由调用方给截断值
     struct BootCatalogEntry {

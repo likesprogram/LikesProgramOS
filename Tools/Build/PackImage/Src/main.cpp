@@ -57,21 +57,21 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        std::vector<uint8_t> image = makeiso::ReadFile(path);
-        const makeiso::ImageClass cls = makeiso::ClassifyImage(image);
+        std::vector<uint8_t> image = hostbuild::ReadFile(path);
+        const hostbuild::ImageClass cls = hostbuild::ClassifyImage(image);
         if (!cls.header) throw std::runtime_error("镜像没有可识别的完整性头（" + cls.reason + "）：" + path);
         if (verify) {
-            makeiso::VerifyImage(image, cls.kind);
-            std::cout << "PackImage：" << makeiso::ImageKindName(cls.kind) << " 镜像校验通过 " << path
-                      << "（" << image.size() << " 字节，BuildId " << makeiso::ImageBuildIdText(image) << "）\n";
+            hostbuild::VerifyImage(image, cls.kind);
+            std::cout << "PackImage：" << hostbuild::ImageKindName(cls.kind) << " 镜像校验通过 " << path
+                      << "（" << image.size() << " 字节，BuildId " << hostbuild::ImageBuildIdText(image) << "）\n";
             return 0;
         }
-        makeiso::FillImageIdentity(image);
-        makeiso::VerifyImage(image, cls.kind);
+        hostbuild::FillImageIdentity(image);
+        hostbuild::VerifyImage(image, cls.kind);
         WriteFile(path, image);
         std::cout << "PackImage：已写入 BuildId 与 Digest " << path
-                  << "（" << makeiso::ImageKindName(cls.kind) << " 镜像，" << image.size()
-                  << " 字节，BuildId " << makeiso::ImageBuildIdText(image) << "）\n";
+                  << "（" << hostbuild::ImageKindName(cls.kind) << " 镜像，" << image.size()
+                  << " 字节，BuildId " << hostbuild::ImageBuildIdText(image) << "）\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "PackImage: " << error.what() << "\n";

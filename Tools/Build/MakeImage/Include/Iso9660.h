@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-namespace makeiso {
+namespace hostbuild {
     class Image;  // 输出镜像，见 Image.h
 
     // 放入 ISO9660 树的一个文件（路径规整后不含前导斜杠）
@@ -25,8 +25,8 @@ namespace makeiso {
         std::string volume_id      = "LIKESPROGRAM";  // 卷标识
         std::string system_id      = "LIKESPROGRAM";  // 系统标识
         std::string publisher_id;                     // 出版者标识
-        std::string preparer_id    = "MAKEISO";       // 准备者标识
-        std::string application_id = "MAKEISO";       // 应用标识
+        std::string preparer_id    = "MAKEIMAGE";       // 准备者标识
+        std::string application_id = "MAKEIMAGE";       // 应用标识
         uint64_t timestamp = 0;                       // Unix 秒（UTC）；0 表示不指定，卷与目录时间戳写全零以保证可复现
     };
 

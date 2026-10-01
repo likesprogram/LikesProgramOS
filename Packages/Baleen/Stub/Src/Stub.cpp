@@ -21,6 +21,7 @@
 extern "C" uint8_t _Boot_Drive;
 extern "C" uint8_t _Boot_Media;
 extern "C" uint16_t _Boot_Sector_Bytes;
+extern "C" uint32_t _Boot_Desc_Lba;
 // 异常入口桩地址表，由 Stub.asm 提供，索引即向量号
 extern "C" const uintptr_t _Stub_Exception_Stubs[32];
 
@@ -199,13 +200,13 @@ extern "C" void _Stub_Main() {
     // 从存储介质装载 BaleenCore：先核对描述符与镜像头，再读入高位，最后比对摘要，成功不返回
     // 校验、读盘、交权的顺序与每一步的诊断行都摆在这里：日志与流程集中在一处，出问题只看这一段
     Baleen::Stub::CoreLoadPlan plan;
-    if (const char* reason = Baleen::Stub::PrepareCore(_Boot_Drive, media, sect, plan)) Fail(reason);
+    if (const char* reason = Baleen::Stub::PrepareCore(_Boot_Drive, media, sect, _Boot_Desc_Lba, plan)) Fail(reason);
     // 装载计划已成：长度、入口与静态内存跨度都取自镜像头，且已与描述符核对
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "Preparing the baleen core load");
     // 输出计划参数，屏上此行之后再无下文，说明卡在 Core 读盘上
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
-    Print::Write("At=");
-    Print::WriteHex(plan.fileOffset);
+    Print::Write("Lba=");
+    Print::WriteHex(plan.fileLba);
     Print::Write(" Bytes=");
     Print::WriteHex(plan.imageBytes);
     Print::Write(" Load=");

@@ -6,9 +6,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 
-namespace makeiso {
+namespace hostbuild {
     namespace {
         // 按小端序写入 16 位整数
         void Put16Le(uint8_t* p, uint16_t v) {
@@ -19,11 +20,6 @@ namespace makeiso {
         // 按小端序写入 32 位整数
         void Put32Le(uint8_t* p, uint32_t v) {
             for (int i = 0; i < 4; ++i) p[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
-        }
-
-        // 按小端序写入 64 位整数
-        void Put64Le(uint8_t* p, uint64_t v) {
-            for (int i = 0; i < 8; ++i) p[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
         }
 
         // 按 512 字节扇区计数计算长度，超过 65535 扇区报错
@@ -40,42 +36,83 @@ namespace makeiso {
         }
     }
 
-    std::array<uint8_t, 32> EncodeBootDescriptor(const BootDescriptor& descriptor, uint32_t sector_bytes) {
-        if (sector_bytes != 512 && sector_bytes != 2048 && sector_bytes != 4096) throw std::runtime_error("引导介质扇区大小必须为 512、2048 或 4096 字节");
-        // 先限制原始长度，再上取整，避免长度加法溢出；512 最多读 0x8200，4Kn / CD 最多读到 0x8000
-        if (descriptor.stub_bytes == 0 || descriptor.stub_bytes > BootDescriptor::kMaxStubBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 0x10000-0x7E00");
-        const uint64_t sectors = (descriptor.stub_bytes + sector_bytes - 1) / sector_bytes;
-        if (sectors > BootDescriptor::kMaxStubBytes / sector_bytes) throw std::runtime_error("Stub 按介质扇区上取整后超过 0x10000-0x7E00");
-        // 统一策略：起点既避开描述符扇区，又同时满足 512 / 2048 / 4096 三种逻辑扇区的对齐
-        if (descriptor.stub_offset < 0x1000) throw std::runtime_error("Stub 偏移必须至少为 0x1000，避开描述符所在扇区");
-        if (descriptor.stub_offset % 4096 != 0) throw std::runtime_error("Stub 偏移必须 4096 对齐（工具对三种逻辑扇区的统一策略）");
-        // 对应 IPL 的 32 位 ADD/JC：结束偏移恰好为 0x100000000 也必须拒绝
-        if (descriptor.stub_offset > 0xFFFFFFFFull || descriptor.stub_bytes > 0xFFFFFFFFull - descriptor.stub_offset) throw std::runtime_error("Stub 偏移及偏移加长度必须不超过 0xFFFFFFFF");
-        std::array<uint8_t, 32> out{};
-        Put32Le(out.data() + 0, BootDescriptor::kMagic);
-        Put16Le(out.data() + 4, BootDescriptor::kVersion);
-        Put16Le(out.data() + 6, BootDescriptor::kHeaderBytes);
-        Put64Le(out.data() + 8, descriptor.stub_offset);
-        Put64Le(out.data() + 16, descriptor.stub_bytes);
-        // 24..31 保留，必须为 0
-        return out;
+    namespace {
+        // 按小端序读取 16 位
+        uint16_t Get16(const uint8_t* p) {
+            return static_cast<uint16_t>(p[0] | (p[1] << 8));
+        }
+
+        // 按小端序读取 32 位
+        uint32_t Get32(const uint8_t* p) {
+            uint32_t value = 0;
+            for (int i = 0; i < 4; ++i) value |= static_cast<uint32_t>(p[i]) << (8 * i);
+            return value;
+        }
+
+        // 载荷在 512 字节基准下的起止位置（含）；越界与对齐不合法即抛异常
+        // 基准值与目标设备的逻辑扇区单位无关：读取方按运行期单位右移得到本地 LBA，
+        // 所以起点必须按最细的 4096 对齐，换算到 512 / 2048 / 4096 都不会错位
+        std::pair<uint32_t, uint32_t> SectorRange(const Placed& placed, uint64_t maxBytes, const char* label) {
+            if (placed.bytes == 0 || placed.bytes > maxBytes) throw std::runtime_error(std::string(label) + " 的长度必须非 0 且不超过上限");
+            if (placed.offset % 4096 != 0) throw std::runtime_error(std::string(label) + " 的起点必须按 4096 对齐");
+            constexpr uint32_t kBase = 1u << DescriptorArea::kBaseShift;
+            const uint32_t first = static_cast<uint32_t>(placed.offset / kBase);
+            const uint32_t sectors = static_cast<uint32_t>((placed.bytes + kBase - 1) / kBase);
+            if (static_cast<uint64_t>(first) + sectors > 0x100000000ull) throw std::runtime_error(std::string(label) + " 的位置范围必须不超过 0xFFFFFFFF");
+            return {first, first + sectors - 1};
+        }
     }
 
-    std::array<uint8_t, 32> EncodeCoreDescriptor(const CoreDescriptor& descriptor, uint32_t sector_bytes) {
-        if (sector_bytes != 512 && sector_bytes != 2048 && sector_bytes != 4096) throw std::runtime_error("引导介质扇区大小必须为 512、2048 或 4096 字节");
-        if (descriptor.core_bytes == 0 || descriptor.core_bytes > CoreDescriptor::kMaxCoreBytes) throw std::runtime_error("Core 长度必须非 0 且不超过 0x400000");
-        if (descriptor.core_offset < 0x1000) throw std::runtime_error("Core 偏移必须至少为 0x1000，避开描述符所在扇区");
-        if (descriptor.core_offset % 4096 != 0) throw std::runtime_error("Core 偏移必须 4096 对齐（工具对三种逻辑扇区的统一策略）");
-        // 对应 Stub 读盘路径的 32 位寻址：偏移加长度不得进位
-        if (descriptor.core_offset > 0xFFFFFFFFull || descriptor.core_bytes > 0xFFFFFFFFull - descriptor.core_offset) throw std::runtime_error("Core 偏移及偏移加长度必须不超过 0xFFFFFFFF");
-        std::array<uint8_t, 32> out{};
-        Put32Le(out.data() + 0, CoreDescriptor::kMagic);
-        Put16Le(out.data() + 4, CoreDescriptor::kVersion);
-        Put16Le(out.data() + 6, CoreDescriptor::kHeaderBytes);
-        Put64Le(out.data() + 8, descriptor.core_offset);
-        Put64Le(out.data() + 16, descriptor.core_bytes);
-        // 24..31 保留，必须为 0
-        return out;
+    std::vector<uint8_t> BuildDescriptorArea(const std::string& descs, const Placed* stub, const Placed* core) {
+        std::vector<uint8_t> area = ReadFile(descs + "/Head.bin");
+        if (area.size() != DescriptorArea::kHeadBytes) throw std::runtime_error("描述符区头部长度不是 " + std::to_string(DescriptorArea::kHeadBytes) + " 字节");
+        if (Get32(area.data()) != DescriptorArea::kAreaMagic) throw std::runtime_error("描述符区头部标记不符：" + descs + "/Head.bin");
+
+        // 段按文件名排序拼接：顺序只保证可复现，读取方按段长遍历、按段标记认段
+        std::vector<std::string> names;
+        for (const auto& entry : std::filesystem::directory_iterator(descs)) {
+            if (entry.path().extension() != ".bin") continue;
+            const std::string name = entry.path().filename().string();
+            if (name != "Head.bin") names.push_back(name);
+        }
+        std::sort(names.begin(), names.end());
+
+        for (const std::string& name : names) {
+            std::vector<uint8_t> segment = ReadFile(descs + "/" + name);
+            if (segment.size() < DescriptorArea::kSegmentHeadBytes) throw std::runtime_error("描述符段短于段头：" + name);
+            if (Get16(segment.data() + 6) != segment.size()) throw std::runtime_error("段长与文件大小不一致：" + name);
+            // 按段标记回填载荷的起止位置；不认识的段原样保留，新增段不必改本函数
+            switch (Get32(segment.data())) {
+                case DescriptorArea::kStubMagic: {
+                    if (stub == nullptr) throw std::runtime_error("有 Stub 段却没有 Stub 载荷：" + name);
+                    const auto [first, last] = SectorRange(*stub, DescriptorArea::kMaxStubBytes, "Stub");
+                    Put32Le(segment.data() + DescriptorArea::kFieldSegmentLba, first);
+                    Put32Le(segment.data() + DescriptorArea::kFieldSegmentEndLba, last);
+                    break;
+                }
+                case DescriptorArea::kCoreMagic: {
+                    if (core == nullptr) throw std::runtime_error("有 Core 段却没有 Core 载荷：" + name);
+                    const auto [first, last] = SectorRange(*core, DescriptorArea::kMaxCoreBytes, "Core");
+                    Put32Le(segment.data() + DescriptorArea::kFieldSegmentLba, first);
+                    Put32Le(segment.data() + DescriptorArea::kFieldSegmentEndLba, last);
+                    break;
+                }
+                default: break;
+            }
+            area.insert(area.end(), segment.begin(), segment.end());
+        }
+
+        // 本区的起止位置（512 字节基准）：装载方按运行期单位换算成本地 LBA 后判定
+        constexpr uint32_t kBase = 1u << DescriptorArea::kBaseShift;
+        if (area.size() > DescriptorArea::kMaxAreaBytes) throw std::runtime_error("描述符区超过 " + std::to_string(DescriptorArea::kMaxAreaBytes) + " 字节：装载方只读一个扇区");
+        const uint32_t first = static_cast<uint32_t>(DescriptorArea::kWriteOffset / kBase);
+        const uint64_t endBytes = static_cast<uint64_t>(first) * kBase + area.size();
+        if (stub != nullptr && endBytes > stub->offset) throw std::runtime_error("描述符区与 Stub 载荷重叠");
+        if (core != nullptr && endBytes > core->offset) throw std::runtime_error("描述符区与 Core 载荷重叠");
+        const uint32_t end = first + static_cast<uint32_t>((area.size() + kBase - 1) / kBase) - 1;
+        Put32Le(area.data() + DescriptorArea::kFieldDescLba, first);
+        Put32Le(area.data() + DescriptorArea::kFieldDescEndLba, end);
+        return area;
     }
 
     std::vector<uint8_t> EncodeBootCatalog(const BootCatalogSpec& spec) {

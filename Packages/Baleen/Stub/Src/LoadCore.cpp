@@ -25,18 +25,20 @@ namespace Baleen {
         namespace {
             // —— 交权契约常量：取值必须与 Contract.inc 一致 ——
             // 汇编侧由 %INCLUDE 取 Contract.inc，C++ 侧包含不了 .inc，只能在此重申；
-            // 描述符的格式标记与头长会拿介质内容实际比对，改动漏了一边会在启动时就暴露
-            // CoreDescriptor 的介质绝对字节偏移：与 BootDescriptor 同扇区，紧随其后 32 字节
-            // 取值与 IPL 的 Const.inc 一致，在 512 / 2048 / 4096 三种逻辑扇区下都是同一字节位置
-            constexpr uint32_t kDescriptorOffset = 0x22020;
-            constexpr uint32_t kDescriptorMagic = 0x52444342;   // 'BCDR'
-            constexpr uint16_t kDescriptorVersion = 1;          // 开发格式标记
-            constexpr uint16_t kDescriptorHeaderBytes = 32;     // 描述符固定总长
-            constexpr uint32_t kFieldVersion = 0x04;            // 描述符内版本字段
-            constexpr uint32_t kFieldHeader = 0x06;             // 描述符内头长字段
-            constexpr uint32_t kFieldFile = 0x08;               // 描述符内文件偏移字段，8 字节小端
-            constexpr uint32_t kFieldBytes = 0x10;              // 描述符内文件字节数字段，8 字节小端
-            constexpr uint32_t kFieldReserved = 0x18;           // 描述符内保留字段，8 字节，须全 0
+            // 描述符区布局：与 Packages/Baleen/Common/Include/Desc.inc 一致 ——
+            // 头部给出本区起止位置与段序列起点；段头给出标记、版本与段长，读取方按段长遍历
+            // 位置字段都是 512 字节基准（值 = 字节偏移 / 512），按本地单位右移换算成本地 LBA
+            constexpr uint32_t kBaseShift = 9;                  // 位置字段的基准单位：1 << 9 = 512 字节
+            constexpr uint32_t kAreaMagic = 0x43534442;         // 'BDSC'，头部标记
+            constexpr uint32_t kFieldAreaHeadBytes = 0x06;      // 头部内头长字段
+            constexpr uint32_t kAreaHeadLen = 16;               // 头部固定长度
+            constexpr uint32_t kFieldAreaLba = 0x08;            // 头部内本区起始位置，512 字节基准
+            constexpr uint32_t kFieldAreaEndLba = 0x0C;         // 头部内本区结束位置，512 字节基准，含
+            constexpr uint32_t kSegmentHeadBytes = 8;           // 段头长度：标记 4 + 版本 2 + 段长 2
+            constexpr uint32_t kFieldSegmentLength = 0x06;      // 段内段长字段，含段头
+            constexpr uint32_t kFieldSegmentLba = 0x08;         // 段内载荷起始位置，512 字节基准
+            constexpr uint32_t kFieldSegmentEndLba = 0x0C;      // 段内载荷结束位置，512 字节基准，含
+            constexpr uint32_t kCoreMagic = 0x52444342;         // 'BCDR'，Core 段标记
             constexpr uint32_t kCoreLoad = 0x100000;            // Core 装入的物理地址，即镜像基址
             constexpr uint32_t kCoreMaxBytes = 0x400000;        // Core 文件字节数上限
             constexpr uint32_t kCoreMaxMemory = 0x400000;       // Core 静态内存跨度上限，含未落盘尾部
@@ -74,11 +76,14 @@ namespace Baleen {
                 return value;
             }
 
-            // 从缓冲区按小端读取 64 位
-            uint64_t Get64(const uint8_t* field) {
-                uint64_t value = 0;
-                for (uint32_t i = 0; i < 8; ++i) value |= static_cast<uint64_t>(field[i]) << (8 * i);
-                return value;
+            // 扇区大小的移位量与掩码：探测只认 512、2048、4096，都是 2 的幂，换算用移位免除法
+            uint32_t SectorShift(uint32_t sectorBytes) {
+                return static_cast<uint32_t>(__builtin_ctz(sectorBytes));
+            }
+
+            // 位置字段换算的右移量：512 字节基准 → 本地 LBA（512 → 0、2048 → 2、4096 → 3）
+            uint32_t BaseShift(uint32_t sectorBytes) {
+                return SectorShift(sectorBytes) - kBaseShift;
             }
 
             // 从低地址弹跳窗口整段拷到高位：调用时数据段与目的段都是基址 0 的平坦段
@@ -108,7 +113,6 @@ namespace Baleen {
 
             // 从 begin 起连续可用的字节数：沿内存图可用条目向外扩张到不再相邻为止，上限 limit，
             // 并按扇区大小向下取整；条目顺序不作假定，每轮扩张到不动点，最多 count 轮
-            // 取值范围限制在 uint32_t 内：取整用 32 位除法，避免牵入 libgcc 的 __udivdi3
             uint32_t UsableSpan(uint32_t begin, uint32_t limit, uint32_t sectorBytes) {
                 const uint64_t ceil = static_cast<uint64_t>(begin) + limit;
                 uint64_t reach = begin;
@@ -127,7 +131,7 @@ namespace Baleen {
                 }
                 const uint32_t span = reach > begin ? static_cast<uint32_t>(reach - begin) : 0;
                 const uint32_t capped = span < limit ? span : limit;
-                return (capped / sectorBytes) * sectorBytes;
+                return capped & ~(sectorBytes - 1);
             }
 
             // 挑弹跳窗口：从 kBounceBegin 起按窗口大小步进，取第一段整段可用的；找不到返回 0
@@ -138,52 +142,60 @@ namespace Baleen {
                 return 0;
             }
 
-            // 读取并校验 CoreDescriptor：读到 fileOffset 与 imageBytes，成功返回空指针
-            // 只读与 BootDescriptor 同一个扇区，字段校验规则与一级引导描述符一致
-            // 字段按 64 位读入，校验通过后收窄到 32 位：读盘路径只寻址 32 位偏移，收窄也让后续取整只用 32 位除法
-            const char* ReadCoreDescriptor(uint32_t sectorBytes, uint32_t& fileOffset, uint32_t& imageBytes) {
-                const uint32_t lba = kDescriptorOffset / sectorBytes;
-                const uint32_t within = kDescriptorOffset % sectorBytes;
-                // 描述符须整个落在这一扇区内，否则读取缓冲里没有完整字段
-                if (within + kDescriptorHeaderBytes > sectorBytes) return "The CoreDescriptor does not fit in one sector";
-                if (_Bios_Read_Sectors(lba, 1, s_sector, sectorBytes) == 0) return "Read the CoreDescriptor";
-                const uint8_t* const field = s_sector + within;
-                if (Get32(field) != kDescriptorMagic) return "The CoreDescriptor magic doesn't match";
-                if (Get16(field + kFieldVersion) != kDescriptorVersion || Get16(field + kFieldHeader) != kDescriptorHeaderBytes) return "The CoreDescriptor version or header length isn't supported";
-                const uint64_t reserved = Get64(field + kFieldReserved);
-                const uint64_t file = Get64(field + kFieldFile);
-                const uint64_t bytes = Get64(field + kFieldBytes);
-                // 偏移与长度都不得使用高 32 位，偏移还要按扇区对齐并落在描述符扇区之后
-                if (reserved != 0 || (file >> 32) != 0 || (bytes >> 32) != 0) return "The CoreDescriptor reserved or high half isn't zero";
-                fileOffset = static_cast<uint32_t>(file);
-                imageBytes = static_cast<uint32_t>(bytes);
-                if (fileOffset == 0 || fileOffset % sectorBytes != 0) return "The CoreDescriptor file offset isn't sector aligned";
-                if (fileOffset < (lba + 1) * sectorBytes) return "The CoreDescriptor file offset overlaps the descriptor sector";
-                if (imageBytes == 0 || imageBytes > kCoreMaxBytes) return "The CoreImageBytes is zero or beyond the limit";
-                // 偏移加长度不得进位：32 位寻址的读盘路径放不下更大的范围
-                if (fileOffset + imageBytes < fileOffset) return "The CoreDescriptor file range doesn't fit in 32 bits";
+            // 读取并校验描述符区：头部定段序列起点，按段长遍历、按标记找 Core 段
+            // 描述符区扇区号由 IPL 经 ESI 交来（本地单位）；段内位置字段是 512 字节基准，先换算成本地 LBA
+            const char* ReadCoreDescriptor(uint32_t sectorBytes, uint32_t descriptorLba,
+                                           uint32_t& fileLba, uint32_t& fileSectors) {
+                const uint32_t shift = BaseShift(sectorBytes);
+                if (_Bios_Read_Sectors(descriptorLba, 1, s_sector, sectorBytes) == 0) return "Read the CoreDescriptor";
+                if (Get32(s_sector) != kAreaMagic) return "The CoreDescriptor magic doesn't match";
+                if (Get16(s_sector + kFieldAreaHeadBytes) < kAreaHeadLen) return "The CoreDescriptor head is too short";
+                if ((Get32(s_sector + kFieldAreaLba) >> shift) != descriptorLba) return "The CoreDescriptor area sector doesn't match";
+                if ((Get32(s_sector + kFieldAreaEndLba) >> shift) < descriptorLba) return "The CoreDescriptor area range is inverted";
+                // 段序列：从头部之后开始，按段长前进，按标记认段
+                uint32_t offset = Get16(s_sector + kFieldAreaHeadBytes);
+                for (;;) {
+                    if (offset + kSegmentHeadBytes > sectorBytes) return "The CoreDescriptor has no core segment";
+                    const uint32_t length = Get16(s_sector + offset + kFieldSegmentLength);
+                    if (length < kSegmentHeadBytes) return "The CoreDescriptor segment length is too small";
+                    if (Get32(s_sector + offset) == kCoreMagic) {
+                        // 段长必须容下起止扇区，读取方按段内字段取位置
+                        if (length < kSegmentHeadBytes + 8) return "The CoreDescriptor segment length is too small";
+                        break;
+                    }
+                    offset += length;
+                }
+                fileLba = Get32(s_sector + offset + kFieldSegmentLba) >> shift;
+                const uint32_t endLba = Get32(s_sector + offset + kFieldSegmentEndLba) >> shift;
+                if (fileLba == 0) return "The CoreDescriptor LBA is zero";
+                if (endLba < fileLba) return "The CoreDescriptor range is inverted";
+                if (fileLba <= descriptorLba) return "The CoreDescriptor overlaps the descriptor sector";
+                fileSectors = endLba - fileLba + 1;
+                if (fileSectors > kCoreMaxBytes / sectorBytes) return "The CoreImageBytes is zero or beyond the limit";
                 return nullptr;
             }
 
             // 读 Core 文件首扇区并校验镜像头：头必须先于整段装载核对，装载区与入口都取自头字段
-            // 头里的文件长度必须与描述符一致：一个来自组装布局、一个来自镜像内容，分歧即拒绝
-            const char* ReadCoreHeader(uint32_t sectorBytes, uint32_t fileOffset, uint32_t descriptorBytes, ImageFacts& facts) {
-                if (_Bios_Read_Sectors(fileOffset / sectorBytes, 1, s_sector, sectorBytes) == 0) return "Read the BaleenCore header";
+            // 头里的文件长度必须与描述符的扇区数一致：一个来自组装布局、一个来自镜像内容，分歧即拒绝
+            const char* ReadCoreHeader(uint32_t sectorBytes, uint32_t fileLba, uint32_t fileSectors, ImageFacts& facts) {
+                if (_Bios_Read_Sectors(fileLba, 1, s_sector, sectorBytes) == 0) return "Read the BaleenCore header";
                 if (const char* reason = CheckImageHeader(s_sector, kCoreImageMagic, facts)) return reason;
-                if (facts.imageBytes != descriptorBytes) return "The CoreDescriptor file bytes don't match the core header";
+                if (((facts.imageBytes + (sectorBytes - 1)) >> SectorShift(sectorBytes)) != fileSectors) return "The CoreDescriptor sector count doesn't match the core header";
                 if (facts.memoryBytes > kCoreMaxMemory) return "The CoreMemoryBytes is beyond the limit";
                 return nullptr;
             }
 
             // 把 Core 读进高位：每轮读不超过弹跳窗口的一段，再从低地址整段拷上去
-            bool ReadCoreImage(uint32_t sectorBytes, uint32_t bounce, uint32_t fileOffset, uint32_t bytes) {
-                for (uint32_t done = 0; done < bytes; done += kBounceBytes) {
+            // 段内都是整扇区，读盘按起始 LBA 逐段递进，不做字节与扇区的换算
+            bool ReadCoreImage(uint32_t sectorBytes, uint32_t bounce, uint32_t fileLba, uint32_t bytes) {
+                const uint32_t shift = SectorShift(sectorBytes);
+                const uint32_t bounceSectors = kBounceBytes >> shift;
+                uint32_t lba = fileLba;
+                for (uint32_t done = 0; done < bytes; done += kBounceBytes, lba += bounceSectors) {
                     const uint32_t remain = bytes - done;
                     const uint32_t chunk = remain < kBounceBytes ? remain : kBounceBytes;
-                    const uint32_t sectors = chunk / sectorBytes;   // 整扇区；bytes 已按扇区上取整
-                    const uint32_t lba = fileOffset / sectorBytes + done / sectorBytes;
-                    if (_Bios_Read_Sectors(lba, sectors, reinterpret_cast<void*>(bounce), sectorBytes) == 0) return false;
-                    CopyUp(reinterpret_cast<uint8_t*>(kCoreLoad + done), reinterpret_cast<uint8_t*>(bounce), sectors * sectorBytes);
+                    if (_Bios_Read_Sectors(lba, chunk >> shift, reinterpret_cast<void*>(bounce), sectorBytes) == 0) return false;
+                    CopyUp(reinterpret_cast<uint8_t*>(kCoreLoad + done), reinterpret_cast<uint8_t*>(bounce), chunk);
                 }
                 return true;
             }
@@ -218,36 +230,35 @@ namespace Baleen {
         }
 
         // 读取并校验 CoreDescriptor 与 Core 镜像头、校验装载区、挑弹跳窗口，并填好交权块
-        const char* PrepareCore(uint32_t drive, uint32_t media, uint32_t sectorBytes, CoreLoadPlan& plan) {
-            uint32_t fileOffset = 0;
-            uint32_t imageBytes = 0;
-            if (const char* reason = ReadCoreDescriptor(sectorBytes, fileOffset, imageBytes)) return reason;
+        const char* PrepareCore(uint32_t drive, uint32_t media, uint32_t sectorBytes, uint32_t descriptorLba, CoreLoadPlan& plan) {
+            uint32_t fileLba = 0;
+            uint32_t fileSectors = 0;
+            if (const char* reason = ReadCoreDescriptor(sectorBytes, descriptorLba, fileLba, fileSectors)) return reason;
             ImageFacts facts;
-            if (const char* reason = ReadCoreHeader(sectorBytes, fileOffset, imageBytes, facts)) return reason;
+            if (const char* reason = ReadCoreHeader(sectorBytes, fileLba, fileSectors, facts)) return reason;
             // 读入跨度按扇区上取整：尾部填充也会写进内存，Core 不得把它当成自己的内容
-            const uint32_t sectors = (imageBytes + sectorBytes - 1) / sectorBytes;
-            const uint32_t span = sectors * sectorBytes;
+            const uint32_t span = fileSectors << SectorShift(sectorBytes);
             // 读入跨度与头声明的静态内存跨度都必须整段可用：内存图是唯一依据，不假定 1MiB 以上一定可写
             const uint32_t needBytes = facts.memoryBytes > span ? facts.memoryBytes : span;
             if (!RegionUsable(kCoreLoad, needBytes)) return "The BaleenCore load area isn't usable memory";
             const uint32_t bounce = FindBounceWindow(sectorBytes);
             if (bounce == 0) return "Find a bounce window below 1MiB";
 
-            plan.fileOffset = fileOffset;
-            plan.imageBytes = imageBytes;
+            plan.fileLba = fileLba;
+            plan.imageBytes = facts.imageBytes;
             plan.readBytes = span;
             plan.memoryBytes = facts.memoryBytes;
             plan.entryOffset = facts.entryOffset;
             plan.buildId = facts.buildId;
             plan.loadAddress = kCoreLoad;
             plan.bounceAddress = bounce;
-            FillHandoff(drive, media, sectorBytes, imageBytes, sectors);
+            FillHandoff(drive, media, sectorBytes, facts.imageBytes, fileSectors);
             return nullptr;
         }
 
         // 按 plan 把 Core 读进高位，再清零头声明的未落盘尾部
         const char* ReadCore(const CoreLoadPlan& plan, uint32_t sectorBytes) {
-            if (!ReadCoreImage(sectorBytes, plan.bounceAddress, plan.fileOffset, plan.readBytes)) return "Read BaleenCore";
+            if (!ReadCoreImage(sectorBytes, plan.bounceAddress, plan.fileLba, plan.readBytes)) return "Read BaleenCore";
             // BSS 由 Stub 清零：Core 不得依赖扇区填充或残留内容，尾部填充本身不属于 Core 内容
             ClearBytes(reinterpret_cast<uint8_t*>(plan.loadAddress + plan.imageBytes), plan.memoryBytes - plan.imageBytes);
             return nullptr;

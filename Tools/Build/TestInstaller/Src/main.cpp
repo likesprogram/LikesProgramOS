@@ -1,10 +1,10 @@
 /* main.cpp
-    MakeHdd：把磁盘一级引导（MBR）、实模式服务层、核心阶段、ESP 的 FAT 镜像与 Ext4 系统卷组装成可写入硬盘 / U 盘的磁盘镜像
+    TestInstaller：测试安装器，模拟正式安装器把 Baleen 引导链与系统卷安装到内置硬盘 / 移动硬盘 / U 盘，
+    产出可直接写入目标设备的整盘镜像；正式安装器（ISO 内运行）尚未实现，本工具是它的替代品
 
     布局（字节偏移）：
         0x000        MBR：BaleenIPL.bin 的引导代码 + 由本工具写实的分区表
-        0x22000      BootDescriptor（32 字节；512 / 2048 / 4096 单位下分别是 LBA 272 / 68 / 34）
-        0x22020      CoreDescriptor（32 字节，与上一个同扇区；Stub 读它定位核心阶段）
+        描述符区      头部 + 段序列，写到字节偏移 0x22000；由 --descs 的段产物回填后写回
         0x23000 起   原始载荷：Stub、Core 与 --raw 条目，各自 4096 对齐
         1 MiB（原始载荷越过 1 MiB 时顺延）  0 号分区：ESP 的 FAT 镜像
         ESP 之后     1 号分区：Ext4 系统卷镜像
@@ -28,23 +28,23 @@
 #include <vector>
 
 namespace {
-    using makeiso::AlignUp;
-    using makeiso::BootDescriptor;
-    using makeiso::CheckPayload;
-    using makeiso::CoreDescriptor;
-    using makeiso::FileSize;
-    using makeiso::RequireFat32Image;
-    using makeiso::Image;
-    using makeiso::JsonEscape;
-    using makeiso::JsonPlaced;
-    using makeiso::MbrPartition;
-    using makeiso::ParseNumber;
-    using makeiso::Placed;
-    using makeiso::ReadFile;
-    using makeiso::Reservations;
-    using makeiso::ImageKind;
-    using makeiso::PayloadInfo;
-    using makeiso::PayloadSummary;
+    using hostbuild::AlignUp;
+    using hostbuild::DescriptorArea;
+    using hostbuild::CheckPayload;
+    using hostbuild::BuildDescriptorArea;
+    using hostbuild::FileSize;
+    using hostbuild::RequireFat16Image;
+    using hostbuild::Image;
+    using hostbuild::JsonEscape;
+    using hostbuild::JsonPlaced;
+    using hostbuild::MbrPartition;
+    using hostbuild::ParseNumber;
+    using hostbuild::Placed;
+    using hostbuild::ReadFile;
+    using hostbuild::Reservations;
+    using hostbuild::ImageKind;
+    using hostbuild::PayloadInfo;
+    using hostbuild::PayloadSummary;
 
     constexpr uint64_t kMbrBytes = 512;        // 分区项从 446 起，510 起是 0xAA55
     constexpr uint64_t kEntryBytes = 16 * 4;   // 分区表 4 项，每项 16 字节
@@ -53,7 +53,12 @@ namespace {
     // 引导载荷起点：描述符区（0x22000 起两枚描述符）之后，512 与 4096 两种单位下都安全
     constexpr uint64_t kRawStart = 0x23000;
     // 与 Ipl/Src/Mbr.asm 分区项 0 的占位 LBA 2048（512 字节单位）一致：ESP 优先落在 1 MiB
-    constexpr uint64_t kEspPreferredOffset = 1u << 20;
+    // ESP 的两份位置：0xEF 分区项的起始 LBA 固定按 512 字节单位写 2048，与 Ipl/Src/Mbr.asm 的占位值一致。
+    // 512e 固件按 512 解释该项、读到 1 MiB，4Kn 固件按 4096 解释同一项、读到 8 MiB；
+    // 两处各放一份同样的 FAT 卷，同一份产物写进两种设备都能被固件找到 ESP
+    constexpr uint64_t kEspPartitionLba = 2048;                  // 0xEF 项的起始 LBA，固定 512 单位
+    constexpr uint64_t kEspOffset512 = kEspPartitionLba * 512;   // 512e 固件读到的位置：1 MiB
+    constexpr uint64_t kEspOffset4Kn = kEspPartitionLba * 4096;  // 4Kn 固件读到的位置：8 MiB
     // 镜像总长默认对齐粒度
     constexpr uint64_t kDefaultPadTo = 1u << 20;
 
@@ -68,6 +73,7 @@ namespace {
         std::string manifest;                                              // 构建清单输出路径
         uint64_t pad_to = kDefaultPadTo;                                   // 镜像总长的对齐粒度
         uint32_t sector_bytes = 512;                                       // 目标磁盘的逻辑扇区大小：512 或 4096
+        std::string descs = "Packages/Baleen/Common/Out/Descs";            // 描述符段产物目录：头部与各段拆开，本工具只回填起止位置
         bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
         bool core_unchecked = false;                                       // 是否免除 Core 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
@@ -76,22 +82,25 @@ namespace {
 
     // 分区
     struct Partitions {
-        std::optional<Placed> esp;             // 0 号槽：类型 0xEF
+        std::optional<Placed> esp;             // 0 号槽：类型 0xEF（512e 位置：1 MiB）
+        std::optional<Placed> esp_4kn;         // 0 号槽的同一份镜像（4Kn 位置：8 MiB）
         std::optional<Placed> system_volume;   // 1 号槽：类型 0x83
     };
 
     // 打印用法
     void Usage() {
         std::cout <<
-            "MakeHdd — Baleen 磁盘引导介质（MBR + ESP + Ext4）组装器\n"
+            "TestInstaller — 测试安装器：模拟正式安装器，产出可写入内置硬盘 / 移动硬盘 / U 盘的整盘镜像\n"
+            "（MBR + ESP + Ext4；正式安装器实现前，本工具代替它把系统装到最终产品上）\n"
             "\n"
-            "用法：MakeHdd --out <镜像> --mbr <BaleenIPL.bin> [选项]\n"
+            "用法：TestInstaller --out <镜像> --mbr <BaleenIPL.bin> [选项]\n"
             "\n"
             "载荷：\n"
             "  --mbr PATH                磁盘一级引导（BaleenIPL.bin，512 字节、带 0xAA55）\n"
-            "  --stub PATH               实模式服务层：原始扇区放置并写 BootDescriptor\n"
-            "  --core PATH               核心阶段：原始扇区放置并写 CoreDescriptor（位置进清单）\n"
-            "  --esp PATH                ESP 的 FAT32 镜像（含 \\EFI\\BOOT\\BOOTX64.EFI），0 号分区\n"
+            "  --stub PATH               实模式服务层：原始扇区放置，位置写进描述符区\n"
+            "  --core PATH               核心阶段：原始扇区放置，位置写进描述符区\n"
+            "  --descs DIR               描述符段产物目录（默认 Packages/Baleen/Common/Out/Descs）\n"
+            "  --esp PATH                ESP 的 FAT16 镜像（含 \\EFI\\BOOT\\BOOTX64.EFI），0 号分区\n"
             "  --system-volume PATH      Ext4 系统卷镜像，1 号分区\n"
             "  --raw 宿主路径[@偏移]      原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
             "  --stub-unchecked          免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
@@ -119,6 +128,7 @@ namespace {
             else if (arg == "--out") options.out = needValue(i, arg);
             else if (arg == "--mbr") options.mbr = needValue(i, arg);
             else if (arg == "--stub") options.stub = needValue(i, arg);
+            else if (arg == "--descs") options.descs = needValue(i, arg);
             else if (arg == "--core") options.core = needValue(i, arg);
             else if (arg == "--esp") options.esp = needValue(i, arg);
             else if (arg == "--system-volume") options.system_volume = needValue(i, arg);
@@ -147,13 +157,13 @@ namespace {
         if (mbr[510] != 0x55 || mbr[511] != 0xAA) throw std::runtime_error("MBR 缺少 0xAA55 引导签名：" + options.mbr);
         if (!options.stub.empty()) {
             const uint64_t bytes = FileSize(options.stub);
-            if (bytes == 0 || bytes > BootDescriptor::kMaxStubBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 0x10000-0x7E00：" + options.stub);
+            if (bytes == 0 || bytes > DescriptorArea::kMaxStubBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 0x10000-0x7E00：" + options.stub);
         }
         if (!options.core.empty() && FileSize(options.core) == 0) throw std::runtime_error("核心阶段载荷为空：" + options.core);
         if (!options.esp.empty()) {
             if (FileSize(options.esp) == 0) throw std::runtime_error("ESP 镜像为空：" + options.esp);
-            // ESP 写死为 FAT32：UEFI 固件读它，内核必备的 FAT32 实现也读它
-            RequireFat32Image(options.esp, "ESP 镜像");
+            // ESP 必须是 FAT16：双 ESP 布局要求它同时落在 1 MiB 与 8 MiB、体积不超过 7 MiB
+            RequireFat16Image(options.esp, "ESP 镜像");
         }
         if (!options.system_volume.empty() && FileSize(options.system_volume) == 0) throw std::runtime_error("系统卷镜像为空：" + options.system_volume);
         if (options.pad_to == 0 || options.pad_to % kAlign != 0) throw std::runtime_error("--pad-to 必须是 4096 的正整数倍");
@@ -180,7 +190,7 @@ int main(int argc, char** argv) {
 
         Image image(options.out);
         Reservations reserved;
-        reserved.Reserve("MBR 与 BootDescriptor 区", 0, kRawStart);
+        reserved.Reserve("MBR 与引导区", 0, kRawStart);
         uint64_t cursor = kRawStart;
         // 按 2048 对齐分配一段连续空间并登记占用
         const auto place = [&](const std::string& name, uint64_t bytes) {
@@ -211,19 +221,22 @@ int main(int argc, char** argv) {
         Partitions partitions;
         if (!options.esp.empty()) {
             const uint64_t bytes = FileSize(options.esp);
-            const uint64_t offset = cursor <= kEspPreferredOffset ? AlignUp(cursor, kEspPreferredOffset) : AlignUp(cursor, kAlign);
-            const Placed placed{"ESP 的 FAT32 镜像", offset, bytes};
-            reserved.Reserve(placed.name, placed.offset, AlignUp(bytes, kAlign));
-            cursor = placed.offset + AlignUp(bytes, kAlign);
-            partitions.esp = placed;
-        } else std::cerr << "MakeHdd: 未提供 --esp，0 号分区留空，UEFI 侧无法从该镜像启动\n";
+            const uint64_t span = AlignUp(bytes, kAlign);
+            if (kEspOffset512 + span > kEspOffset4Kn) throw std::runtime_error("ESP 镜像过大：1 MiB 处那份会盖住 8 MiB 处的位置（上限 7 MiB）");
+            partitions.esp = Placed{"ESP 的 FAT16 镜像（512e 位置）", kEspOffset512, bytes};
+            partitions.esp_4kn = Placed{"ESP 的 FAT16 镜像（4Kn 位置）", kEspOffset4Kn, bytes};
+            reserved.Reserve(partitions.esp->name, kEspOffset512, span);
+            reserved.Reserve(partitions.esp_4kn->name, kEspOffset4Kn, span);
+            // 0xEF 分区项在 4Kn 视角下的范围是 [8 MiB, 8 MiB + 扇区数 × 4096)，后续内容让开它
+            cursor = kEspOffset4Kn + (bytes + 511) / 512 * 4096;
+        } else std::cerr << "TestInstaller: 未提供 --esp，0 号分区留空，UEFI 侧无法从该镜像启动\n";
         if (!options.system_volume.empty()) {
             const uint64_t bytes = FileSize(options.system_volume);
             const Placed placed{"Ext4 系统卷", AlignUp(cursor, kAlign), bytes};
             reserved.Reserve(placed.name, placed.offset, AlignUp(bytes, kAlign));
             cursor = placed.offset + AlignUp(bytes, kAlign);
             partitions.system_volume = placed;
-        } else std::cerr << "MakeHdd: 未提供 --system-volume，1 号分区留空，引导链没有系统卷可读\n";
+        } else std::cerr << "TestInstaller: 未提供 --system-volume，1 号分区留空，引导链没有系统卷可读\n";
         const uint64_t total = AlignUp(cursor, options.pad_to);
 
         // MBR：保留引导代码，分区表由本工具写实（四个槽位先清空，再写有内容的槽位）
@@ -235,60 +248,45 @@ int main(int argc, char** argv) {
         std::fill(mbr.begin() + 446, mbr.begin() + 446 + kEntryBytes, 0);
         std::vector<MbrPartition> written;
         if (partitions.esp.has_value()) {
-            makeiso::WriteMbrEntry(std::span<uint8_t, kMbrBytes>(mbr.data(), mbr.size()), 0, MbrPartition{0xEF, partitions.esp->offset, partitions.esp->bytes}, options.sector_bytes);
-            written.push_back(MbrPartition{0xEF, partitions.esp->offset, partitions.esp->bytes});
+            // 0xEF 项固定按 512 字节单位写：512e 与 4Kn 固件从同一个值分别读到 1 MiB 与 8 MiB 处的两份 ESP
+            hostbuild::WriteMbrEntry(std::span<uint8_t, kMbrBytes>(mbr.data(), mbr.size()), 0, MbrPartition{0xEF, kEspOffset512, partitions.esp->bytes}, 512);
+            written.push_back(MbrPartition{0xEF, kEspOffset512, partitions.esp->bytes});
         }
         if (partitions.system_volume.has_value()) {
-            makeiso::WriteMbrEntry(std::span<uint8_t, kMbrBytes>(mbr.data(), mbr.size()), 1, MbrPartition{0x83, partitions.system_volume->offset, partitions.system_volume->bytes}, options.sector_bytes);
+            hostbuild::WriteMbrEntry(std::span<uint8_t, kMbrBytes>(mbr.data(), mbr.size()), 1, MbrPartition{0x83, partitions.system_volume->offset, partitions.system_volume->bytes}, options.sector_bytes);
             written.push_back(MbrPartition{0x83, partitions.system_volume->offset, partitions.system_volume->bytes});
         }
+        // 描述符区位置槽不回填：槽里是 512 字节基准地址，与目标设备的逻辑扇区单位无关，编译期默认值即正确值
         image.Write(0, mbr);
 
-        std::optional<std::array<uint8_t, 32>> descriptor;
-        if (stub.has_value()) {
-            BootDescriptor boot;
-            boot.stub_offset = stub->offset;
-            boot.stub_bytes = stub->bytes;
-            descriptor = makeiso::EncodeBootDescriptor(boot, options.sector_bytes);
-            image.Write(BootDescriptor::kImageOffset, *descriptor);
-        } else std::cerr << "MakeHdd: 未提供 --stub，不写 BootDescriptor，BIOS 路径无法装载 Stub\n";
-
-        // CoreDescriptor 与 BootDescriptor 同扇区：Stub 从同一扇区读到两者，缺它 Stub 不再往下装载
-        std::optional<std::array<uint8_t, 32>> core_descriptor;
-        if (core.has_value()) {
-            CoreDescriptor coreDescriptor;
-            coreDescriptor.core_offset = core->offset;
-            coreDescriptor.core_bytes = core->bytes;
-            core_descriptor = makeiso::EncodeCoreDescriptor(coreDescriptor, options.sector_bytes);
-            image.Write(CoreDescriptor::kImageOffset, *core_descriptor);
-        } else std::cerr << "MakeHdd: 未提供 --core，不写 CoreDescriptor，Stub 无法装载核心阶段\n";
+        // 描述符区：读段产物、回填起止位置后写到约定位置；本工具不生成描述符结构
+        if (stub.has_value() || core.has_value()) {
+            const std::vector<uint8_t> area = hostbuild::BuildDescriptorArea(options.descs, stub ? &*stub : nullptr, core ? &*core : nullptr);
+            image.Write(hostbuild::DescriptorArea::kWriteOffset, area);
+        } else std::cerr << "TestInstaller: 未提供 --stub 与 --core，不写描述符区，BIOS 路径无法装载\n";
 
         if (stub.has_value()) image.CopyFile(stub->offset, options.stub);
         if (core.has_value()) image.CopyFile(core->offset, options.core);
         for (const Placed& placed : raw) image.CopyFile(placed.offset, placed.name);
+        // 同一份 ESP 写两处：512e 与 4Kn 固件各自从自己读到的那份挂载
         if (partitions.esp.has_value()) image.CopyFile(partitions.esp->offset, options.esp);
+        if (partitions.esp_4kn.has_value()) image.CopyFile(partitions.esp_4kn->offset, options.esp);
         if (partitions.system_volume.has_value()) image.CopyFile(partitions.system_volume->offset, options.system_volume);
         image.ExtendTo(total);
 
         // 清单与摘要
         std::string manifest = "{\n";
-        manifest += "  \"tool\": \"MakeHdd\",\n";
+        manifest += "  \"tool\": \"TestInstaller\",\n";
         manifest += "  \"total_bytes\": " + std::to_string(total) + ",\n";
         manifest += "  \"sector_bytes\": " + std::to_string(options.sector_bytes) + ",\n";
         manifest += "  \"total_sectors\": " + std::to_string(total / options.sector_bytes) + ",\n";
         manifest += "  \"mbr\": {\"offset\": 0, \"bytes\": " + std::to_string(kMbrBytes) + "},\n";
-        if (descriptor.has_value()) {
-            manifest += "  \"descriptor\": {\"offset\": " + std::to_string(BootDescriptor::kImageOffset) +
-                        ", \"bytes\": " + std::to_string(BootDescriptor::kHeaderBytes) +
-                        ", \"stub_offset\": " + std::to_string(stub->offset) +
-                        ", \"stub_bytes\": " + std::to_string(stub->bytes) + "},\n";
-        } else manifest += "  \"descriptor\": null,\n";
-        if (core_descriptor.has_value()) {
-            manifest += "  \"core_descriptor\": {\"offset\": " + std::to_string(CoreDescriptor::kImageOffset) +
-                        ", \"bytes\": " + std::to_string(CoreDescriptor::kHeaderBytes) +
-                        ", \"core_offset\": " + std::to_string(core->offset) +
-                        ", \"core_bytes\": " + std::to_string(core->bytes) + "},\n";
-        } else manifest += "  \"core_descriptor\": null,\n";
+        // 描述符区由 --descs 的段产物拼成，这里只记录本区写在哪；位置字段以 512 字节为基准
+        if (stub.has_value() || core.has_value()) {
+            manifest += "  \"descriptor_area\": {\"offset\": " + std::to_string(DescriptorArea::kWriteOffset) +
+                        ", \"base_bytes\": " + std::to_string(1u << DescriptorArea::kBaseShift) +
+                        ", \"descs\": \"" + JsonEscape(options.descs) + "\"},\n";
+        } else manifest += "  \"descriptor_area\": null,\n";
         manifest += "  \"stub\": " + JsonPlaced(stub.has_value() ? &*stub : nullptr) + ",\n";
         manifest += "  \"core\": " + JsonPlaced(core.has_value() ? &*core : nullptr) + ",\n";
         // 可选的载荷统一转成清单里的 JSON 片段
@@ -296,6 +294,7 @@ int main(int argc, char** argv) {
             return JsonPlaced(placed.has_value() ? &*placed : nullptr);
         };
         manifest += "  \"esp\": " + jsonPlaced(partitions.esp) + ",\n";
+        manifest += "  \"esp_4kn\": " + jsonPlaced(partitions.esp_4kn) + ",\n";
         manifest += "  \"system_volume\": " + jsonPlaced(partitions.system_volume) + ",\n";
         manifest += "  \"raw\": [";
         for (std::size_t i = 0; i < raw.size(); ++i) {
@@ -321,16 +320,17 @@ int main(int argc, char** argv) {
             if (!out || !(out << manifest)) throw std::runtime_error("无法写清单：" + options.manifest);
         }
 
-        std::cout << "MakeHdd：已生成 " << options.out << "（" << total << " 字节，" << total / options.sector_bytes << " 个 " << options.sector_bytes << " 字节扇区）\n";
-        if (descriptor.has_value()) std::cout << "  BootDescriptor 偏移 " << BootDescriptor::kImageOffset << "，Stub 偏移 " << stub->offset << "，Stub 字节 " << stub->bytes << "\n";
+        std::cout << "TestInstaller：已生成 " << options.out << "（" << total << " 字节，" << total / options.sector_bytes << " 个 " << options.sector_bytes << " 字节扇区）\n";
+        if (stub.has_value() || core.has_value()) std::cout << "  描述符区    偏移 " << DescriptorArea::kWriteOffset << "，段产物目录 " << options.descs << "\n";
+        if (stub.has_value()) std::cout << "  Stub 载荷   偏移 " << stub->offset << "，字节 " << stub->bytes << "\n";
         if (stub.has_value()) std::cout << "  Stub 载荷：" << PayloadSummary(stubInfo) << "\n";
-        if (core_descriptor.has_value()) std::cout << "  CoreDescriptor 偏移 " << CoreDescriptor::kImageOffset << "，Core 偏移 " << core->offset << "，Core 字节 " << core->bytes << "\n";
+        if (core.has_value()) std::cout << "  Core 载荷   偏移 " << core->offset << "，字节 " << core->bytes << "\n";
         if (core.has_value()) std::cout << "  Core 载荷：" << PayloadSummary(coreInfo) << "\n";
-        if (partitions.esp.has_value()) std::cout << "  0 号分区    ESP（0xEF）偏移 " << partitions.esp->offset << "，字节 " << partitions.esp->bytes << "\n";
+        if (partitions.esp.has_value()) std::cout << "  0 号分区    ESP（0xEF）偏移 " << partitions.esp->offset << " 与 " << partitions.esp_4kn->offset << "，字节 " << partitions.esp->bytes << "（两份）\n";
         if (partitions.system_volume.has_value()) std::cout << "  1 号分区    Ext4（0x83）偏移 " << partitions.system_volume->offset << "，字节 " << partitions.system_volume->bytes << "\n";
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "MakeHdd: " << error.what() << "\n";
+        std::cerr << "TestInstaller: " << error.what() << "\n";
         return 1;
     }
 }

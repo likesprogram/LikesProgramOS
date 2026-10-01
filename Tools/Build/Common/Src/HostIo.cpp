@@ -8,7 +8,7 @@
 #include <fstream>
 #include <stdexcept>
 
-namespace makeiso {
+namespace hostbuild {
     uint64_t FileSize(const std::string& path) {
         std::error_code error;
         const uint64_t size = std::filesystem::file_size(path, error);
