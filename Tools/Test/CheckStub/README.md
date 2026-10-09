@@ -3,7 +3,7 @@
 宿主侧 C++20 回归工具：用真实的 IPL 与 Stub 产物加内嵌探针 BaleenCore 组装镜像，在 QEMU 里核对 Stub 阶段的行为与失败路径。编译后输出 `Tools/Bin/CheckStub`。**手工执行，不构成默认构建依赖。**
 
 ```sh
-make -C Tools/Build/CheckStub
+make -C Tools/Test/CheckStub
 Tools/Bin/CheckStub --stub-dir Packages/Baleen/Stub/Out/Bin --ipl-dir Packages/Baleen/Ipl/Out/Bin
 # 实模式栈探针：先建探针版 Stub（产物在 Out/Probe/Bin），再附加三例核对判定行
 make -C Packages/Baleen/Stub STACK_PROBE=1

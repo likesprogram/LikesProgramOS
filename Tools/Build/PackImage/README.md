@@ -43,4 +43,4 @@ Digest  = SHA-256(镜像字节，Digest 字段代入 32 个零、BuildId 已填�
 
 `--verify` 与填充后的复核都检查：格式标记、版本、头长或数据长度、标志位、摘要算法、`BuildId` 长度、保留字段、`ImageBytes` 与实际文件长度一致、文件不超过该类别的长度上限（Stub 为两种入口共用的 `0x8000`，BaleenCore 为 `0x400000`，内核镜像为 `0x800000`）、入口落在数据或头之后与文件之内、Baleen 镜像的入口前缀与 `EntryOffset` 一致、内核镜像的 `MemoryBytes` 覆盖文件且 `LoadAddress` 按 2MiB 对齐、以及整幅镜像的 SHA-256 摘要。任一项不通过即返回非零，镜像保持原样（填充失败时也不会写回）。
 
-组装侧的门禁在 `Tools/Build/Common` 的 `BaleenImage`：`MakeImage` 与 `TestInstaller` 放置 Stub 与 BaleenCore 时对带头载荷做同样的校验并记录 `BuildId`；占位内容同样要校验头与摘要，只有完全没有头的开发占位件与显式 `--stub-unchecked` / `--core-unchecked` 的载荷才放行，被放行的载荷不构成对正式产物的检查。
+组装侧的门禁在 `Tools/Common` 的 `BaleenImage`：`MakeImage` 与 `TestInstaller` 放置 Stub 与 BaleenCore 时对带头载荷做同样的校验并记录 `BuildId`；占位内容同样要校验头与摘要，只有完全没有头的开发占位件与显式 `--stub-unchecked` / `--core-unchecked` 的载荷才放行，被放行的载荷不构成对正式产物的检查。

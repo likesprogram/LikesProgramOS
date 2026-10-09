@@ -1,6 +1,6 @@
 #!/bin/sh
 # MakeCompileDb.sh
-#    扫描各包的 Makefile，取 C++ 编译命令写出 compile_commands.json
+#    扫描各包与各工具的 Makefile，取 C++ 编译命令写出 compile_commands.json
 #
 #    用法：MakeCompileDb.sh [输出文件]；默认在项目根写 compile_commands.json
 #    命令取自 make -B -n 的干跑输出，编译选项与真实构建同源；
@@ -81,7 +81,7 @@ entry() {
 printf '[\n' > "$db"
 first=1
 entries=0
-for mk in Packages/*/Makefile Packages/*/*/Makefile Tools/Build/*/Makefile; do
+for mk in Packages/*/Makefile Packages/*/*/Makefile Tools/*/Makefile Tools/*/*/Makefile; do
     if [ ! -f "$mk" ]; then continue; fi
     pkg_dir=${mk%/Makefile}
     if ! LC_ALL=C make -C "$pkg_dir" -w -B -n all > "$dry" 2>&1; then

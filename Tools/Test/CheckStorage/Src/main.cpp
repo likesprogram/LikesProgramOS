@@ -686,7 +686,7 @@ extern "C" void Storage_Target_Entry() {
     int Check32Bit(const fs::path& root, const std::string& cxx, const fs::path& work) {
         const fs::path storageSrc = root / "Packages/Common/Src/Storage";
         const fs::path storageInc = root / "Packages/Common/Include";
-        const fs::path selfSrc = root / "Tools/Build/CheckStorage/Src/main.cpp";
+        const fs::path selfSrc = root / "Tools/Test/CheckStorage/Src/main.cpp";
         Require(fs::exists(storageSrc / "Path.cpp"), "找不到 Storage 源码：" + storageSrc.string());
         Require(fs::exists(storageInc / "Storage/Path.hpp"), "找不到 Storage 头文件：" + storageInc.string());
         Require(fs::exists(selfSrc), "找不到本工具源码：" + selfSrc.string());

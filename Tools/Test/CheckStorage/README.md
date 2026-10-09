@@ -3,7 +3,7 @@
 宿主侧 C++20 检查工具：核对 S1 存储抽象的接口与共用实现——统一路径、共用名字比较、偏移视图与错误文本，并验证同一份源码在 32 位与 64 位下的编译、链接与运行。编译后输出 `Tools/Bin/CheckStorage`。**手工执行，不构成默认构建依赖**，用例与检查逻辑内嵌在源码里。
 
 ```sh
-make -C Tools/Build/CheckStorage
+make -C Tools/Test/CheckStorage
 Tools/Bin/CheckStorage                 # 全部检查
 Tools/Bin/CheckStorage --cases-only    # 只跑用例，跳过双编译检查
 ```

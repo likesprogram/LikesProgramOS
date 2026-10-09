@@ -4,7 +4,7 @@
 
 源码分工沿用 Stub 的约定：`Src/Core.cpp` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都在这一段里；`Src/Console.cpp` 只做 BaleenCore 控制台的装配（VGA 文本、`0xE9` 与 COM1 三路组合，是独立于 Stub 的实例），不打印也不停机；`Src/Ext4.cpp` 是 Ext4 只读最小实现，`Src/BiosBlockDevice.cpp` 把交权块的读盘服务包成块设备（低 1MiB 中转窗口在此完成），`Src/LoadKernel.cpp` 定位、校验并装载内核镜像（读首块核对内核镜像数据、流式比对整幅摘要、核对装载区、整幅读进装载地址），`Src/Libc.cpp` 提供无运行库环境引用的最小 C 运行库函数；`Src/Core.asm` 是入口、异常桩、交接入口与自己的栈，不做诊断排版；`Include/CoreHeader.inc` 与 `Include/Const.inc` 是汇编侧常量。
 
-**当前实现到内核交接为止**：横幅、交权块校验、镜像事实交叉核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷偏移视图与 Ext4 只读挂载（含卷标识核对）、按布局描述给的路径定位内核镜像、读取并校验内核镜像数据与整幅摘要（含装载区落点检查）、装载到装载地址并清零未落盘尾部、构造 BootInfo 与恒等映射页表、切长模式进入内核都已可用；内核集选版与持久状态、签名验证、引导状态区域的写入路径尚未实现（第三节）。内核镜像数据的字节表见[内核镜像数据](../../../Docs/Specs/Baleen/内核镜像数据.md)，内核侧入口见[内核侧 Core 说明](../../LikesProgramOS/Core/README.md)。Ext4 只读实现的边界与验证见 [CheckExt4](../../../Tools/Build/CheckExt4/README.md)。构建：`make -C Packages/Baleen/Core` 产出 `Out/Bin/BaleenCore.bin`，`make check` 复核长度上限、头字段与摘要，顶层组装按真实产物优先取用。
+**当前实现到内核交接为止**：横幅、交权块校验、镜像事实交叉核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷偏移视图与 Ext4 只读挂载（含卷标识核对）、按布局描述给的路径定位内核镜像、读取并校验内核镜像数据与整幅摘要（含装载区落点检查）、装载到装载地址并清零未落盘尾部、构造 BootInfo 与恒等映射页表、切长模式进入内核都已可用；内核集选版与持久状态、签名验证、引导状态区域的写入路径尚未实现（第三节）。内核镜像数据的字节表见[内核镜像数据](../../../Docs/Specs/Baleen/内核镜像数据.md)，内核侧入口见[内核侧 Core 说明](../../LikesProgramOS/Core/README.md)。Ext4 只读实现的边界与验证见 [CheckExt4](../../../Tools/Test/CheckExt4/README.md)。构建：`make -C Packages/Baleen/Core` 产出 `Out/Bin/BaleenCore.bin`，`make check` 复核长度上限、头字段与摘要，顶层组装按真实产物优先取用。
 
 ## 一、入口与镜像
 

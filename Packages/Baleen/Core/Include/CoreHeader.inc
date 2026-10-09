@@ -4,7 +4,7 @@
 ;    头的布局与固定取值由 Baleen/Common 的 ImageHeader.hpp 单点定义，Stub 与 BaleenCore 同构，
 ;    本文件与 Stub 的 StubHeader.inc 的差别只有格式标记；C++ 侧不再另设头文件，
 ;    这里只保留汇编需要的字面量与字节表编号，取值与宿主侧
-;    Tools/Build/Common/Include/BaleenImage.h 必须一致，改动要同时同步
+;    Tools/Common/Include/BaleenImage.h 必须一致，改动要同时同步
 
 CORE_HEAD_OFFSET    EQU 0x10     ; 头相对文件起点的偏移
 CORE_HEAD_BYTES     EQU 0x80     ; 头固定长度

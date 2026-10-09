@@ -94,7 +94,7 @@ finish() {
 }
 
 if [ ! -x "$helper" ]; then
-    missing 9 "缺少运行辅助工具 $helper；先 make -C Tools/Build/RunBootCase"
+    missing 9 "缺少运行辅助工具 $helper；先 make -C Tools/Test/RunBootCase"
     finish
 fi
 

@@ -4,7 +4,8 @@
 #      make                       构建 Out/LikesProgram.iso 与 Out/LikesProgram.hdd
 #      make iso | hdd             只构建其中一件
 #      make packages              只跑 Packages 下已有的子 Makefile
-#      make tools                 只构建 Tools 下的宿主工具（产物在 Tools/Bin，随源码交付）
+#      make tools                 只构建 Tools/Build 下的构建期工具（产物在 Tools/Bin，随源码交付）
+#      make test-tools            只构建 Tools/Test 下的测试与回归工具（手工执行，不进入默认构建）
 #      make run [介质] [模拟器] [形态] [固件]
 #                                 启动镜像。四个位置参数都可省，默认 hdd qemu built bios：
 #                                   介质：hdd（默认）| iso
@@ -19,7 +20,7 @@
 #                                 与 run 同一套位置参数，区别只在画面：run 不开窗口，
 #                                 run-win 开本地窗口（QEMU 挑可用的 gtk/sdl，Bochs 用 wx）
 #                                 例：make run-win hdd qemu built bios / make run-win iso qemu built uefi
-#      make clean                 删除顶层 Out/；make clean-all 连同子包与工具的产物
+#      make clean                 删除顶层 Out/；make clean-all 连同子包与两类工具的产物
 #
 #    载荷来源：各子包的真实产物优先，缺失时用 Tools/Bin/MakePayloads 生成的占位件
 #    （EFI 引导镜像尚用占位件；系统卷由 Packages/LikesProgramOS 生成并含内核映像；
@@ -46,8 +47,10 @@ DESC_DIR      ?= Packages/Baleen/Common/Out/Descs
 # —— 子包与宿主工具 ——
 # 所有子包的 Makefile
 SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
-# 需要构建的宿主工具目录
-TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl Tools/Build/CheckStub Tools/Build/CheckStorage Tools/Build/CheckExt4
+# 构建期宿主工具目录：默认构建与镜像组装依赖它们，缺失会直接失败
+TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage
+# 测试与回归工具目录：手工执行，不进入默认构建
+TEST_TOOL_DIRS := Tools/Test/CheckIpl Tools/Test/CheckStub Tools/Test/CheckStorage Tools/Test/CheckExt4 Tools/Test/RunBootCase
 
 # —— 载荷：真实产物优先，缺失时退到占位件 ——
 # 一级引导产物目录
@@ -166,7 +169,7 @@ RUN_WINDOWED := $(filter run-win,$(MAKECMDGOALS))
 RUN_LABEL := $(if $(RUN_WINDOWED),run-win,run)
 
 .DEFAULT_GOAL := all
-.PHONY: all images iso hdd packages tools compile-db payloads payload-report run run-win run-check run-uefi clean clean-all help qemu bochs built usb bios uefi
+.PHONY: all images iso hdd packages tools test-tools compile-db payloads payload-report run run-win run-check run-uefi clean clean-all help qemu bochs built usb bios uefi
 
 # 默认目标
 all: images
@@ -186,9 +189,13 @@ qemu bochs built usb bios uefi: ;
 packages:
 	@for mk in $(SUBPACKAGE_MAKEFILES); do echo "== $(MAKE) -C $$(dirname $$mk)"; $(MAKE) -C "$$(dirname $$mk)" || exit 1; done
 
-# 构建 Tools 下的宿主工具
+# 构建 Tools/Build 下的构建期工具
 tools:
 	@for dir in $(TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
+
+# 构建 Tools/Test 下的测试与回归工具：手工执行，不进入默认构建
+test-tools:
+	@for dir in $(TEST_TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
 
 # 生成 compile_commands.json：扫描子包与工具的编译命令，供 clangd 与编辑器取用
 compile-db:
@@ -322,10 +329,10 @@ clean:
 	@test -n "$(OUT_DIR)" || { echo "clean: OUT_DIR 为空，拒绝执行"; exit 1; }
 	rm -rf $(OUT_DIR)
 
-# 连同子包与工具的产物一起删除
+# 连同子包与两类工具的产物一起删除
 clean-all: clean
 	@for mk in $(SUBPACKAGE_MAKEFILES); do $(MAKE) -C "$$(dirname $$mk)" clean || exit 1; done
-	@for dir in $(TOOL_DIRS); do $(MAKE) -C "$$dir" clean || exit 1; done
+	@for dir in $(TOOL_DIRS) $(TEST_TOOL_DIRS); do $(MAKE) -C "$$dir" clean || exit 1; done
 
 # 打印用法
 help:
@@ -333,7 +340,8 @@ help:
 	    'LikesProgramOS 顶层构建' \
 	    '  make                   构建 $(ISO) 与 $(HDD)' \
 	    '  make iso | hdd         只构建其中一件' \
-	    '  make packages|tools    只跑子包或只建宿主工具' \
+	    '  make packages|tools|test-tools' \
+	    '                         只跑子包、只建 Tools/Build 的构建期工具或 Tools/Test 的测试工具' \
 	    '  make compile-db        扫描各包写出 compile_commands.json（clangd 与编辑器用）' \
 	    '  make run [介质] [模拟器] [形态] [固件]' \
 	    '                         介质 hdd|iso（默认 hdd）；模拟器 qemu|bochs（默认 qemu，Bochs 只支持 BIOS）；' \
@@ -348,6 +356,6 @@ help:
 	    '                         例：make run-win hdd qemu built bios' \
 	    '                         显示方式可覆盖：QEMU_DISPLAY_WIN= / BOCHS_DISPLAY_WIN=' \
 	    '  make run-uefi          = make run iso qemu built uefi' \
-	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与工具' \
+	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与两类工具' \
 	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；只影响 Ext4 分区项，ESP 固定双份' \
 	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME（默认取真实产物，缺失时用占位件）；LAYOUT 为可选的布局描述模板'

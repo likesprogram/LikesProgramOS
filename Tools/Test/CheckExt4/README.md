@@ -3,7 +3,7 @@
 宿主侧 C++20 检查工具：核对 BaleenCore 的 Ext4 只读实现（`Packages/Baleen/Core/Src/Ext4.cpp`）与块设备适配器（`BiosBlockDevice.cpp`）。编译后输出 `Tools/Bin/CheckExt4`。**手工执行，不构成默认构建依赖**；用例内嵌在源码里，夹具由 `mke2fs` 现场生成。
 
 ```sh
-make -C Tools/Build/CheckExt4
+make -C Tools/Test/CheckExt4
 Tools/Bin/CheckExt4
 Tools/Bin/CheckExt4 --work /tmp/checkext4 --keep
 ```

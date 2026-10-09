@@ -106,7 +106,7 @@ Stub 分两步核对，任一项不通过都停机，不跳转：
 
 ### 3.1 生成责任
 
-整数的字节序与填充由字节表固定：均以小端序逐字节编码，不允许编译器插入填充；解析时须核对格式标记、头长、摘要算法与保留字段，不能对不认识的结构猜测读取。各字段的填出方：`Src/Stub.asm` 组装 Magic、版本、头长、标志、入口、算法与保留字段；链接器按 `__image_end` 与 `__bss_end` 填 `ImageBytes` 与 `MemoryBytes`；`Tools/Bin/PackImage` 填 `BuildId` 与 `Digest`。运行期由 `Src/SelfCheck.cpp` 校验，宿主侧由 `Tools/Build/Common` 的 `BaleenImage` 供 PackImage 与两个组装器共用；BaleenCore 的镜像头同构，见 2.3。
+整数的字节序与填充由字节表固定：均以小端序逐字节编码，不允许编译器插入填充；解析时须核对格式标记、头长、摘要算法与保留字段，不能对不认识的结构猜测读取。各字段的填出方：`Src/Stub.asm` 组装 Magic、版本、头长、标志、入口、算法与保留字段；链接器按 `__image_end` 与 `__bss_end` 填 `ImageBytes` 与 `MemoryBytes`；`Tools/Bin/PackImage` 填 `BuildId` 与 `Digest`。运行期由 `Src/SelfCheck.cpp` 校验，宿主侧由 `Tools/Common` 的 `BaleenImage` 供 PackImage 与两个组装器共用；BaleenCore 的镜像头同构，见 2.3。
 
 `Version=1` 与 `HeaderBytes=0x80` 标识当前格式；格式变动须同步上述各处。
 
@@ -168,7 +168,7 @@ BaleenCore 的文件布局同构，只有格式标记与入口之后的代码不
 Digest = SHA-256(F[0x00:0x50] || 32 个零字节 || F[0x70:ImageBytes])
 ```
 
-这里的切片右端均不含，`||` 表示字节串拼接。`Magic`、版本、长度、入口、BuildId、所有保留字节、入口前缀、代码和落盘数据均被覆盖；只有摘要本身按规则归零，避免自引用。SHA-256 的标准依据为 NIST [Hash Functions](https://csrc.nist.gov/projects/hash-functions) 与其列出的 [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)；目标侧实现在 `Packages/Baleen/Common/Src/Sha256.cpp`，宿主侧实现在 `Tools/Build/Common/Src/Sha256.cpp`。
+这里的切片右端均不含，`||` 表示字节串拼接。`Magic`、版本、长度、入口、BuildId、所有保留字节、入口前缀、代码和落盘数据均被覆盖；只有摘要本身按规则归零，避免自引用。SHA-256 的标准依据为 NIST [Hash Functions](https://csrc.nist.gov/projects/hash-functions) 与其列出的 [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)；目标侧实现在 `Packages/Baleen/Common/Src/Sha256.cpp`，宿主侧实现在 `Tools/Common/Src/Sha256.cpp`。
 
 覆盖范围不包含介质上的描述符区、最后一个本地扇区的文件外填充、BSS、其他运行时缓冲、BaleenCore、`BaleenLayout.bin` 或内核集。
 

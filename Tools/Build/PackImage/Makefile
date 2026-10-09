@@ -7,13 +7,15 @@ OBJ_DIR    ?= Obj
 BIN_DIR    ?= ../../Bin
 # 本工具的源目录
 SRC_DIR    := Src
-# 与 MakeImage / TestInstaller 共享的代码目录
+# 构建期工具共享的代码目录（内核镜像数据的填充与校验）
 COMMON_DIR := ../Common
+# 宿主工具跨分类共享的代码目录（镜像完整性头、摘要算法与宿主文件读写）
+ROOT_COMMON_DIR := ../../Common
 
 # C++ 编译器
 CXX      ?= g++
 # 预处理选项：内核镜像数据的字段布局取自 Packages/Common 的单点定义
-CPPFLAGS ?= -I$(COMMON_DIR)/Include -I../../../Packages/Common/Include
+CPPFLAGS ?= -I$(COMMON_DIR)/Include -I$(ROOT_COMMON_DIR)/Include -I../../../Packages/Common/Include
 # 编译选项：常见警告全开并视为错误
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 # 链接选项：链接器警告视为错误
@@ -21,12 +23,12 @@ LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/PackImage
-# 目标文件：镜像视图与摘要算法在 ../Common 共享，宿主文件读写在同处
+# 目标文件：内核镜像视图在 ../Common 共享，镜像头、摘要与宿主文件读写在 ../../Common 共享
 OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/BaleenImage.o $(OBJ_DIR)/KernelImage.o $(OBJ_DIR)/Sha256.o $(OBJ_DIR)/HostIo.o
 # 头文件依赖清单
 DEPS := $(OBJS:.o=.d)
 
-vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/$(SRC_DIR)
+vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/$(SRC_DIR) $(ROOT_COMMON_DIR)/$(SRC_DIR)
 
 .DEFAULT_GOAL := all
 .PHONY: all clean help

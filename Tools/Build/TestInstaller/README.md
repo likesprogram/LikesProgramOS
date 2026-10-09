@@ -4,12 +4,12 @@ TestInstaller 是宿主侧的**测试安装器**：模拟并代替尚未实现�
 
 与正式安装器的分工：正式安装器按[启动介质与文件系统](../../../Docs/Specs/Common/启动介质与文件系统.md) 4.1 在目标机上交互式选盘、按设备报告的逻辑扇区生成分区表并写入；本工具在宿主侧把同一件事做成本地装配，产出可以用写盘工具直写的镜像。它对应[用户空间与常驻服务](../../../Docs/Specs/用户空间与常驻服务.md)第五节「布局计算与镜像组装」中的磁盘形态那一段。
 
-光盘与 U 盘混合镜像由[通用镜像制作器 MakeImage](../MakeImage/README.md) 产出；两个工具共用 `../Common` 里的描述符区、El Torito 与 MBR 分区代码，保证混合镜像与整盘镜像的引导结构只有一份实现。
+光盘与 U 盘混合镜像由[通用镜像制作器 MakeImage](../MakeImage/README.md) 产出；两个工具共用 `../Common` 里的描述符区、El Torito 与 MBR 分区代码，保证混合镜像与整盘镜像的引导结构只有一份实现；镜像完整性头与摘要算法在 [`Tools/Common`](../../Common/README.md) 共享。
 
 ## 一、构建
 
 ```
-make            # 产出 ../../Bin/TestInstaller（中间产物在 Obj/；g++，C++20，共享代码在 ../Common）
+make            # 产出 ../../Bin/TestInstaller（中间产物在 Obj/；g++，C++20，共享代码在 ../Common 与 ../../Common）
 make clean      # 删除 Obj/ 与本工具的可执行文件（Bin 与 MakeImage 共用，不删别人的）
 ```
 
@@ -95,7 +95,7 @@ TestInstaller --out LikesProgram.hdd \
 
 段序列（头部之后，按文件名排序）：每段以段头开头——标记 4 字节、版本 2 字节、段长 2 字节（含段头）。Stub 段标记 `0x52445342`（`BSDR`）、BaleenCore 段标记 `0x52444342`（`BCDR`），其后各是载荷的起始与结束位置（各 4 字节，512 字节基准，结束含在范围内）。起始位置非 0，换算成本地扇区号后必须大于描述符区扇区号，结束不早于起始，扇区数不超过各自上限。
 
-**载荷门禁**：`--stub` 与 `--core` 的载荷按各自的完整性头判定，Stub 与 BaleenCore 同构、只有格式标记与长度上限不同。带头的载荷校验格式标记、版本、头长、标志、摘要算法、`BuildId` 长度、保留字段、`ImageBytes` 与实际文件长度、该类别的长度上限（Stub 为两种入口共用的 `0x8000`，BaleenCore 为 `0x400000`）、入口前缀与 `EntryOffset` 一致、`MemoryBytes` 覆盖文件且不越界（Stub 另查低 64KiB 窗口）以及整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出，便于与构建记录对照。`MakePayloads` 生成的占位内容同样要过这套校验；完全没有头的 `PLACEHOLDER-STUB` 占位件放行并在标准错误上提示未校验。两种标识都没有的载荷默认拒绝；`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验，只给测试夹具与特殊用途，被免除校验的载荷不能算作对正式产物的检查。实现与判定规则见 [BaleenImage](../Common/README.md) 与 [PackImage](../PackImage/README.md)。
+**载荷门禁**：`--stub` 与 `--core` 的载荷按各自的完整性头判定，Stub 与 BaleenCore 同构、只有格式标记与长度上限不同。带头的载荷校验格式标记、版本、头长、标志、摘要算法、`BuildId` 长度、保留字段、`ImageBytes` 与实际文件长度、该类别的长度上限（Stub 为两种入口共用的 `0x8000`，BaleenCore 为 `0x400000`）、入口前缀与 `EntryOffset` 一致、`MemoryBytes` 覆盖文件且不越界（Stub 另查低 64KiB 窗口）以及整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出，便于与构建记录对照。`MakePayloads` 生成的占位内容同样要过这套校验；完全没有头的 `PLACEHOLDER-STUB` 占位件放行并在标准错误上提示未校验。两种标识都没有的载荷默认拒绝；`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验，只给测试夹具与特殊用途，被免除校验的载荷不能算作对正式产物的检查。实现与判定规则见 [BaleenImage](../../Common/README.md) 与 [PackImage](../PackImage/README.md)。
 
 ## 六、构建清单
 

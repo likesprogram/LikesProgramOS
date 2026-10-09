@@ -16,12 +16,12 @@ MakeImage 是宿主侧的构建期工具，也是本项目的**通用镜像制�
 
 它属于 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md) 第八节的镜像组装环节，产物形态见[启动介质与文件系统](../../../Docs/Specs/Common/启动介质与文件系统.md)第二节。
 
-工具不解析 Ext4、不装配系统卷内容，也不生成 `.os` / `.osm`：它只负责介质上的位置安排与引导结构。构建期工具用宿主格式，不属于目标系统的容器体系。整盘磁盘镜像（MBR + ESP + Ext4）由[测试安装器 TestInstaller](../TestInstaller/README.md) 产出，两者共用 `../Common` 里的描述符区、El Torito 与 MBR 代码。
+工具不解析 Ext4、不装配系统卷内容，也不生成 `.os` / `.osm`：它只负责介质上的位置安排与引导结构。构建期工具用宿主格式，不属于目标系统的容器体系。整盘磁盘镜像（MBR + ESP + Ext4）由[测试安装器 TestInstaller](../TestInstaller/README.md) 产出，两者共用 `../Common` 里的描述符区、El Torito 与 MBR 代码，镜像完整性头与摘要算法另在 [`Tools/Common`](../../Common/README.md) 共享。
 
 ## 一、构建
 
 ```
-make            # 产出 ../../Bin/MakeImage（中间产物在 Obj/；g++，C++20，共享代码在 ../Common）
+make            # 产出 ../../Bin/MakeImage（中间产物在 Obj/；g++，C++20，共享代码在 ../Common 与 ../../Common）
 make clean      # 删除 Obj/ 与本工具的可执行文件（Bin 与 TestInstaller 共用，不删别人的）
 ```
 
@@ -106,7 +106,7 @@ MakeImage --out LikesProgram.iso \
 
 段序列（头部之后，按文件名排序）：每段以段头开头——标记 4 字节、版本 2 字节、段长 2 字节（含段头）。Stub 段标记 `0x52445342`（`BSDR`）、BaleenCore 段标记 `0x52444342`（`BCDR`），其后各是载荷的起始与结束位置（各 4 字节，512 字节基准，结束含在范围内）。起始位置非 0，换算成本地扇区号后必须大于描述符区扇区号，结束不早于起始，扇区数不超过各自上限。**MBR 里的描述符区位置槽同样是 512 字节基准、保持默认 `272`**，两种引导路径（El Torito 与混合 MBR）读的是同一处描述符区，换算由各自的装载方完成。
 
-**载荷门禁**：与 TestInstaller 同一套判定，实现在 `../Common` 的 `BaleenImage`。`--stub` 与 `--core` 的带头载荷校验头字段、长度、入口前缀、内存跨度与整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出；`MakePayloads` 生成的占位内容同样要过校验，完全没有头的 `PLACEHOLDER-STUB` 占位件放行并提示；两种标识都没有的载荷默认拒绝，`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验（只给测试夹具与特殊用途）。
+**载荷门禁**：与 TestInstaller 同一套判定，实现在 [`Tools/Common`](../../Common/README.md) 的 `BaleenImage`。`--stub` 与 `--core` 的带头载荷校验头字段、长度、入口前缀、内存跨度与整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出；`MakePayloads` 生成的占位内容同样要过校验，完全没有头的 `PLACEHOLDER-STUB` 占位件放行并提示；两种标识都没有的载荷默认拒绝，`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验（只给测试夹具与特殊用途）。
 
 **El Torito**：校验项（16 字之和为 0，含 `0x55AA`）；默认项平台 BIOS、无仿真、装入段 `0x7C0`、LoadSize = `ceil(引导镜像/512)`；给 `--efi` 时追加平台 0xEF 段首部与 EFI 项，指向该小 FAT 镜像。
 

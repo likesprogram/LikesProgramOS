@@ -3,7 +3,7 @@
 宿主侧 C++20 回归工具：核对一级引导产物的静态布局，并在 QEMU 里实测 IPL 的装载、交权与失败路径。编译后输出 `Tools/Bin/CheckIpl`。**手工执行，不构成默认构建依赖**；夹具内嵌在源码里，不读取不上传的测试目录。
 
 ```sh
-make -C Tools/Build/CheckIpl
+make -C Tools/Test/CheckIpl
 Tools/Bin/CheckIpl --layout-only Packages/Baleen/Ipl/Out
 Tools/Bin/CheckIpl --ipl-dir Packages/Baleen/Ipl/Out/Bin
 ```

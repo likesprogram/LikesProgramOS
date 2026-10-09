@@ -10,7 +10,7 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | --- | --- | --- |
 | **Baleen**（引导器） | `Packages/Baleen` | 从不同硬件找到指定 Ext4 文件系统的指定路径，装载系统内核并完成交接 |
 | **LikesProgramOS**（系统本体） | `Packages/LikesProgramOS` | 操作系统本体：`LikesProgram.os` 内核 + 发行配置选择的 `.osm` 模块 |
-| 宿主侧构建工具 | `Tools/Build` | 通用镜像制作器 MakeImage、测试安装器 TestInstaller 与共享代码，可执行文件在 `Tools/Bin` |
+| 宿主侧工具 | `Tools/Build`、`Tools/Test` | 构建期工具（MakeImage、TestInstaller、MakePayloads、PackImage）与测试、回归工具（CheckIpl、CheckStub、CheckStorage、CheckExt4、RunBootCase），共享代码在 `Tools/Common` 与 `Tools/Build/Common`，可执行文件统一在 `Tools/Bin` |
 | 规格文档 | `Docs/Specs` | 各领域的正式定义；与本 README 不一致时以规格为准 |
 
 ## 设计取向
@@ -29,6 +29,7 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | --- | --- |
 | Baleen 一级引导（`Packages/Baleen/Ipl`） | 已实现：硬盘 / USB-HDD 与 El Torito 光盘两种形态，NASM 汇编，构建含尺寸硬约束检查（NASM 3.01 下 `make check` 通过）；磁盘入口按 `AH=48` 接受 512 / 4096 逻辑扇区，软盘与 USB-FDD 明确拒绝；源码、产物与运行期契约见 [Ipl 说明](Packages/Baleen/Ipl/README.md) |
 | 宿主构建工具（`Tools/Build`） | 已实现：通用镜像制作器 `MakeImage` 产出可刻录、可写盘、可挂载的 `LikesProgram.iso`，测试安装器 `TestInstaller` 产出可写入内置硬盘 / 移动硬盘 / U 盘的整盘镜像，`MakePayloads` 生成开发占位载荷；构建不依赖测试目录；用法见[工具 README](Tools/Build/MakeImage/README.md) |
+| 宿主测试与回归工具（`Tools/Test`） | 已实现：`CheckIpl`（IPL 静态布局与 55 例启动回归）、`CheckStub`（Stub 阶段 28 例）、`CheckStorage`（S1 存储抽象与 32 位双编译）、`CheckExt4`（Ext4 只读实现与块设备适配器）与运行辅助工具 `RunBootCase`；全部手工执行，不进入默认构建，`make test-tools` 只负责编译 |
 | Baleen Stub（`Packages/Baleen/Stub`） | 阶段性实现：切保护模式、开 A20、建立运行期 GDT/IDT、异常诊断，BIOS 服务经实模式弹跳提供扇区探测、E820 内存图与低地址读盘；并按 [Stub 说明](Packages/Baleen/Stub/README.md)第二节的契约读取介质上的 `CoreDescriptor`、校验装载区、把 `BaleenCore` 装到 1MiB 并经交权块交给它（QEMU 已验证 HDD / ISO / USB 到 BaleenCore，Bochs 已验证 ATA HDD / ATAPI 光盘；两者均使用本机 SeaBIOS）；`CheckStub` 回归覆盖成功路径、交权块四个服务与失败注入 |
 | BaleenCore（`Packages/Baleen/Core`） | 阶段性实现：入口与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷挂载（Ext4 只读，含卷标识核对）、按路径定位内核镜像并读取校验[内核镜像数据](Docs/Specs/Baleen/内核镜像数据.md)与整幅摘要（含装载区落点检查）、装载到装载地址、构造 `BootInfo` 与恒等映射页表、切长模式进入内核（QEMU 已验证 HDD / CD / USB 512e / NVMe 4Kn 到内核阶段边界，Bochs 已验证 ATA HDD / ATAPI 光盘；见 [BaleenCore 说明](Packages/Baleen/Core/README.md)）；内核集选版与持久状态、签名验证与引导状态区域的写入路径尚未实现，当前直接启动布局描述指定的镜像 |
 | Baleen UEFI 侧（`Packages/Baleen/Uefi`） | 后期规划路径：按 [Baleen 引导器](Docs/Specs/Baleen/README.md) 3.1 的实现次序，排在 BIOS 路径收尾（成功进入内核）之后实施；当前目录为空，镜像里的 `BOOTX64.EFI` 是占位件，只验证固件侧的发现与加载 |
@@ -50,6 +51,7 @@ make run            # 启动镜像：默认 hdd + qemu + 直接挂载 + BIOS，�
 make run-win        # 同上，但开本地窗口（QEMU 用 gtk/sdl，Bochs 用 wx）
 make run iso qemu built uefi    # 例：光盘 + QEMU + UEFI
 make compile-db     # 扫描各包写出 compile_commands.json，供 clangd 与 C/C++ 扩展取用
+make test-tools     # 只构建测试与回归工具（Tools/Test），手工执行，不进入默认构建
 Tools/Bin/CheckIpl --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 IPL，不依赖 Test 目录
 Tools/Bin/CheckStub --stub-dir Packages/Baleen/Stub/Out/Bin --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 Stub 与交权块服务
 Tools/Bin/CheckStorage # 手工验证 S1 存储抽象：用例、32 位双编译与目标侧链接检查
@@ -94,8 +96,8 @@ BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP �
 - [一级引导 Ipl](Packages/Baleen/Ipl/README.md)
 - [系统本体 LikesProgramOS](Packages/LikesProgramOS/README.md) ・ [内核侧 Core](Packages/LikesProgramOS/Core/README.md)
 - [MakeImage：通用镜像制作器](Tools/Build/MakeImage/README.md) 、[TestInstaller：测试安装器](Tools/Build/TestInstaller/README.md)
-- [Tools/Build/Common：宿主工具共享代码](Tools/Build/Common/README.md)
-- [CheckIpl：IPL 回归工具](Tools/Build/CheckIpl/README.md) 、[CheckStub：Stub 回归工具](Tools/Build/CheckStub/README.md) 、[CheckStorage：S1 存储抽象检查工具](Tools/Build/CheckStorage/README.md) 、[CheckExt4：Ext4 只读实现检查工具](Tools/Build/CheckExt4/README.md)
+- [Tools/Common：宿主工具的跨分类共享代码](Tools/Common/README.md) ・ [Tools/Build/Common：构建期工具共享代码](Tools/Build/Common/README.md)
+- [CheckIpl：IPL 回归工具](Tools/Test/CheckIpl/README.md) 、[CheckStub：Stub 回归工具](Tools/Test/CheckStub/README.md) 、[CheckStorage：S1 存储抽象检查工具](Tools/Test/CheckStorage/README.md) 、[CheckExt4：Ext4 只读实现检查工具](Tools/Test/CheckExt4/README.md) 、[RunBootCase：启动用例运行工具](Tools/Test/RunBootCase/README.md)
 
 ## 授权
 

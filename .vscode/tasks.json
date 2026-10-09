@@ -23,10 +23,19 @@
             "presentation": { "reveal": "always", "panel": "shared", "clear": true }
         },
         {
-            "label": "只建宿主工具",
-            "detail": "make tools —— 产物在 Tools/Bin，随源码交付",
+            "label": "只建构建期工具",
+            "detail": "make tools —— 构建 Tools/Build 下的构建期工具，产物在 Tools/Bin，随源码交付",
             "type": "shell",
             "command": "make tools",
+            "options": { "env": { "LC_ALL": "C" } },
+            "problemMatcher": ["$gcc"],
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+        },
+        {
+            "label": "只建测试工具",
+            "detail": "make test-tools —— 构建 Tools/Test 下的测试与回归工具，只编译，手工执行",
+            "type": "shell",
+            "command": "make test-tools",
             "options": { "env": { "LC_ALL": "C" } },
             "problemMatcher": ["$gcc"],
             "presentation": { "reveal": "always", "panel": "shared", "clear": true }

@@ -11,6 +11,7 @@
                 "${workspaceFolder}/Packages/Common/Include",
                 "${workspaceFolder}/Packages/Baleen/Common/Include",
                 "${workspaceFolder}/Packages/Baleen/Stub/Include",
+                "${workspaceFolder}/Tools/Common/Include",
                 "${workspaceFolder}/Tools/Build/Common/Include"
             ],
             "cStandard": "c17",

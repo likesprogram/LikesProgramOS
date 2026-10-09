@@ -2,7 +2,7 @@
     Baleen 镜像的宿主侧视图：完整性头的字段常量、类别判定、身份填充、校验与组装门禁
 
     Stub 与 BaleenCore 的镜像头同构：布局、固定取值与摘要规则完全一致，只有格式标记不同
-    （Stub 为 BLNSTUB、BaleenCore 为 BLNCORE）；同一套实现供 PackImage 与两个组装器共用
+    （Stub 为 BLNSTUB、BaleenCore 为 BLNCORE）；同一套实现供 PackImage、两个组装器与 CheckStub 共用
     字段与 Packages/Baleen/Common/Include/ImageHeader.hpp、Stub 的 StubHeader.inc 保持一致，
     改动须同时同步；摘要中 Digest 字段按 32 个零代入，见 Stub 说明第四节
 */

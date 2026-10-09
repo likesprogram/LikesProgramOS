@@ -51,7 +51,7 @@ make clean          # 删除本目录 Out/
 
 需要 NASM 与 GNU make，已在 NASM 3.01 下验证。默认 `-Ox` 且以 `-Werror` 汇编，警告即失败；`OUT_DIR`、`NASM`、`NASMFLAGS` 可覆盖。汇编选项写入构建配置戳，切换 `ENABLE_E9` 会重新生成产物，避免旧二进制被误当成新配置。
 
-**Makefile 不依赖未交付的本地回归夹具，正常构建不执行测试。** 必需的布局约束在汇编源和 C++ 镜像组装器中校验。完整的宿主验证工具由 [CheckIpl](../../../Tools/Build/CheckIpl/README.md) 提供：C++ 源码编译到 `Tools/Bin/CheckIpl`，手工执行，可检查代码预算、正常装载、错误停机和 BIOS 故障回退；其运行不依赖不上传的测试目录。
+**Makefile 不依赖未交付的本地回归夹具，正常构建不执行测试。** 必需的布局约束在汇编源和 C++ 镜像组装器中校验。完整的宿主验证工具由 [CheckIpl](../../../Tools/Test/CheckIpl/README.md) 提供：C++ 源码编译到 `Tools/Bin/CheckIpl`，手工执行，可检查代码预算、正常装载、错误停机和 BIOS 故障回退；其运行不依赖不上传的测试目录。
 
 ## 四、装载与交接
 

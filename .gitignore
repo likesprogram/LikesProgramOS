@@ -27,7 +27,10 @@ Tools/Bin/*
 compile_commands.json
 .cache/
 
-# 测试相关文件
+# 测试相关文件，不上传
 *Test
 Tools/Build/Payloads/
 Tools/Build/Payloads/*
+
+# Tools/Test 是随源码交付的测试与回归工具，保留
+!Tools/Test/

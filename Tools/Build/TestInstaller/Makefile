@@ -9,13 +9,15 @@ BIN_DIR    ?= ../../Bin
 SRC_DIR    := Src
 # 本工具的头文件目录
 INC_DIR    := Include
-# 与 MakeImage 共享的代码目录
+# 构建期工具共享的代码目录（镜像封装、引导结构、FAT 校验与布局描述）
 COMMON_DIR := ../Common
+# 宿主工具跨分类共享的代码目录（镜像完整性头、摘要算法与宿主文件读写）
+ROOT_COMMON_DIR := ../../Common
 
 # C++ 编译器
 CXX      ?= g++
 # 预处理选项
-CPPFLAGS ?= -I$(INC_DIR) -I$(COMMON_DIR)/Include -I../../../Packages/Baleen/Common/Include
+CPPFLAGS ?= -I$(INC_DIR) -I$(COMMON_DIR)/Include -I$(ROOT_COMMON_DIR)/Include -I../../../Packages/Baleen/Common/Include
 # 编译选项：常见警告全开并视为错误
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 # 链接选项：链接器警告视为错误
@@ -28,8 +30,8 @@ OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/Image.o $(OBJ_DIR)/Baleen.o $(OBJ_DIR)/Host
 # 头文件依赖清单
 DEPS := $(OBJS:.o=.d)
 
-# 镜像封装、引导结构、宿主文件工具与 FAT 校验在 ../Common 共享
-vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/$(SRC_DIR)
+# 镜像封装、引导结构、宿主文件工具与 FAT 校验在 ../Common 共享，镜像头与摘要在 ../../Common 共享
+vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/$(SRC_DIR) $(ROOT_COMMON_DIR)/$(SRC_DIR)
 
 .DEFAULT_GOAL := all
 .PHONY: all clean help

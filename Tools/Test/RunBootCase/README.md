@@ -3,7 +3,7 @@
 宿主侧 C++20 进程运行工具，等待串口或调试日志中的字面标记。看到标记立即停止模拟器；未见标记而自行退出、异常退出或超时均返回失败。构建只编译工具，不执行本地启动测试。
 
 ```sh
-make -C Tools/Build/RunBootCase
+make -C Tools/Test/RunBootCase
 Tools/Bin/RunBootCase --timeout 40 --marker PLACEHOLDER-STUB \
     --cwd /tmp/boot-case --console /tmp/boot-case/console.log \
     --log /tmp/boot-case/serial.log --log /tmp/boot-case/debug.log \

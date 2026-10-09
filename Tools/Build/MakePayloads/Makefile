@@ -7,8 +7,8 @@ OBJ_DIR  ?= Obj
 BIN_DIR  ?= ../../Bin
 # 本工具的源目录
 SRC_DIR  := Src
-# 与 PackImage / MakeImage / TestInstaller 共享的代码目录
-COMMON_DIR := ../Common
+# 宿主工具跨分类共享的代码目录（镜像完整性头、摘要算法与宿主文件读写）
+COMMON_DIR := ../../Common
 
 # C++ 编译器
 CXX      ?= g++
@@ -21,7 +21,7 @@ LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/MakePayloads
-# 目标文件：镜像身份填充与摘要算法在 ../Common 共享
+# 目标文件：镜像身份填充与摘要算法在 ../../Common 共享
 OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/BaleenImage.o $(OBJ_DIR)/Sha256.o $(OBJ_DIR)/HostIo.o
 
 vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/$(SRC_DIR)
