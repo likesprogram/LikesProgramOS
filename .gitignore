@@ -19,7 +19,7 @@ Packages/LikesProgramOS/Static/LikesProgram/System/Drivers/*.drv
 !Install/
 !Install/*
 
-# Tools/Bin：宿主工具的可执行忽略，Makefile 里会在构建时生成
+# Tools/Bin：工具的可执行忽略，Makefile 里会在构建时生成
 Tools/Bin/
 Tools/Bin/*
 
