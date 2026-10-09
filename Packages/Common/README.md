@@ -7,6 +7,10 @@
 | `Include/Print/`、`Src/Print.cpp` | 文本输出前端、多路复用目标、串口与 `0xE9` 目标 | Baleen 各阶段、内核 |
 | `Include/Platform/`、`Src/Platform/` | CPU 事实探测与 A20、GDT/IDT 的编码与装载机制 | 同上 |
 | `Include/Storage/`、`Src/Storage/` | 块设备、偏移视图、统一路径与文件系统抽象 | 同上 |
+| `Include/BootInfo.hpp` | 引导交接契约：尺寸、版本、固件状态、介质与内存图 | Baleen 各阶段、内核 |
+| `Include/KernelImage.hpp`、`Src/KernelImage.cpp` | 内核镜像数据的字段布局与校验，字节表见 [内核镜像数据](../../Docs/Specs/Baleen/内核镜像数据.md) | BaleenCore、内核侧 Core |
+
+`Storage/Ext4Features.hpp` 定义 Ext4 卷格式的接受与拒绝清单（`INCOMPAT` 与 `RO_COMPAT` 位），Baleen 只读实现与内核完整实现引用同一份，避免出现一侧能读、另一侧读不了的布局。接受集合里另分**解析前提位**：目录项的 `FILETYPE` 与 extent 树的 `EXTENTS` 是只读解析路径的硬前提，缺失位的卷在挂载阶段就被拒绝，判定不散到读目录项或 extent 的最后一步。
 
 存储抽象的口径见 [文件系统抽象与 VFS](../../Docs/Specs/Common/文件系统抽象与VFS.md)：接口只有一份定义，块设备实现（BIOS 读盘、AHCI、NVMe、固件块协议）与卷解析（Ext4 只读最小实现 / 完整实现、ISO9660、FAT32）由各阶段自己写。`Storage/Path.hpp` 定义**统一的路径形式与分量切分**：Ext4 区分大小写、ISO9660 与 FAT32 不区分，比较规则由各文件系统实现决定，并经 `FileSystemCaps::nameCase` 报告给调用方，共用层不替任何一侧做大小写折叠。
 

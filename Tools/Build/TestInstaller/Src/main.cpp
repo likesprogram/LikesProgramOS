@@ -4,8 +4,10 @@
 
     布局（字节偏移）：
         0x000        MBR：BaleenIPL.bin 的引导代码 + 由本工具写实的分区表
+        0x20000      布局描述：内核路径来自模板或参数，卷标识与位置字段由本工具回填
+        0x21000      引导状态区域：留给引导选择器持久化状态的裸块区域
         描述符区      头部 + 段序列，写到字节偏移 0x22000；由 --descs 的段产物回填后写回
-        0x23000 起   原始载荷：Stub、Core 与 --raw 条目，各自 4096 对齐
+        0x23000 起   原始载荷：Stub、BaleenCore 与 --raw 条目，各自 4096 对齐
         1 MiB（原始载荷越过 1 MiB 时顺延）  0 号分区：ESP 的 FAT 镜像
         ESP 之后     1 号分区：Ext4 系统卷镜像
         总长向上对齐到 --pad-to（默认 1 MiB）
@@ -16,6 +18,7 @@
 #include <HostIo.h>
 #include <Image.h>
 #include <BaleenImage.h>
+#include <BaleenLayout.h>
 
 #include <algorithm>
 #include <array>
@@ -29,10 +32,15 @@
 
 namespace {
     using hostbuild::AlignUp;
+    using hostbuild::BaleenLayout;
+    using hostbuild::BaleenLayoutSpec;
+    using hostbuild::BuildBaleenLayout;
     using hostbuild::DescriptorArea;
     using hostbuild::CheckPayload;
+    using hostbuild::CheckStubBytes;
     using hostbuild::BuildDescriptorArea;
     using hostbuild::FileSize;
+    using hostbuild::ReadTemplateKernelPath;
     using hostbuild::RequireFat16Image;
     using hostbuild::Image;
     using hostbuild::JsonEscape;
@@ -67,15 +75,17 @@ namespace {
         std::string out;                                                   // 输出镜像路径
         std::string mbr;                                                   // MBR 文件路径
         std::string stub;                                                  // Stub 文件路径
-        std::string core;                                                  // BootCore 文件路径
+        std::string core;                                                  // BaleenCore 文件路径
         std::string esp;                                                   // Esp 文件路径
         std::string system_volume;                                         // 系统卷文件路径
+        std::string layout;                                                // 布局描述模板：提供内核路径，位置字段仍由本工具回填
+        std::string kernel_path;                                           // 内核路径覆盖值；空表示取模板或默认路径
         std::string manifest;                                              // 构建清单输出路径
         uint64_t pad_to = kDefaultPadTo;                                   // 镜像总长的对齐粒度
         uint32_t sector_bytes = 512;                                       // 目标磁盘的逻辑扇区大小：512 或 4096
         std::string descs = "Packages/Baleen/Common/Out/Descs";            // 描述符段产物目录：头部与各段拆开，本工具只回填起止位置
         bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
-        bool core_unchecked = false;                                       // 是否免除 Core 头与摘要校验
+        bool core_unchecked = false;                                       // 是否免除 BaleenCore 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
         std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移，空表示自动分配
     };
@@ -102,9 +112,11 @@ namespace {
             "  --descs DIR               描述符段产物目录（默认 Packages/Baleen/Common/Out/Descs）\n"
             "  --esp PATH                ESP 的 FAT16 镜像（含 \\EFI\\BOOT\\BOOTX64.EFI），0 号分区\n"
             "  --system-volume PATH      Ext4 系统卷镜像，1 号分区\n"
+            "  --layout PATH             布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用 /LikesProgram/System/LikesProgram.os（见 Docs/Specs/Common/系统卷布局.md）\n"
+            "  --kernel-path PATH        覆盖内核路径（卷内绝对路径），优先于模板\n"
             "  --raw 宿主路径[@偏移]      原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
             "  --stub-unchecked          免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
-            "  --core-unchecked          免除 Core 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
+            "  --core-unchecked          免除 BaleenCore 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
             "\n"
             "镜像：\n"
             "  --sector-bytes N          目标磁盘的逻辑扇区大小：512（默认）或 4096；\n"
@@ -132,6 +144,8 @@ namespace {
             else if (arg == "--core") options.core = needValue(i, arg);
             else if (arg == "--esp") options.esp = needValue(i, arg);
             else if (arg == "--system-volume") options.system_volume = needValue(i, arg);
+            else if (arg == "--layout") options.layout = needValue(i, arg);
+            else if (arg == "--kernel-path") options.kernel_path = needValue(i, arg);
             else if (arg == "--raw") {
                 const std::string value = needValue(i, arg);
                 const auto at = value.rfind('@');
@@ -155,10 +169,9 @@ namespace {
         if (FileSize(options.mbr) != kMbrBytes) throw std::runtime_error("MBR 必须恰好 512 字节：" + options.mbr);
         const std::vector<uint8_t> mbr = ReadFile(options.mbr);
         if (mbr[510] != 0x55 || mbr[511] != 0xAA) throw std::runtime_error("MBR 缺少 0xAA55 引导签名：" + options.mbr);
-        if (!options.stub.empty()) {
-            const uint64_t bytes = FileSize(options.stub);
-            if (bytes == 0 || bytes > DescriptorArea::kMaxStubBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 0x10000-0x7E00：" + options.stub);
-        }
+        // Stub 长度按跨介质共用上限检查，与 MakeImage 共用同一份实现：
+        // 512e 专用的 0x8000..0x8200 区间在 4Kn 设备上会被 IPL 拒绝
+        if (!options.stub.empty()) CheckStubBytes(FileSize(options.stub), options.stub);
         if (!options.core.empty() && FileSize(options.core) == 0) throw std::runtime_error("核心阶段载荷为空：" + options.core);
         if (!options.esp.empty()) {
             if (FileSize(options.esp) == 0) throw std::runtime_error("ESP 镜像为空：" + options.esp);
@@ -274,6 +287,23 @@ int main(int argc, char** argv) {
         if (partitions.system_volume.has_value()) image.CopyFile(partitions.system_volume->offset, options.system_volume);
         image.ExtendTo(total);
 
+        // 布局描述：内核路径取自 --kernel-path 或模板，卷标识、系统卷位置与状态区域由本工具回填
+        // 写到引导区的固定位置，BaleenCore 按 0x20000 直接读，不依赖分区表
+        std::string layoutKernelPath;
+        bool layoutWritten = false;
+        if (partitions.system_volume.has_value()) {
+            BaleenLayoutSpec spec;
+            spec.volume_image = options.system_volume;
+            spec.volume_offset = partitions.system_volume->offset;
+            spec.volume_bytes = partitions.system_volume->bytes;
+            if (!options.kernel_path.empty()) spec.kernel_path = options.kernel_path;
+            else if (!options.layout.empty()) spec.kernel_path = ReadTemplateKernelPath(options.layout);
+            const std::vector<uint8_t> block = BuildBaleenLayout(spec);
+            image.Write(BaleenLayout::kWriteOffset, block);
+            layoutKernelPath = spec.kernel_path;
+            layoutWritten = true;
+        } else std::cerr << "TestInstaller: 未提供 --system-volume，不写布局描述，BaleenCore 无法定位系统卷\n";
+
         // 清单与摘要
         std::string manifest = "{\n";
         manifest += "  \"tool\": \"TestInstaller\",\n";
@@ -296,6 +326,14 @@ int main(int argc, char** argv) {
         manifest += "  \"esp\": " + jsonPlaced(partitions.esp) + ",\n";
         manifest += "  \"esp_4kn\": " + jsonPlaced(partitions.esp_4kn) + ",\n";
         manifest += "  \"system_volume\": " + jsonPlaced(partitions.system_volume) + ",\n";
+        // 布局描述的内容摘要：系统卷位置与卷标识可从系统卷镜像复核，这里记录实际写入的取值
+        if (layoutWritten) {
+            manifest += "  \"layout\": {\"offset\": " + std::to_string(BaleenLayout::kWriteOffset) +
+                        ", \"bytes\": " + std::to_string(BaleenLayout::kBlockBytes) +
+                        ", \"state_offset\": " + std::to_string(BaleenLayout::kStateOffset) +
+                        ", \"state_bytes\": " + std::to_string(BaleenLayout::kStateBytes) +
+                        ", \"kernel_path\": \"" + JsonEscape(layoutKernelPath) + "\"},\n";
+        } else manifest += "  \"layout\": null,\n";
         manifest += "  \"raw\": [";
         for (std::size_t i = 0; i < raw.size(); ++i) {
             manifest += (i == 0 ? "\n    " : ",\n    ");
@@ -324,10 +362,11 @@ int main(int argc, char** argv) {
         if (stub.has_value() || core.has_value()) std::cout << "  描述符区    偏移 " << DescriptorArea::kWriteOffset << "，段产物目录 " << options.descs << "\n";
         if (stub.has_value()) std::cout << "  Stub 载荷   偏移 " << stub->offset << "，字节 " << stub->bytes << "\n";
         if (stub.has_value()) std::cout << "  Stub 载荷：" << PayloadSummary(stubInfo) << "\n";
-        if (core.has_value()) std::cout << "  Core 载荷   偏移 " << core->offset << "，字节 " << core->bytes << "\n";
-        if (core.has_value()) std::cout << "  Core 载荷：" << PayloadSummary(coreInfo) << "\n";
+        if (core.has_value()) std::cout << "  BaleenCore 载荷   偏移 " << core->offset << "，字节 " << core->bytes << "\n";
+        if (core.has_value()) std::cout << "  BaleenCore 载荷：" << PayloadSummary(coreInfo) << "\n";
         if (partitions.esp.has_value()) std::cout << "  0 号分区    ESP（0xEF）偏移 " << partitions.esp->offset << " 与 " << partitions.esp_4kn->offset << "，字节 " << partitions.esp->bytes << "（两份）\n";
         if (partitions.system_volume.has_value()) std::cout << "  1 号分区    Ext4（0x83）偏移 " << partitions.system_volume->offset << "，字节 " << partitions.system_volume->bytes << "\n";
+        if (layoutWritten) std::cout << "  布局描述    偏移 " << BaleenLayout::kWriteOffset << "，状态区域 " << BaleenLayout::kStateOffset << "，内核路径 " << layoutKernelPath << "\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "TestInstaller: " << error.what() << "\n";

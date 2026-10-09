@@ -3,9 +3,9 @@
 
     Stub 把镜像整幅装到 1MiB，并按 CORE_LOAD + 头里的 EntryOffset 跳到入口；文件起点的
     前缀、0x10 起的 128 字节头与 0x90 起的代码都由这一步固定
-    未初始化区不落盘，由 Stub 在交权前按头里的 MemoryBytes 清零，Core 侧不重复清零
+    未初始化区不落盘，由 Stub 在交权前按头里的 MemoryBytes 清零，BaleenCore 侧不重复清零
     __image_start / __image_end / __bss_end 同时供头字段与运行期核对使用：
-    头里的 ImageBytes、MemoryBytes 由它们算出，Core 再拿头字段与它们比对
+    头里的 ImageBytes、MemoryBytes 由它们算出，BaleenCore 再拿头字段与它们比对
 
     段权限按代码与数据分开声明，代码段只读可执行、数据段可读写，免得链接器
     对单一读写执行段告警；产物是 objcopy 出的扁平镜像，段边界不落盘
@@ -24,7 +24,7 @@ SECTIONS {
     __image_start = .;
 
     .core.head : { *(.core.head) } :text
-    ASSERT(ADDR(.text.start) == __image_start + 0x90, "Core 入口节未落在头之后的 0x90")
+    ASSERT(ADDR(.text.start) == __image_start + 0x90, "BaleenCore 入口节未落在头之后的 0x90")
 
     .text.start : { *(.text.start) } :text
     .text : { *(.text.exceptions) *(.text*) } :text
@@ -38,6 +38,6 @@ SECTIONS {
     .bss : { *(.bss*) *(COMMON) } :data
     __bss_end = .;
 
-    ASSERT(__image_end - __image_start <= 0x400000, "Core 文件超出 0x400000 上限")
-    ASSERT(__bss_end - __image_start <= 0x400000, "Core 静态内存跨度超出 0x400000 上限")
+    ASSERT(__image_end - __image_start <= 0x400000, "BaleenCore 文件超出 0x400000 上限")
+    ASSERT(__bss_end - __image_start <= 0x400000, "BaleenCore 静态内存跨度超出 0x400000 上限")
 }

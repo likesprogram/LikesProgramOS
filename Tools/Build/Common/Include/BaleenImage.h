@@ -1,8 +1,8 @@
 /* BaleenImage.h
     Baleen 镜像的宿主侧视图：完整性头的字段常量、类别判定、身份填充、校验与组装门禁
 
-    Stub 与 Core 的镜像头同构：布局、固定取值与摘要规则完全一致，只有格式标记不同
-    （Stub 为 BLNSTUB、Core 为 BLNCORE）；同一套实现供 PackImage 与两个组装器共用
+    Stub 与 BaleenCore 的镜像头同构：布局、固定取值与摘要规则完全一致，只有格式标记不同
+    （Stub 为 BLNSTUB、BaleenCore 为 BLNCORE）；同一套实现供 PackImage 与两个组装器共用
     字段与 Packages/Baleen/Common/Include/ImageHeader.hpp、Stub 的 StubHeader.inc 保持一致，
     改动须同时同步；摘要中 Digest 字段按 32 个零代入，见 Stub 说明第四节
 */
@@ -46,7 +46,7 @@ namespace hostbuild {
         static constexpr uint32_t kDigestFileEnd = kDigestFileOffset + kSha256Bytes;   // 0x70
     };
 
-    // 镜像类别：带完整性头的 Stub 或 Core，或无法识别
+    // 镜像类别：带完整性头的 Stub 或 BaleenCore，或无法识别
     enum class ImageKind { Stub, Core, Unknown };
 
     // 类别的名字，供诊断与打印；Unknown 返回“未知”
@@ -70,7 +70,7 @@ namespace hostbuild {
     void FillImageIdentity(std::vector<uint8_t>& image);
 
     // 校验带头镜像的固定字段、长度、入口前缀与整幅摘要；任一项不通过即抛异常
-    // 长度上限与静态内存落点按类别取：Stub 受低 64KiB 窗口约束，Core 按自己的上限
+    // 长度上限与静态内存落点按类别取：Stub 受低 64KiB 窗口约束，BaleenCore 按自己的上限
     void VerifyImage(std::span<const uint8_t> image, ImageKind kind);
 
     // 带头镜像的 BuildId 前 4 字节，按字节顺序格式化为 8 位大写十六进制，供构建输出打印使用

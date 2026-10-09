@@ -1,19 +1,16 @@
 ; Body.inc
 ;    两种介质入口共用的描述符区解析、Stub 装载与交权
 ;
-;    进入前提：描述符区首扇区已读入缓冲，DS:SI 指向缓冲起点
+;    进入前提：描述符区首扇区已读入缓冲，头部标记已由各入口核过，DS:SI 指向缓冲起点
 ;    头部给出本区起止位置；其后是段序列：每段以段头开头（标记、版本、段长），
 ;    读取方按段长跳到下一个、按标记认段；顺序不作要求，加段不必改本文件
 ;    头部与段内的位置字段都是 512 字节基准（值 = 字节偏移 / 512），与目标设备的逻辑扇区
 ;    单位无关；本文件按本地单位右移换算成本地 LBA 后再读盘
 
-    CMP DWORD [SI], DESC_AREA_MAGIC
-    JNE _Err_Desc
-
     ; 头部本区起始位置必须与槽一致：两者都是 512 字节基准，不必换算
     MOV EAX, [SI + DESC_AREA_LBA]
     CMP EAX, [DESC_SLOT_OFF]
-    JNE _Err_Desc                ; 与装载方据以定位的槽值不符
+    JNE _Err_Head                ; 与装载方据以定位的槽值不符
 
     ; 本扇区字节数：段头必须落在读入的缓冲内
 %IFDEF IPL_CD
@@ -28,12 +25,12 @@
     MOV AX, BX
     ADD AX, DESC_SEG_HEAD_BYTES
     CMP AX, BP
-    JA _Err_Desc
+    JA _Err_Head
     CMP DWORD [SI + BX], DESC_BOOT_MAGIC
     JE .Stub
     MOV AX, [SI + BX + DESC_SEG_LEN]
     CMP AX, DESC_SEG_HEAD_BYTES
-    JB _Err_Desc                 ; 段长小于段头会原地打转
+    JB _Err_Head                 ; 段长小于段头会原地打转
     ADD BX, AX
     JMP .Walk
 
@@ -41,7 +38,7 @@
 .Stub:
     MOV AX, [SI + BX + DESC_SEG_LEN]
     CMP AX, DESC_SEG_HEAD_BYTES + 8
-    JB _Err_Desc                 ; 段长容不下起止位置
+    JB _Err_Head                 ; 段长容不下起止位置
     MOV EAX, [SI + BX + DESC_SEG_LBA]
     MOV EDX, [SI + BX + DESC_SEG_END_LBA]
     ; 位置字段（512 字节基准）换算成本地 LBA：光盘单位固定 2048，磁盘按运行期探测的移位量
@@ -53,26 +50,29 @@
     SHR EAX, CL
     SHR EDX, CL
 %ENDIF
-    TEST EAX, EAX
-    JZ _Err_Desc
-    CMP EDX, EAX
-    JB _Err_Desc
+    ; 起点必须落在描述符扇区之后；起点为零也由这一条拦下
     CMP EAX, [_Desc_Lba]
-    JBE _Err_Desc                ; 载荷不得落回描述符扇区之前
+    JBE _Err_Range               ; 载荷不得落回描述符扇区之前
+    ; 结束位置加一：起点加扇区数恰好到 0x100000000 时在这里进位，没有读盘空间，拒绝
+    ADD EDX, 1
+    JC _Err_Range
+    ; 再减起点得到扇区数：借位表示结束位置早于起始位置，为零表示结束位置就是起始位置的前一个
     SUB EDX, EAX
-    INC EDX                      ; EDX = 扇区数
-    ; 扇区数上限：窗口字节数按本地单位右移
+    JBE _Err_Range
+    ; 扇区数上限：窗口字节数按本地单位右移；上限与扇区数必须按 32 位比较，
+    ; 只看低 16 位会放行扇区数 0x10000 的畸形描述符（DX 为 0），随后以 0 块请求继续装载
 %IFDEF IPL_CD
-    MOV BP, (LOAD_CEIL - LOAD_TOP) >> SECT_SHIFT
+    MOV EBP, (LOAD_CEIL - LOAD_TOP) >> SECT_SHIFT
 %ELSE
     ADD CL, BASE_SHIFT           ; CL 仍是上面的换算量
-    MOV BP, LOAD_CEIL - LOAD_TOP
-    SHR BP, CL
+    MOV EBP, LOAD_CEIL - LOAD_TOP
+    SHR EBP, CL
 %ENDIF
-    CMP DX, BP
+    CMP EDX, EBP
     JA _Err_Size
 
     ; 校验全部通过：读入 Stub，再按契约交权
+    ; 上限已按 32 位判定，扇区数不超过本介质窗口（512e 65、4Kn 8、CD 16），截到 16 位不丢高位
     MOV CX, DX
     MOV BX, LOAD_TOP
     CALL _Read_Sectors

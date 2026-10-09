@@ -29,16 +29,17 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | --- | --- |
 | Baleen 一级引导（`Packages/Baleen/Ipl`） | 已实现：硬盘 / USB-HDD 与 El Torito 光盘两种形态，NASM 汇编，构建含尺寸硬约束检查（NASM 3.01 下 `make check` 通过）；磁盘入口按 `AH=48` 接受 512 / 4096 逻辑扇区，软盘与 USB-FDD 明确拒绝；源码、产物与运行期契约见 [Ipl 说明](Packages/Baleen/Ipl/README.md) |
 | 宿主构建工具（`Tools/Build`） | 已实现：通用镜像制作器 `MakeImage` 产出可刻录、可写盘、可挂载的 `LikesProgram.iso`，测试安装器 `TestInstaller` 产出可写入内置硬盘 / 移动硬盘 / U 盘的整盘镜像，`MakePayloads` 生成开发占位载荷；构建不依赖测试目录；用法见[工具 README](Tools/Build/MakeImage/README.md) |
-| Baleen Stub（`Packages/Baleen/Stub`） | 阶段性实现：切保护模式、开 A20、建立运行期 GDT/IDT、异常诊断，BIOS 服务经实模式弹跳提供扇区探测、E820 内存图与低地址读盘；并按 [Stub 说明](Packages/Baleen/Stub/README.md)第二节的契约读取介质上的 `CoreDescriptor`、校验装载区、把 `BaleenCore` 装到 1MiB 并经交权块交给它（QEMU 已验证 HDD / ISO / USB 到 Core，Bochs 已验证 ATA HDD / ATAPI 光盘；两者均使用本机 SeaBIOS）；`CheckStub` 回归覆盖成功路径、交权块四个服务与失败注入 |
-| Baleen Core（`Packages/Baleen/Core`） | 阶段性实现：入口、横幅与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、介质与内存图事实播报（见 [Core 说明](Packages/Baleen/Core/README.md)）；`BaleenLayout.bin`、Ext4 卷访问与内核装载尚未实现 |
-| Baleen UEFI 侧（`Packages/Baleen/Uefi`） | 骨架，尚未实现 |
-| 内核本体、模块、驱动、用户空间、SDK | 尚未实现（`Packages/LikesProgramOS` 与 `Packages/LikesProgramSDK` 等目录仍是空骨架）；Baleen 与内核共用的基础件已在 `Packages/Common`：Print 前端、平台原语与 [存储抽象](Packages/Common/README.md) |
+| Baleen Stub（`Packages/Baleen/Stub`） | 阶段性实现：切保护模式、开 A20、建立运行期 GDT/IDT、异常诊断，BIOS 服务经实模式弹跳提供扇区探测、E820 内存图与低地址读盘；并按 [Stub 说明](Packages/Baleen/Stub/README.md)第二节的契约读取介质上的 `CoreDescriptor`、校验装载区、把 `BaleenCore` 装到 1MiB 并经交权块交给它（QEMU 已验证 HDD / ISO / USB 到 BaleenCore，Bochs 已验证 ATA HDD / ATAPI 光盘；两者均使用本机 SeaBIOS）；`CheckStub` 回归覆盖成功路径、交权块四个服务与失败注入 |
+| BaleenCore（`Packages/Baleen/Core`） | 阶段性实现：入口与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷挂载（Ext4 只读，含卷标识核对）、按路径定位内核镜像并读取校验[内核镜像数据](Docs/Specs/Baleen/内核镜像数据.md)与整幅摘要（含装载区落点检查）、装载到装载地址、构造 `BootInfo` 与恒等映射页表、切长模式进入内核（QEMU 已验证 HDD / CD / USB 512e / NVMe 4Kn 到内核阶段边界，Bochs 已验证 ATA HDD / ATAPI 光盘；见 [BaleenCore 说明](Packages/Baleen/Core/README.md)）；内核集选版与持久状态、签名验证与引导状态区域的写入路径尚未实现，当前直接启动布局描述指定的镜像 |
+| Baleen UEFI 侧（`Packages/Baleen/Uefi`） | 后期规划路径：按 [Baleen 引导器](Docs/Specs/Baleen/README.md) 3.1 的实现次序，排在 BIOS 路径收尾（成功进入内核）之后实施；当前目录为空，镜像里的 `BOOTX64.EFI` 是占位件，只验证固件侧的发现与加载 |
+| 内核侧 Core（`Packages/LikesProgramOS/Core`） | 阶段性实现：产出内核映像 `LikesProgram.os`——文件起点是内核镜像数据，`0x80` 起是长模式入口；入口、`BootInfo` 尺寸与版本核对、固件启动服务失效、CPU 事实、描述符表（GDT/TSS/IDT，异常桩与 IST）、引导页表与直映射、页帧分配器已可用（见 [内核侧 Core 说明](Packages/LikesProgramOS/Core/README.md)）；入口已由 BaleenCore 的交接路径接通，设备模型、模块装载、调度与 Init 尚未实现 |
+| 内核本体其余部分、驱动、用户空间、SDK | 尚未实现（`Packages/LikesProgramSDK` 等目录仍是空骨架）；Baleen 与内核共用的基础件已在 `Packages/Common`：Print 前端、平台原语、[存储抽象](Packages/Common/README.md)、`BootInfo` 与内核镜像数据契约 |
 
-顶层 `make` 现在就能产出可启动的 `Out/LikesProgram.iso` 与 `Out/LikesProgram.hdd`。Stub 与 Core 已由各自包真实构建；EFI 引导镜像、Ext4 系统卷与布局描述尚未实现，构建时由 `Tools/Bin/MakePayloads` 生成的占位件顶上，只为把引导链跑通；每个载荷的实际来源都在构建日志里逐项打印。
+顶层 `make` 现在就能产出可启动的 `Out/LikesProgram.iso` 与 `Out/LikesProgram.hdd`。Stub、BaleenCore 与内核侧 Core 已由各自包真实构建，系统卷由 `Packages/LikesProgramOS` 从 `Static/` 卷根用 `mke2fs -d` 生成，卷内目录树见[系统卷布局](Docs/Specs/Common/系统卷布局.md)，内核映像落在 `/LikesProgram/System/LikesProgram.os`；EFI 引导镜像尚未实现，构建时由 `Tools/Bin/MakePayloads` 生成的占位件顶上，只为把引导链跑通；布局描述由组装器按[布局描述](Docs/Specs/Baleen/布局描述.md)生成并回填（内核路径默认与卷内落点一致）；每个载荷的实际来源都在构建日志里逐项打印。BIOS 路径已经从受支持介质启动经 IPL → Stub → BaleenCore 进入内核：BaleenCore 读取并校验内核镜像后，把它装到装载地址、构造 `BootInfo` 与恒等映射页表，切长模式跳到内核入口。
 
 ## 快速开始
 
-构建需要 GNU make、NASM 3.x、g++（C++20），以及生成占位件的 `mkfs.vfat` / `mkfs.ext4`；启动与测试需要 QEMU（可选 Bochs，UEFI 用例需要 OVMF）。
+构建需要 GNU make、NASM 3.x、g++（C++20），以及生成占位件与系统卷的 `mkfs.vfat` / `mke2fs`（e2fsprogs，需要支持 `-d` 的版本）；启动与测试需要 QEMU（可选 Bochs，UEFI 用例需要 OVMF）。
 
 构建全程把警告当错误：C++ 用 `-Wall -Wextra -Werror`（宿主工具另加 `-Wpedantic`），NASM 用 `-Werror`，链接用 `--fatal-warnings`。新增警告会直接让构建失败，不会被跳过。
 
@@ -51,6 +52,9 @@ make run iso qemu built uefi    # 例：光盘 + QEMU + UEFI
 make compile-db     # 扫描各包写出 compile_commands.json，供 clangd 与 C/C++ 扩展取用
 Tools/Bin/CheckIpl --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 IPL，不依赖 Test 目录
 Tools/Bin/CheckStub --stub-dir Packages/Baleen/Stub/Out/Bin --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 Stub 与交权块服务
+Tools/Bin/CheckStorage # 手工验证 S1 存储抽象：用例、32 位双编译与目标侧链接检查
+Tools/Bin/CheckExt4 # 手工验证 Ext4 只读实现与块设备适配器：真实卷夹具与故障注入
+make -C Packages/LikesProgramOS check   # 复核内核映像与系统卷（内核镜像数据、摘要、入口）
 make help           # 全部目标与可用变量
 ```
 
@@ -67,6 +71,9 @@ BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP �
 | 文档 | 内容 |
 | --- | --- |
 | [Baleen 引导器](Docs/Specs/Baleen/README.md) | 引导器职责边界、引导模式支持梯队、硬件与介质范围、卷定位与内核路径、装载交接、引导选择器、产物清单 |
+| [布局描述](Docs/Specs/Baleen/布局描述.md) | `BaleenLayout.bin` 的字节表、写入位置与校验，引导状态区域，以及模板与组装器的回填职责 |
+| [内核镜像数据](Docs/Specs/Baleen/内核镜像数据.md) | 内核镜像文件起点那份数据的字节表、摘要覆盖、BaleenCore 与内核两侧的校验顺序，以及装载交接的当前边界 |
+| [系统卷布局](Docs/Specs/Common/系统卷布局.md) | 系统卷的目录树与职责边界：系统目录、程序目录与用户目录，命名与放置规则，以及 `Static/` 卷根的组装方式 |
 | [内核启动与固件边界](Docs/Specs/内核启动与固件边界.md) | 内核入口契约、固件服务的失效边界、第三方引导方式的接入条件 |
 | [内核架构与自举闭包](Docs/Specs/内核架构与自举闭包.md) | 内核组成、`LINK_MODE` 与源码边界、自举闭包与内置必备基线、外置能力归属、镜像体积口径 |
 | [输出通道与Print](Docs/Specs/输出通道与Print.md) | 引导期与内核共用的文本输出：前端与目标契约、各阶段装配、重定向与缺省行为 |
@@ -85,9 +92,10 @@ BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP �
 
 - [Baleen 子项目](Packages/Baleen/README.md)
 - [一级引导 Ipl](Packages/Baleen/Ipl/README.md)
+- [系统本体 LikesProgramOS](Packages/LikesProgramOS/README.md) ・ [内核侧 Core](Packages/LikesProgramOS/Core/README.md)
 - [MakeImage：通用镜像制作器](Tools/Build/MakeImage/README.md) 、[TestInstaller：测试安装器](Tools/Build/TestInstaller/README.md)
 - [Tools/Build/Common：宿主工具共享代码](Tools/Build/Common/README.md)
-- [CheckIpl：IPL 回归工具](Tools/Build/CheckIpl/README.md) 、[CheckStub：Stub 回归工具](Tools/Build/CheckStub/README.md)
+- [CheckIpl：IPL 回归工具](Tools/Build/CheckIpl/README.md) 、[CheckStub：Stub 回归工具](Tools/Build/CheckStub/README.md) 、[CheckStorage：S1 存储抽象检查工具](Tools/Build/CheckStorage/README.md) 、[CheckExt4：Ext4 只读实现检查工具](Tools/Build/CheckExt4/README.md)
 
 ## 授权
 

@@ -1,5 +1,5 @@
 # Makefile
-#    Baleen Core：BIOS 路径的第二阶段，链接本包与 Common 的目标文件，产出 BaleenCore.bin
+#    BaleenCore：BIOS 路径的第二阶段，链接本包与 Common 的目标文件，产出 BaleenCore.bin
 #
 #    镜像装入在物理 0x100000，由 Stub 按头里的入口偏移跳入；文件起点是入口前缀与
 #    128 字节完整性头，0x90 起是 32 位保护模式代码；未初始化区不落盘，
@@ -8,10 +8,15 @@
 
 # 产物根目录
 OUT_DIR   ?= Out
-# 对象目录
-OBJ_DIR   := $(OUT_DIR)/Obj
-# 产物目录
-BIN_DIR   := $(OUT_DIR)/Bin
+# 本包产物根：默认与共享根相同；要单独换本包产物的落点（例如对照构建）时改这里，
+# 上游对象的查找仍按 OUT_DIR，不受本包产物根影响
+LOCAL_OUT_DIR ?= $(OUT_DIR)
+# 上游对象的产物目录：各包共用 Out 约定，不随本包的产物根改变
+UPSTREAM_OBJ_DIR := $(OUT_DIR)/Obj
+# 本包对象目录
+OBJ_DIR   := $(LOCAL_OUT_DIR)/Obj
+# 本包产物目录
+BIN_DIR   := $(LOCAL_OUT_DIR)/Bin
 # 源码与头文件目录
 SRC_DIR   := Src
 INC_DIR   := Include
@@ -27,7 +32,9 @@ LD        ?= ld
 OBJCOPY   ?= objcopy
 
 # 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
-CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
+# 优化级别取 -Os：Baleen 的 32 位阶段在低 64KiB 静态窗口里运行，代码体积优先于指令数；
+# 宿主工具与 64 位内核各自按 -O2 编译，不受这里影响
+CXXFLAGS  ?= -m32 -std=c++20 -Os -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include
 # 汇编选项：32 位保护模式；-I 让 Src 里的 %INCLUDE 找到本包与共享的 Include；警告视为错误
@@ -35,11 +42,12 @@ NASMFLAGS ?= -f elf32 -Werror -I$(INC_DIR)/ -I$(SHARE_DIR)/
 # 链接选项：无运行库并按 Core.ld 的固定布局；build-id 是额外的落盘节，不要，链接器警告视为错误
 LDFLAGS   ?= -m elf_i386 -nostdlib -T Core.ld --build-id=none --fatal-warnings
 
-# 本包目标文件：Core.cpp 是主流程，Console.cpp 是控制台装配，Core_asm.o 与同名 C++ 源以 _asm 后缀区分
-LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Core.o Console.o Core_asm.o)
-# 上游目标文件
-COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o)
-BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o Sha256.o ImageHeader.o)
+# 本包目标文件：Core.cpp 是主流程，Console.cpp 是控制台装配，Ext4/BiosBlockDevice/Libc 服务系统卷读取，
+# LoadKernel.cpp 定位并校验内核镜像，Core_asm.o 与同名 C++ 源以 _asm 后缀区分
+LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Core.o Console.o Ext4.o BiosBlockDevice.o LoadKernel.o Libc.o Core_asm.o)
+# 上游目标文件：Print 与平台原语，以及存储抽象（块设备、偏移视图、路径与文件系统接口）、内核镜像数据校验
+COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o Error.o Path.o SubDevice.o FileSystem.o KernelImage.o)
+BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o ImageHeader.o BootMemory.o ReadFailure.o)
 
 # 链接产物与交付镜像
 CORE_ELF  := $(BIN_DIR)/BaleenCore.elf
@@ -94,17 +102,18 @@ check: all
 	echo "check: $(CORE_BIN) 大小 $$bytes"; \
 	$(PACK_IMAGE) --verify "$(CORE_BIN)"
 
-# 删除产物目录
+# 删除本包产物目录：共享根与上游对象不动
 clean:
-	@test -n "$(OUT_DIR)" || { echo "clean: OUT_DIR 为空，拒绝执行"; exit 1; }
-	@rm -rf -- "$(OUT_DIR)"
+	@test -n "$(LOCAL_OUT_DIR)" || { echo "clean: LOCAL_OUT_DIR 为空，拒绝执行"; exit 1; }
+	@rm -rf -- "$(LOCAL_OUT_DIR)"
 
 # 打印用法
 help:
-	@printf '%s\n' 'Baleen Core：BIOS 路径的第二阶段' \
+	@printf '%s\n' 'BaleenCore：BIOS 路径的第二阶段' \
 	  '  make [all]  构建 $(CORE_BIN)' \
 	  '  make check  校验镜像大小、完整性头字段与摘要' \
-	  '  make clean  删除 $(OUT_DIR)/' \
-	  '  变量：OUT_DIR / CXX / NASM / LD / OBJCOPY 与各 FLAGS 可覆盖'
+	  '  make clean  删除 $(LOCAL_OUT_DIR)/' \
+	  '  变量：OUT_DIR（共享产物根，定位上游对象）/ LOCAL_OUT_DIR（本包产物根）' \
+	  '        CXX / NASM / LD / OBJCOPY 与各 FLAGS 可覆盖'
 
 -include $(LOCAL_OBJS:.o=.d)

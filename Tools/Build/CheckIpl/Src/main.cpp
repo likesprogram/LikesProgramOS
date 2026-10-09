@@ -42,7 +42,7 @@ namespace {
     // 收到终止信号时记下的信号号，主循环轮询它并退出
     volatile std::sig_atomic_t interrupted = 0;
     // 启动回归的用例总数，Execute 末尾核对，防止用例被误删
-    constexpr unsigned kCaseCount = 49;
+    constexpr unsigned kCaseCount = 55;
 
     // 信号处理：只记录信号号，不在处理函数里做其他事
     void OnSignal(int value) { interrupted = value; }
@@ -501,7 +501,9 @@ namespace {
         void Execute() {
             for (const bool cd : {false, true}) {
                 const std::string media = cd ? "cd" : "hdd";
-                const uint32_t maximum = cd ? 0x8000 : 0x8200;
+                // 组装器按跨介质共用上限 0x8000 检查 Stub 文件长度，两种介质同值；
+                // 512e 专用的 0x8200 由故障注入组的"最大 Stub"用例覆盖
+                const uint32_t maximum = 0x8000;
                 for (uint32_t size : {4096u, maximum - 1, maximum}) Case(media + " 交接/完整装载 " + std::to_string(size) + " B", Build(cd, size), media, "OK", cd);
                 const auto base = Build(cd);
                 // 一处描述符字段破坏：偏移、宽度、写入值与期望错误码
@@ -513,12 +515,26 @@ namespace {
                     const char* code;  // 期望的 IPL 错误码
                 };
                 // 描述符区：头部 16 字节 + Stub 段 16 字节（段头 8 + 起止扇区 8）
+                // 结束位置用例都从镜像里实际的起点字段推算，载荷位置随布局变化时依然成立；
+                // 位置字段是 512 字节基准，与介质单位无关，两种介质用同一组推算值
+                const uint32_t stubStart = static_cast<uint32_t>(GetLe(ReadBytes(base), 0x22018, 4));
+                // 期望值是 IPL 的整数错误码，屏幕与 0xE9 里各输出一位十六进制字符；
+                // 码 2 = 驱动器或介质不受支持，码 3 = 描述符头部或段序列非法，
+                // 码 4 = Stub 段起止位置非法，码 5 = CD 候选探测失败，码 6 = 扇区数超装载窗口
+                // stub-end-max：结束位置 0xFFFFFFFF 时，512e 下起点加扇区数恰好到 2^32，由进位检查拒绝（4）；
+                //   CD 换算后不产生进位，按超上限拒绝（6）
+                // stub-count-64k-minus1 / stub-count-64k：扇区数分别是 0xFFFF 与 0x10000；
+                //   后者低 16 位为 0，旧的 16 位比较会放行并以 0 块请求继续装载，现在按 32 位比较拒绝（6）
                 const std::vector<Mutation> mutations{
-                    {"area-magic", 0, 4, 0, "D"}, {"area-head-short", 6, 2, 4, "D"},
-                    {"area-sector", 8, 4, 1, "D"},
-                    {"segment-magic", 16, 4, 0, "D"}, {"segment-length", 22, 2, 0, "D"},
-                    {"stub-lba-zero", 24, 4, 0, "D"}, {"stub-lba-overlap", 24, 4, 1, "D"},
-                    {"stub-end-inverted", 28, 4, 0, "D"}, {"stub-end-huge", 28, 4, 0x100000, "S"}
+                    // area-magic：魔数是 CD 候选探测的识别条件，破坏后 CD 以探测失败（5）结束，HDD 走头部校验（3）
+                    {"area-magic", 0, 4, 0, cd ? "5" : "3"}, {"area-head-short", 6, 2, 4, "3"},
+                    {"area-sector", 8, 4, 1, "3"},
+                    {"segment-magic", 16, 4, 0, "3"}, {"segment-length", 22, 2, 0, "3"},
+                    {"stub-lba-zero", 24, 4, 0, "4"}, {"stub-lba-overlap", 24, 4, 1, "4"},
+                    {"stub-end-inverted", 28, 4, 0, "4"}, {"stub-end-huge", 28, 4, 0x100000, "6"},
+                    {"stub-end-max", 28, 4, 0xFFFFFFFF, cd ? "6" : "4"},
+                    {"stub-count-64k-minus1", 28, 4, static_cast<uint64_t>(stubStart) + 0xFFFE, "6"},
+                    {"stub-count-64k", 28, 4, static_cast<uint64_t>(stubStart) + 0xFFFF, "6"}
                 };
                 for (const auto& mutation : mutations) {
                     auto bad = ReadBytes(base);
@@ -533,7 +549,7 @@ namespace {
                     PutLe(bad, 0x22018, 4, 0x20000000);
                     PutLe(bad, 0x2201C, 4, 0x20000008);
                     WriteBytes(m_work / "bad.img", bad);
-                    Case(media + " unreadable-stub -> L", m_work / "bad.img", media, "L", cd);
+                    Case(media + " unreadable-stub -> 7", m_work / "bad.img", media, "7", cd);
                 }
             }
             Case("混合 ISO 光盘入口", Build(true, 4096, true), "cd", "OK", true);
@@ -558,8 +574,8 @@ namespace {
                 for (const auto& fault : std::vector<std::pair<unsigned, std::string>>{
                          {0, "寄存器破坏"}, {2, "批量失败/DAP改写"}, {3, "前两次失败后恢复"}, {4, "永久失败"},
                          {cd ? 5u : 1u, cd ? "CD备用E1探测" : "无 EDD"}}) {
-                    // HDD 的"无 EDD"与"永久失败"都读不到描述符，期望 R；CD 的永久失败期望 D
-                    const std::string expected = fault.first == 4 ? (cd ? "D" : "R") : (fault.first == 1 ? "R" : "OK");
+                    // HDD 的"无 EDD"与"永久失败"都读不到描述符，期望码 1；CD 的永久失败是候选探测全败，期望码 5
+                    const std::string expected = fault.first == 4 ? (cd ? "5" : "1") : (fault.first == 1 ? "1" : "OK");
                     Fault(cd, fault.first, fault.second, 4096, fault.first == 5 ? 0 : (cd ? 0xE0 : 0x80), fault.first == 5 ? 0xE1 : (cd ? 0xE0 : 0x80), expected);
                 }
             }
@@ -569,14 +585,14 @@ namespace {
             Fault(true, 0, "原始 DL=90 优先并保留", 4096, 0x90, 0x90, "OK");
             // 全部候选失败时对 E1 只探测一轮：一次单扇区探测含 3 次批量尝试与 3 次逐扇区回退，
             // 旧行为在 E0 失败后会重复探测 E1，计数翻倍
-            Fault(true, 6, "原始 DL=E1 只探测一轮 -> D", 4096, 0xE1, 0xE0, "D", 6);
-            // AH=48：失败回落 512，短表与未知大小拒绝，报告 4096 时整条链按 4Kn 装载
+            Fault(true, 6, "原始 DL=E1 只探测一轮 -> 5", 4096, 0xE1, 0xE0, "5", 6);
+            // AH=48：失败回落 512，短表与未知大小拒绝（码 2），报告 4096 时整条链按 4Kn 装载
             Fault(false, 0, "AH48 查询失败回落 512", 4096, 0x80, 0x80, "OK", 0, 512, 2);
-            Fault(false, 0, "AH48 短表 -> D", 4096, 0x80, 0x80, "D", 0, 512, 3);
-            Fault(false, 0, "AH48 未知扇区大小 -> D", 4096, 0x80, 0x80, "D", 0, 512, 4);
+            Fault(false, 0, "AH48 短表 -> 2", 4096, 0x80, 0x80, "2", 0, 512, 3);
+            Fault(false, 0, "AH48 未知扇区大小 -> 2", 4096, 0x80, 0x80, "2", 0, 512, 4);
             Fault(false, 0, "AH48 报告 4Kn 完整装载", 4096, 0x80, 0x80, "OK", 0, 4096, 1);
             // 软盘与 USB-FDD 的 DL<0x80 不在支持范围：HDD 入口直接拒绝
-            Fault(false, 0, "HDD DL<0x80 -> D", 4096, 0x00, 0x00, "D");
+            Fault(false, 0, "HDD DL<0x80 -> 2", 4096, 0x00, 0x00, "2");
             Require(m_count == kCaseCount, "内部回归用例数量不符");
             std::cout << "CheckIpl: " << m_count << " 项全部通过（ENABLE_E9=" << m_options.e9 << "）" << std::endl;
         }

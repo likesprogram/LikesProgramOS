@@ -6,4 +6,4 @@
 
 %INCLUDE "Contract.inc"
 
-LOADER_PM_STACK  EQU 0x7000      ; 保护模式栈顶，在 IPL 区下方，向下增长
+STUB_STACK_BYTES EQU 0x1000      ; 保护模式栈长度，栈在未初始化区末尾，向下增长

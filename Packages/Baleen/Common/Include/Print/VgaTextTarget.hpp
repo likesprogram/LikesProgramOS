@@ -17,12 +17,12 @@ namespace Baleen {
             static constexpr uint32_t kRows = 25;                // 文本行数
             static constexpr uint8_t kDefaultAttribute = 0x0F;   // 默认属性字节：白字黑底
 
-            // 常量初始化不依赖启动运行库；Stub/Core 都可以直接定义静态实例
+            // 常量初始化不依赖启动运行库；Stub/BaleenCore 都可以直接定义静态实例
             constexpr Vga() : m_text(nullptr), m_row(0), m_column(0), m_attribute(kDefaultAttribute), m_hardwareCursor(false) {}
 
             // 绑定物理 VGA 文本页，并接续硬件当前光标；不会清屏
             void Initialize();
-            // 绑定指定文本页和光标位置，不访问 I/O 端口；用于 Core 的内存映射初始化和宿主侧的行为验证
+            // 绑定指定文本页和光标位置，不访问 I/O 端口；用于 BaleenCore 的内存映射初始化和宿主侧的行为验证
             // 指定地址必须指向至少 kColumns*kRows 个单元
             void Initialize(volatile uint16_t* textMemory, uint32_t position);
             // 是否已绑定文本页

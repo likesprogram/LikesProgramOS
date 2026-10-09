@@ -18,14 +18,16 @@ CXX       ?= g++
 # 汇编器
 NASM      ?= nasm
 # 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
-CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
+# 优化级别取 -Os：Baleen 的 32 位阶段在低 64KiB 静态窗口里运行，代码体积优先于指令数；
+# 宿主工具与 64 位内核各自按 -O2 编译，不受这里影响
+CXXFLAGS  ?= -m32 -std=c++20 -Os -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR)
 # 汇编选项：32 位保护模式目标文件，警告视为错误
 NASMFLAGS ?= -f elf32 -Werror
 
 # C++ 源与产物
-CPP_OBJS  := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Descriptor.o)
+CPP_OBJS  := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Descriptor.o KernelImage.o)
 # 存储抽象的产物：错误模型、统一路径、偏移视图与文件系统抽象
 STORAGE_OBJS := $(addprefix $(OBJ_DIR)/,Error.o Path.o SubDevice.o FileSystem.o)
 # 汇编源与产物；与同名 C++ 源以 _asm 后缀区分

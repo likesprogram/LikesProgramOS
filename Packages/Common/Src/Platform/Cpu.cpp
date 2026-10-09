@@ -61,6 +61,7 @@ namespace {
     constexpr uint16_t kCr0Protected = 0x0001;         // CR0 的 PE 位，落在低 16 位内
     constexpr uint32_t kFeaturePae = 1u << 6;          // CPUID.01H:EDX bit 6
     constexpr uint32_t kFeatureLongMode = 1u << 29;    // CPUID.80000001H:EDX bit 29
+    constexpr uint32_t kFeatureNx = 1u << 20;          // CPUID.80000001H:EDX bit 20
     constexpr uint32_t kMsrEfer = 0xC0000080;          // IA32_EFER
     constexpr uint32_t kEferLongModeActive = 1u << 10; // EFER 的 LMA 位，只读
     constexpr uint8_t kDescriptorLong = 0x20;          // 段描述符字节 6 的 bit5：L，即第二双字的 bit21
@@ -156,6 +157,7 @@ namespace Platform {
         m_hasCpuid = false;
         m_hasPae = false;
         m_hasLongMode = false;
+        m_hasNx = false;
         m_maxBasicLeaf = 0;
         m_maxExtendedLeaf = 0;
         m_vendor[0] = '\0';
@@ -180,6 +182,7 @@ namespace Platform {
                 if (m_maxExtendedLeaf >= 0x80000001) {
                     _Cpu_Cpuid(0x80000001, &eax, &ebx, &ecx, &edx);
                     m_hasLongMode = (edx & kFeatureLongMode) != 0;
+                    m_hasNx = (edx & kFeatureNx) != 0;
                 }
             }
         }

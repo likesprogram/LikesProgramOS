@@ -15,7 +15,7 @@ COMMON_DIR := ../Common
 # C++ 编译器
 CXX      ?= g++
 # 预处理选项
-CPPFLAGS ?= -I$(INC_DIR) -I$(COMMON_DIR)/Include
+CPPFLAGS ?= -I$(INC_DIR) -I$(COMMON_DIR)/Include -I../../../Packages/Baleen/Common/Include
 # 编译选项：常见警告全开并视为错误
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 # 链接选项：链接器警告视为错误
@@ -24,7 +24,7 @@ LDFLAGS  ?= -Wl,--fatal-warnings
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/MakeImage
 # 目标文件
-OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/Iso9660.o $(OBJ_DIR)/Image.o $(OBJ_DIR)/Baleen.o $(OBJ_DIR)/HostIo.o $(OBJ_DIR)/Fat.o $(OBJ_DIR)/BaleenImage.o $(OBJ_DIR)/Sha256.o
+OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/Iso9660.o $(OBJ_DIR)/Image.o $(OBJ_DIR)/Baleen.o $(OBJ_DIR)/HostIo.o $(OBJ_DIR)/BaleenLayout.o $(OBJ_DIR)/Fat.o $(OBJ_DIR)/BaleenImage.o $(OBJ_DIR)/Sha256.o
 # 头文件依赖清单
 DEPS := $(OBJS:.o=.d)
 

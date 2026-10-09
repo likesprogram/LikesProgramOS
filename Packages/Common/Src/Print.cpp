@@ -44,4 +44,14 @@ namespace Print {
         text[10] = '\0';
         Write(text);
     }
+
+    void WriteHex64(uint64_t value) {
+        static const char kDigits[] = "0123456789ABCDEF";
+        char text[19];   // "0x" 加 16 位数字加结尾
+        text[0] = '0';
+        text[1] = 'x';
+        for (uint32_t i = 0; i < 16; ++i) text[2 + i] = kDigits[(value >> (60 - 4 * i)) & 0xF];
+        text[18] = '\0';
+        Write(text);
+    }
 }

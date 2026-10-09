@@ -1,7 +1,7 @@
 /* Fixtures.h
-    CheckStub 的内嵌 NASM 夹具：探针 Core 的源码
+    CheckStub 的内嵌 NASM 夹具：探针 BaleenCore 的源码
 
-    探针 Core 由 CheckStub 汇编后组装入口前缀与完整性头，Stub 校验头与摘要后把它装到
+    探针 BaleenCore 由 CheckStub 汇编后组装入口前缀与完整性头，Stub 校验头与摘要后把它装到
     1MiB 并交权；代码先核对交权块的格式标记，再依次调用 write、sectorSize、readSectors
     与 memoryMapQuery 四个服务，全部通过就向 isa-debug-exit 端口写约定值退出，
     任一失败经 write 服务打印带原因的行后停机；交权块本身不可用时退回 0xE9 与 COM1
@@ -13,7 +13,7 @@
 #include <string_view>
 
 namespace checkstub {
-    // 探针 Core：BITS 32，ORG 为装入地址加入口偏移，代码落在镜像文件偏移 0x90 处
+    // 探针 BaleenCore：BITS 32，ORG 为装入地址加入口偏移，代码落在镜像文件偏移 0x90 处
     inline constexpr std::string_view kProbeCoreAsm = R"ASM(
 BITS 32
 ORG CORE_ENTRY
@@ -146,7 +146,7 @@ Direct:
     INC EBX
     JMP Direct
 
-Msg_Ok:      DB "CHECKSTUB-CORE-OK services", 13, 10, 0
+Msg_Ok:      DB "CHECKSTUB-BALEENCORE-OK services", 13, 10, 0
 Msg_Sector:  DB "CHECKSTUB-CORE-FAIL sector-size", 13, 10, 0
 Msg_Read:    DB "CHECKSTUB-CORE-FAIL read-sectors", 13, 10, 0
 Msg_Mmap:    DB "CHECKSTUB-CORE-FAIL memory-map", 13, 10, 0

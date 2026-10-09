@@ -4,7 +4,7 @@
 %INCLUDE "Init.inc"
 
     CALL Cd_Try_Desc
-    JC _Err_Desc
+    JC _Err_Probe
 
 %INCLUDE "Body.inc"
 %INCLUDE "Error.inc"

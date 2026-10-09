@@ -11,6 +11,7 @@
 #include <Image.h>
 #include <Iso9660.h>
 #include <BaleenImage.h>
+#include <BaleenLayout.h>
 
 #include <algorithm>
 #include <array>
@@ -29,12 +30,17 @@
 namespace {
     using hostbuild::AlignUp;
     using hostbuild::BaseName;
+    using hostbuild::BaleenLayout;
+    using hostbuild::BaleenLayoutSpec;
     using hostbuild::BootCatalogEntry;
     using hostbuild::BootCatalogSpec;
+    using hostbuild::BuildBaleenLayout;
     using hostbuild::DescriptorArea;
     using hostbuild::CheckPayload;
+    using hostbuild::CheckStubBytes;
     using hostbuild::BuildDescriptorArea;
     using hostbuild::FileSize;
+    using hostbuild::ReadTemplateKernelPath;
     using hostbuild::RequireFat16Image;
     using hostbuild::Image;
     using hostbuild::Iso9660;
@@ -77,6 +83,8 @@ namespace {
         std::string esp;                                                   // 混合镜像的 ESP 分区内容（必须 FAT16）
         std::string system_volume;                                         // 系统卷镜像（Ext4）
         std::string iso_name;                                              // 系统卷在 ISO 内的文件名
+        std::string layout;                                                // 布局描述模板：提供内核路径，位置字段仍由本工具回填
+        std::string kernel_path;                                           // 内核路径覆盖值；空表示取模板或默认路径
         std::vector<std::pair<std::string, std::string>> files;            // ISO 路径 -> 宿主路径
         std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移
         std::string manifest;                                              // 构建清单输出路径
@@ -84,7 +92,7 @@ namespace {
         uint32_t sector_bytes = 512;                                       // 混合 MBR 的 LBA 单位：512 或 4096
         std::string descs = "Packages/Baleen/Common/Out/Descs";            // 描述符段产物目录：头部与各段拆开，本工具只回填起止位置
         bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
-        bool core_unchecked = false;                                       // 是否免除 Core 头与摘要校验
+        bool core_unchecked = false;                                       // 是否免除 BaleenCore 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
     };
 
@@ -122,10 +130,12 @@ namespace {
             "  --esp PATH               混合镜像的 ESP 分区内容（必须 FAT16）\n"
             "  --system-volume PATH     系统卷镜像（Ext4）：作为连续 ISO 文件存放，并写 Ext4 分区项\n"
             "  --iso-name NAME          系统卷在 ISO 内的文件名，默认取源文件名\n"
+            "  --layout PATH            布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用 /LikesProgram/System/LikesProgram.os（见 Docs/Specs/Common/系统卷布局.md）\n"
+            "  --kernel-path PATH       覆盖内核路径（卷内绝对路径），优先于模板\n"
             "  --file ISO路径=宿主路径   附加文件，可重复（中间目录自动建立）\n"
             "  --raw 宿主路径[@偏移]     原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
             "  --stub-unchecked         免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
-            "  --core-unchecked         免除 Core 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
+            "  --core-unchecked         免除 BaleenCore 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
             "\n"
             "ISO 元数据：\n"
             "  --volume-id ID           卷标识，默认 LIKESPROGRAM\n"
@@ -157,6 +167,8 @@ namespace {
             else if (arg == "--efi") options.efi = needValue(i, arg);
             else if (arg == "--esp") options.esp = needValue(i, arg);
             else if (arg == "--system-volume") options.system_volume = needValue(i, arg);
+            else if (arg == "--layout") options.layout = needValue(i, arg);
+            else if (arg == "--kernel-path") options.kernel_path = needValue(i, arg);
             else if (arg == "--iso-name") options.iso_name = needValue(i, arg);
             else if (arg == "--file") {
                 const std::string value = needValue(i, arg);
@@ -198,7 +210,7 @@ namespace {
         std::vector<Placed> files;                          // 附加文件（--file）
         std::string volume_iso_path;                        // 系统卷在 ISO 内的路径
         PayloadInfo stub_info;                              // Stub 载荷的门禁结果
-        PayloadInfo core_info;                              // Core 载荷的门禁结果
+        PayloadInfo core_info;                              // BaleenCore 载荷的门禁结果
     };
 
     // 校验选项并固定引导镜像的位置，返回待组装的布局骨架
@@ -221,10 +233,8 @@ namespace {
         build.boot_sectors_512 = static_cast<uint16_t>((bootBytes + 511) / 512);
 
         if (!options.stub.empty()) {
-            const uint64_t bytes = FileSize(options.stub);
-            // CD 按 2048 字节整块读取，装入空间最多容纳 0x8000 字节
-            constexpr uint64_t maxBytes = DescriptorArea::kMaxStubBytes / kBlock * kBlock;
-            if (bytes == 0 || bytes > maxBytes) throw std::runtime_error("Stub 长度必须非 0 且不超过 CD 整块读取上限 0x8000：" + options.stub);
+            // 长度按跨介质共用上限检查，与 TestInstaller 共用同一份实现
+            CheckStubBytes(FileSize(options.stub), options.stub);
             // 带头产物校验头字段与摘要，占位内容放行并在 stderr 说明
             build.stub_info = CheckPayload(options.stub, ImageKind::Stub, options.stub_unchecked, "--stub-unchecked");
         }
@@ -274,8 +284,10 @@ namespace {
 
         Reservations reserved;
         reserved.Reserve("元数据区", 0, build.layout.metadata_end);
-        // 描述符区（0x22000 起）不得被 ISO 元数据覆盖
-        if (build.layout.metadata_end > DescriptorArea::kWriteOffset) throw std::runtime_error("ISO 元数据区越过描述符区位置 0x22000，布局需要后移");
+        // 布局描述（0x20000）不得被 ISO 元数据覆盖；它是 BaleenCore 定位系统卷的唯一来源
+        if (build.layout.metadata_end > BaleenLayout::kWriteOffset) throw std::runtime_error("ISO 元数据区越过布局描述位置 0x20000，布局需要后移");
+        // 引导区的固定结构：布局描述与引导状态区域占 [0x20000, 0x22000)，任何载荷不得覆盖
+        reserved.Reserve("布局描述与引导状态区域", BaleenLayout::kWriteOffset, BaleenLayout::kReservedEnd - BaleenLayout::kWriteOffset);
         // 载荷起点在元数据之后，且不早于描述符区之后：512 与 4096 两种单位下都安全
         uint64_t cursor = std::max<uint64_t>(build.layout.metadata_end, 0x23000);
         // 按 4096 对齐分配一段连续空间并登记占用：载荷在 512 / 2048 / 4096 逻辑扇区下都整扇区可读
@@ -345,6 +357,23 @@ namespace {
             if (extent.bytes > 0) volumePlaced = Placed{build.volume_iso_path, extent.offset, extent.bytes};
         }
         build.volume = volumePlaced;
+
+        // 布局描述：内核路径取自 --kernel-path 或模板，卷标识、系统卷位置与状态区域由本工具回填
+        // 写到引导区的固定位置，BaleenCore 按 0x20000 直接读，不需要解析 ISO9660
+        std::string layoutKernelPath;
+        bool layoutWritten = false;
+        if (volumePlaced.has_value()) {
+            BaleenLayoutSpec spec;
+            spec.volume_image = options.system_volume;
+            spec.volume_offset = volumePlaced->offset;
+            spec.volume_bytes = volumePlaced->bytes;
+            if (!options.kernel_path.empty()) spec.kernel_path = options.kernel_path;
+            else if (!options.layout.empty()) spec.kernel_path = ReadTemplateKernelPath(options.layout);
+            const std::vector<uint8_t> block = BuildBaleenLayout(spec);
+            image.Write(BaleenLayout::kWriteOffset, block);
+            layoutKernelPath = spec.kernel_path;
+            layoutWritten = true;
+        } else std::cerr << "MakeImage: 未提供 --system-volume，不写布局描述，BaleenCore 无法定位系统卷\n";
         if (!options.mbr.empty()) {
             std::vector<uint8_t> mbr = ReadFile(options.mbr);
             std::fill(mbr.begin() + 446, mbr.begin() + 446 + 64, 0);   // 四个槽先清空，再写有内容的
@@ -420,6 +449,14 @@ namespace {
                         "\", \"offset\": " + std::to_string(build.volume->offset) +
                         ", \"bytes\": " + std::to_string(build.volume->bytes) + "},\n";
         } else manifest += "  \"system_volume\": null,\n";
+        // 布局描述的内容摘要：系统卷位置与卷标识可从系统卷镜像复核，这里记录实际写入的取值
+        if (layoutWritten) {
+            manifest += "  \"layout\": {\"offset\": " + std::to_string(BaleenLayout::kWriteOffset) +
+                        ", \"bytes\": " + std::to_string(BaleenLayout::kBlockBytes) +
+                        ", \"state_offset\": " + std::to_string(BaleenLayout::kStateOffset) +
+                        ", \"state_bytes\": " + std::to_string(BaleenLayout::kStateBytes) +
+                        ", \"kernel_path\": \"" + JsonEscape(layoutKernelPath) + "\"},\n";
+        } else manifest += "  \"layout\": null,\n";
         manifest += "  \"files\": [";
         for (std::size_t i = 0; i < build.files.size(); ++i) {
             manifest += (i == 0 ? "\n    " : ",\n    ");
@@ -448,11 +485,12 @@ namespace {
         if (build.stub.has_value() || build.core.has_value()) std::cout << "  描述符区    偏移 " << DescriptorArea::kWriteOffset << "，段产物目录 " << options.descs << "\n";
         if (build.stub.has_value()) std::cout << "  Stub 载荷   偏移 " << build.stub->offset << "，字节 " << build.stub->bytes << "\n";
         if (build.stub.has_value()) std::cout << "  Stub 载荷：" << PayloadSummary(build.stub_info) << "\n";
-        if (build.core.has_value()) std::cout << "  Core 载荷   偏移 " << build.core->offset << "，字节 " << build.core->bytes << "\n";
-        if (build.core.has_value()) std::cout << "  Core 载荷：" << PayloadSummary(build.core_info) << "\n";
+        if (build.core.has_value()) std::cout << "  BaleenCore 载荷   偏移 " << build.core->offset << "，字节 " << build.core->bytes << "\n";
+        if (build.core.has_value()) std::cout << "  BaleenCore 载荷：" << PayloadSummary(build.core_info) << "\n";
         if (build.efi.has_value()) std::cout << "  El Torito EFI 镜像 偏移 " << build.efi->offset << "，字节 " << build.efi->bytes << "\n";
         if (build.esp.has_value()) std::cout << "  ESP（FAT16）偏移 " << build.esp->offset << " 与 " << build.esp_4kn->offset << "，字节 " << build.esp->bytes << "（0xEF 分区，两份）\n";
         if (build.volume.has_value()) std::cout << "  系统卷      ISO 路径 " << build.volume_iso_path << "，偏移 " << build.volume->offset << "，字节 " << build.volume->bytes << "（Ext4 分区）\n";
+        if (layoutWritten) std::cout << "  布局描述    偏移 " << BaleenLayout::kWriteOffset << "，状态区域 " << BaleenLayout::kStateOffset << "，内核路径 " << layoutKernelPath << "\n";
         return 0;
     }
 }

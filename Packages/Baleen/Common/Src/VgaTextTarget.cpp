@@ -76,8 +76,7 @@ namespace Baleen {
         }
 
         uint16_t Vga::Cell(char character) const {
-            return static_cast<uint16_t>((static_cast<uint16_t>(m_attribute) << 8) |
-                                         static_cast<uint8_t>(character));
+            return static_cast<uint16_t>((static_cast<uint16_t>(m_attribute) << 8) | static_cast<uint8_t>(character));
         }
 
         void Vga::SyncCursor() const {

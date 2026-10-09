@@ -1,9 +1,9 @@
 /* main.cpp
     CheckStub：Stub 阶段的宿主侧回归，手工执行，不构成默认构建依赖
 
-    用真实的 IPL 与 Stub 产物加内嵌探针 Core 组装镜像，在 QEMU 里核对三类行为：
-    成功路径的完整步骤、摘要校验与交权块四个服务在 Core 运行期的可用性；
-    Stub 自身自检、描述符区与 Core 段、Core 镜像头各字段的拒绝路径；读盘失败与装载区约束
+    用真实的 IPL 与 Stub 产物加内嵌探针 BaleenCore 组装镜像，在 QEMU 里核对三类行为：
+    成功路径的完整步骤、摘要校验与交权块四个服务在 BaleenCore 运行期的可用性；
+    Stub 自身自检、描述符区与 BaleenCore 段、BaleenCore 镜像头各字段的拒绝路径；读盘失败与装载区约束
     失败用例读 0xE9 调试口输出的 FATAL 原因文本，成功用例核对 isa-debug-exit 的退出码
 */
 
@@ -212,9 +212,9 @@ namespace {
     // 描述符区独占一个扇区：头部之后是段序列，每段自带长度；位置只按扇区表达
     constexpr std::size_t kAreaOffset = 0x22000;           // 描述符区在介质上的字节偏移（LBA 272 / 68 / 34）
     constexpr std::size_t kStubSegmentOffset = 0x22010;    // Stub 段：头部 16 字节之后
-    constexpr std::size_t kCoreSegmentOffset = 0x22020;    // Core 段：紧随 Stub 段
-    constexpr uint32_t kCoreLoad = 0x100000;               // Core 装入的物理地址
-    // 探针 Core 的映像长度：跨过 64KiB，让 Stub 的高位装载分批与拷贝路径也被走到
+    constexpr std::size_t kCoreSegmentOffset = 0x22020;    // BaleenCore 段：紧随 Stub 段
+    constexpr uint32_t kCoreLoad = 0x100000;               // BaleenCore 装入的物理地址
+    // 探针 BaleenCore 的映像长度：跨过 64KiB，让 Stub 的高位装载分批与拷贝路径也被走到
     constexpr std::size_t kProbeImageBytes = 0x11000;
     // isa-debug-exit：写 0x10 时 QEMU 以 (0x10 << 1) | 1 退出
     constexpr int kExitOk = (0x10 << 1) | 1;
@@ -231,22 +231,25 @@ namespace {
     constexpr std::size_t kSegEndLba = 0x0C;
     // 用例总数，Execute 末尾核对，防止用例被误删
     constexpr unsigned kCaseCount = 28;
+    // 探针模式附加的用例数：三种介质各一例，核对实模式栈探针的判定行
+    constexpr unsigned kStackProbeCaseCount = 3;
 
-    // 篡改目标：描述符区头部、两枚段、镜像里的 Stub 文件或 Core 文件
+    // 篡改目标：描述符区头部、两枚段、镜像里的 Stub 文件或 BaleenCore 文件
     enum class Target {
         DescriptorArea,   // 描述符区头部
         StubSegment,      // Stub 段
-        CoreSegment,      // Core 段
+        CoreSegment,      // BaleenCore 段
         StubFile,         // 镜像里的 Stub 文件
-        CoreFile,         // 镜像里的 Core 文件
+        CoreFile,         // 镜像里的 BaleenCore 文件
     };
 
     // 命令行选项
     struct Options {
-        fs::path stubDir;      // Stub 产物目录，含 BaleenStub.bin
-        fs::path iplDir;       // IPL 产物目录，含 BaleenIPL.bin 与 BaleenIPLCd.bin
-        fs::path root;         // 项目根，用于定位 Tools/Bin；为空时取可执行文件同目录
-        bool keep = false;     // 保留工作目录
+        fs::path stubDir;            // Stub 产物目录，含 BaleenStub.bin
+        fs::path iplDir;             // IPL 产物目录，含 BaleenIPL.bin 与 BaleenIPLCd.bin
+        fs::path root;               // 项目根，用于定位 Tools/Bin；为空时取可执行文件同目录
+        bool keep = false;           // 保留工作目录
+        bool stackProbe = false;     // 栈探针模式：附加三例，核对实模式栈探针的判定行
     };
 
     // 解析命令行并检查必选参数
@@ -262,12 +265,14 @@ namespace {
                 std::cout <<
                     "CheckStub — Stub 阶段的宿主侧回归（QEMU）\n"
                     "\n"
-                    "用法：CheckStub --stub-dir <目录> --ipl-dir <目录> [--root <项目根>] [--keep]\n"
+                    "用法：CheckStub --stub-dir <目录> --ipl-dir <目录> [--root <项目根>] [--keep] [--stack-probe]\n"
                     "\n"
                     "  --stub-dir  BaleenStub.bin 所在目录，通常是 Packages/Baleen/Stub/Out/Bin\n"
                     "  --ipl-dir   BaleenIPL.bin 与 BaleenIPLCd.bin 所在目录，通常是 Packages/Baleen/Ipl/Out/Bin\n"
                     "  --root      项目根；缺省时从可执行文件同目录找 MakeImage / TestInstaller\n"
                     "  --keep      保留每例的日志与证据目录\n"
+                    "  --stack-probe  附加三例核对实模式栈探针的判定行；--stub-dir 须指向探针构建，\n"
+                    "                 先跑 make -C Packages/Baleen/Stub STACK_PROBE=1（产物在 Out/Probe/Bin）\n"
                     "\n"
                     "环境变量：NASM、QEMU、CHECKSTUB_TEST_TIMEOUT（每例秒数，1..300，默认 12）\n";
                 std::exit(0);
@@ -276,6 +281,7 @@ namespace {
             else if (arg == "--ipl-dir") options.iplDir = value("--ipl-dir");
             else if (arg == "--root") options.root = value("--root");
             else if (arg == "--keep") options.keep = true;
+            else if (arg == "--stack-probe") options.stackProbe = true;
             else Fail("无法识别的参数：" + std::string(arg));
         }
         Require(!options.stubDir.empty() && !options.iplDir.empty(), "必须提供 --stub-dir 与 --ipl-dir");
@@ -304,10 +310,18 @@ namespace {
             m_4knBase = ReadBytes(Assemble(false, static_cast<uint32_t>(kProbeImageBytes), 4096));
 
             // 成功路径：完整步骤、摘要校验与交权块四个服务
-            Case("hdd 完整引导/交权/四服务", m_hddBase, kExitOk, {"The baleen core image is intact", "CHECKSTUB-CORE-OK services"});
-            Case("cd 完整引导/交权/四服务", m_cdBase, kExitOk, {"The baleen core image is intact", "CHECKSTUB-CORE-OK services"}, 128, true);
+            Case("hdd 完整引导/交权/四服务", m_hddBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services"});
+            Case("cd 完整引导/交权/四服务", m_cdBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services"}, 128, true);
             // 4Kn：IPL 按 4096 逻辑扇区装载，Stub 的四项服务在同一会话单位下可用
-            Case("hdd 4Kn 完整引导/交权/四服务", m_4knBase, kExitOk, {"The baleen core image is intact", "CHECKSTUB-CORE-OK services"}, 128, false, 4096);
+            Case("hdd 4Kn 完整引导/交权/四服务", m_4knBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services"}, 128, false, 4096);
+
+            // 实模式栈探针：STACK_PROBE 构建多出一行判定，三种介质各核对一次
+            // 判定按 Stub 侧的门限给出，工具只看 Verdict=Ok 在不在，不重复一份深度策略
+            if (m_options.stackProbe) {
+                Case("hdd 实模式栈探针", m_hddBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services"});
+                Case("cd 实模式栈探针", m_cdBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services"}, 128, true);
+                Case("hdd 4Kn 实模式栈探针", m_4knBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services"}, 128, false, 4096);
+            }
 
             // Stub 自身自检：头字段、链接布局与摘要
             Mutate(Target::StubFile, "stub magic", 0x10, 4, 0, "The image header magic doesn't match");
@@ -315,53 +329,57 @@ namespace {
             Mutate(Target::StubFile, "stub image bytes", 0x20, 4, 0x1000, "The stub image size doesn't match the linked layout");
             Mutate(Target::StubFile, "stub memory bytes", 0x24, 4, 0x9000, "The stub memory size doesn't match the linked layout");
 
-            // 描述符区头部：IPL 先于 Stub 校验，破坏在这里会由 IPL 以 D 停机
-            Mutate(Target::DescriptorArea, "area magic", kHeadMagic, 4, 0, "D");
-            Mutate(Target::DescriptorArea, "area head bytes", kHeadBytes, 2, 4, "D");
-            Mutate(Target::DescriptorArea, "area sector", kHeadLba, 4, 1, "D");
+            // 描述符区头部：IPL 先于 Stub 校验，破坏在这里会由 IPL 以 3 停机
+            Mutate(Target::DescriptorArea, "area magic", kHeadMagic, 4, 0, "3");
+            Mutate(Target::DescriptorArea, "area head bytes", kHeadBytes, 2, 4, "3");
+            Mutate(Target::DescriptorArea, "area sector", kHeadLba, 4, 1, "3");
             // 本区结束扇区只由 Stub 校验
             Mutate(Target::DescriptorArea, "area end inverted", kHeadEndLba, 4, 0, "The CoreDescriptor area range is inverted");
 
             // Stub 段：段长与标记由 IPL 的遍历先看到
-            Mutate(Target::StubSegment, "stub segment length", kSegLength, 2, 0, "D");
-            Mutate(Target::StubSegment, "stub segment magic", kSegMagic, 4, 0, "D");
+            Mutate(Target::StubSegment, "stub segment length", kSegLength, 2, 0, "3");
+            Mutate(Target::StubSegment, "stub segment magic", kSegMagic, 4, 0, "3");
 
-            // Core 段：IPL 不读它，由 Stub 校验
-            Mutate(Target::CoreSegment, "core segment lba zero", kSegLba, 4, 0, "The CoreDescriptor LBA is zero");
-            Mutate(Target::CoreSegment, "core segment lba overlap", kSegLba, 4, 272, "The CoreDescriptor overlaps the descriptor sector");
-            Mutate(Target::CoreSegment, "core segment end inverted", kSegEndLba, 4, 0, "The CoreDescriptor range is inverted");
+            // BaleenCore 段：IPL 不读它，由 Stub 校验
+            Mutate(Target::CoreSegment, "BaleenCore segment lba zero", kSegLba, 4, 0, "The CoreDescriptor LBA is zero");
+            Mutate(Target::CoreSegment, "BaleenCore segment lba overlap", kSegLba, 4, 272, "The CoreDescriptor overlaps the descriptor sector");
+            Mutate(Target::CoreSegment, "BaleenCore segment end inverted", kSegEndLba, 4, 0, "The CoreDescriptor range is inverted");
 
-            // Core 镜像头：与 Stub 同构的头字段与入口前缀
+            // BaleenCore 镜像头：与 Stub 同构的头字段与入口前缀
             using Head = hostbuild::ImageHeaderLayout;
-            Mutate(Target::CoreFile, "core magic", Head::kOffset + Head::kFieldMagic, 4, 0, "The image header magic doesn't match");
-            Mutate(Target::CoreFile, "core version", Head::kOffset + Head::kFieldVersion, 2, 2, "The image header version or header length isn't supported");
-            Mutate(Target::CoreFile, "core flags", Head::kOffset + Head::kFieldFlags, 4, 1, "The image header flags aren't supported");
-            Mutate(Target::CoreFile, "core digest algorithm", Head::kOffset + Head::kFieldDigestAlgorithm, 2, 2, "The image header digest algorithm isn't supported");
-            Mutate(Target::CoreFile, "core build id length", Head::kOffset + Head::kFieldBuildIdBytes, 2, 16, "The image header build id length isn't supported");
-            Mutate(Target::CoreFile, "core reserved", Head::kOffset + Head::kFieldReserved, 4, 1, "The image header reserved bytes aren't zero");
-            Mutate(Target::CoreFile, "core entry prefix", 0x00, 1, 0x90, "The image entry prefix doesn't match the entry offset");
-            Mutate(Target::CoreFile, "core image bytes", Head::kOffset + Head::kFieldImageBytes, 4, 0x1000, "The CoreDescriptor sector count doesn't match the core header");
-            Mutate(Target::CoreFile, "core memory bytes", Head::kOffset + Head::kFieldMemoryBytes, 4, 0x400001, "The CoreMemoryBytes is beyond the limit");
+            Mutate(Target::CoreFile, "BaleenCore magic", Head::kOffset + Head::kFieldMagic, 4, 0, "The image header magic doesn't match");
+            Mutate(Target::CoreFile, "BaleenCore version", Head::kOffset + Head::kFieldVersion, 2, 2, "The image header version or header length isn't supported");
+            Mutate(Target::CoreFile, "BaleenCore flags", Head::kOffset + Head::kFieldFlags, 4, 1, "The image header flags aren't supported");
+            Mutate(Target::CoreFile, "BaleenCore digest algorithm", Head::kOffset + Head::kFieldDigestAlgorithm, 2, 2, "The image header digest algorithm isn't supported");
+            Mutate(Target::CoreFile, "BaleenCore build id length", Head::kOffset + Head::kFieldBuildIdBytes, 2, 16, "The image header build id length isn't supported");
+            Mutate(Target::CoreFile, "BaleenCore reserved", Head::kOffset + Head::kFieldReserved, 4, 1, "The image header reserved bytes aren't zero");
+            Mutate(Target::CoreFile, "BaleenCore entry prefix", 0x00, 1, 0x90, "The image entry prefix doesn't match the entry offset");
+            Mutate(Target::CoreFile, "BaleenCore image bytes", Head::kOffset + Head::kFieldImageBytes, 4, 0x1000, "The CoreDescriptor sector count doesn't match the BaleenCore header");
+            Mutate(Target::CoreFile, "BaleenCore memory bytes", Head::kOffset + Head::kFieldMemoryBytes, 4, 0x400001, "The BaleenCore memory bytes are beyond the limit");
 
             // 摘要不符：只改代码字节，头与描述符保持一致
-            Mutate(Target::CoreFile, "core digest mismatch", 0x100, 4, 0, "The image digest doesn't match");
+            Mutate(Target::CoreFile, "BaleenCore digest mismatch", 0x100, 4, 0, "The image digest doesn't match");
 
-            // 读盘失败：Core 段的起止扇区一起指向介质之外，两者保持自洽
+            // 读盘失败：BaleenCore 段的起止扇区一起指向介质之外，两者保持自洽
+            // 除原因文本外还核对失败现场：失败请求的 LBA、块数、固件 AH 与失败阶段；AH 的具体值随固件
             {
                 Bytes image = m_hddBase;
                 const uint64_t outside = static_cast<uint64_t>(image.size()) / 512;
                 PutLe(image, kCoreSegmentOffset + kSegLba, outside, 4);
                 PutLe(image, kCoreSegmentOffset + kSegEndLba, outside + 4, 4);
-                Case("core unreadable", image, std::nullopt, {"Read the BaleenCore header"});
+                Case("BaleenCore unreadable", image, std::nullopt,
+                     {"Read the BaleenCore header", "Lba=" + Hex(outside), "Count=0x00000001", "Ah=0x", "Phase=SingleEdd"});
             }
 
             // 装载区不可用：静态内存跨度到上限，虚拟机内存压到 4 MiB
             Case("hdd 装载区不可用", ReadBytes(Assemble(false, 0x400000)), std::nullopt, {"The BaleenCore load area isn't usable memory"}, 4);
 
-            Require(m_count == kCaseCount, "内部回归用例数量不符");
+            Require(m_count == ExpectedCount(), "内部回归用例数量不符");
             std::cout << "CheckStub: " << m_count << " 项全部通过" << std::endl;
         }
     private:
+        // 本次运行的用例总数：探针模式在基础用例之外附加三例
+        unsigned ExpectedCount() const { return kCaseCount + (m_options.stackProbe ? kStackProbeCaseCount : 0); }
         // 用 NASM 汇编夹具源码，definitions 里的每项加一个 -D 定义
         void Assemble(std::string_view source, const fs::path& target, const std::vector<std::pair<std::string, uint64_t>>& definitions) {
             const auto file = m_work / "fixture.asm";
@@ -371,7 +389,7 @@ namespace {
             command.insert(command.end(), {"-o", target.string(), file.string()});
             Run(command, m_work / "nasm.log");
         }
-        // 组装探针 Core：入口前缀、保留区、完整性头与探针代码，补零后填身份与摘要
+        // 组装探针 BaleenCore：入口前缀、保留区、完整性头与探针代码，补零后填身份与摘要
         Bytes BuildProbe(uint32_t sectorBytes, uint32_t memoryBytes) {
             const auto code = m_work / "probe-core-code.bin";
             Assemble(checkstub::kProbeCoreAsm, code, {
@@ -388,9 +406,9 @@ namespace {
             });
             const Bytes body = ReadBytes(code);
             const std::size_t entryAt = hostbuild::ImageHeaderLayout::kEntryOffset;
-            Require(body.size() + entryAt <= kProbeImageBytes, "探针 Core 代码超出映像长度上限");
+            Require(body.size() + entryAt <= kProbeImageBytes, "探针 BaleenCore 代码超出映像长度上限");
             Bytes image(kProbeImageBytes, 0);
-            // 入口前缀与头字段：与 MakePayloads 组装的占位 Core 同一套布局与填充顺序
+            // 入口前缀与头字段：与 MakePayloads 组装的占位 BaleenCore 同一套布局与填充顺序
             image[0] = hostbuild::ImageHeaderLayout::kNearJumpOpcode;
             PutLe(image, 1, entryAt - hostbuild::ImageHeaderLayout::kPrefixBytes, 2);
             std::copy(body.begin(), body.end(), image.begin() + static_cast<std::ptrdiff_t>(entryAt));
@@ -409,7 +427,7 @@ namespace {
             hostbuild::VerifyImage(image, hostbuild::ImageKind::Core);
             return image;
         }
-        // 用 MakeImage / TestInstaller 组装一份镜像：真实 Stub 加探针 Core
+        // 用 MakeImage / TestInstaller 组装一份镜像：真实 Stub 加探针 BaleenCore
         // sectorBytes 为本地逻辑扇区大小；0 表示按介质推断：光盘 2048、磁盘 512
         fs::path Assemble(bool cd, uint32_t memoryBytes, uint32_t sectorBytes = 0) {
             if (sectorBytes == 0) sectorBytes = cd ? 2048 : 512;
@@ -452,7 +470,7 @@ namespace {
             WriteBytes(path, image);
             RunQemu(path, expectExit, expectText, local, memoryMiB, cd, sectorBytes);
             ++m_count;
-            std::cout << "CheckStub: " << m_count << "/" << kCaseCount << " " << name << " 通过" << std::endl;
+            std::cout << "CheckStub: " << m_count << "/" << ExpectedCount() << " " << name << " 通过" << std::endl;
         }
         // 启动 QEMU：成功路径等进程按 isa-debug-exit 退出，失败路径等 FATAL 原因文本出现
         void RunQemu(const fs::path& image, std::optional<int> expectExit, const std::vector<std::string>& expectText, const fs::path& work, int memoryMiB, bool cd, uint32_t sectorBytes) {

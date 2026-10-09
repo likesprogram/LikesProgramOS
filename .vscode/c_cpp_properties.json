@@ -5,7 +5,7 @@
         {
             "name": "LikesProgramOS",
             // 编译数据库是真源，由 make compile-db 生成，覆盖所有已进构建的源；
-            // includePath 只给还没接上构建的源码（如 Packages/Baleen/Core）兜底
+            // includePath 只给还没接上构建的源码（如 Packages/Baleen/Core（BaleenCore））兜底
             "compileCommands": "${workspaceFolder}/compile_commands.json",
             "includePath": [
                 "${workspaceFolder}/Packages/Common/Include",

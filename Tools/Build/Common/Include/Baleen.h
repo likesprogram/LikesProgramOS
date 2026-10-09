@@ -27,13 +27,16 @@ namespace hostbuild {
         static constexpr uint32_t kSegmentHeadBytes = 8;     // 段头长度：标记 4 + 版本 2 + 段长 2
         static constexpr uint32_t kAreaMagic = 0x43534442;   // 'BDSC'，头部标记
         static constexpr uint32_t kStubMagic = 0x52445342;   // 'BSDR'，Stub 段标记
-        static constexpr uint32_t kCoreMagic = 0x52444342;   // 'BCDR'，Core 段标记
+        static constexpr uint32_t kCoreMagic = 0x52444342;   // 'BCDR'，BaleenCore 段标记
         static constexpr uint32_t kFieldDescLba = 8;         // 头部内：本区起始位置，512 字节基准
         static constexpr uint32_t kFieldDescEndLba = 12;     // 头部内：本区结束位置，512 字节基准，含
         static constexpr uint32_t kFieldSegmentLba = 8;      // 段内：载荷起始位置，512 字节基准
         static constexpr uint32_t kFieldSegmentEndLba = 12;  // 段内：载荷结束位置，512 字节基准，含
-        static constexpr uint64_t kMaxStubBytes = 0x10000 - 0x7E00;  // Stub 装入空间[0x7E00,0x10000)，含整扇区读取
-        static constexpr uint64_t kMaxCoreBytes = 0x400000;          // Core 文件字节数上限
+        static constexpr uint64_t kMaxStubBytes = 0x10000 - 0x7E00;  // 512 字节 HDD 的装入窗口上限，只作窗口事实，不作文件长度检查依据
+        // 跨介质共用产物的文件上限：512 字节 HDD 的窗口上限 0x8200 按 4096 取整后与 4Kn / CD 上限同为 0x8000
+        // 同一份 Stub 必须写进 512e、4Kn 与光盘都可引导，正式组装一律按它检查文件长度
+        static constexpr uint64_t kCompatibleStubBytes = 0x8000;
+        static constexpr uint64_t kMaxCoreBytes = 0x400000;          // BaleenCore 文件字节数上限
     };
 
     // 按段产物拼装描述符区并回填起止位置，返回完整映像
@@ -41,6 +44,11 @@ namespace hostbuild {
     // 按段头的格式标记决定回填哪个载荷的起止位置；不认识的段原样保留，新增段不必改本函数
     // 位置字段按 512 字节基准写（见 DescriptorArea），载荷起点必须 4096 对齐
     std::vector<uint8_t> BuildDescriptorArea(const std::string& descs, const Placed* stub, const Placed* core);
+
+    // 校验 Stub 载荷的文件字节数：非 0 且不超过跨介质共用上限 kCompatibleStubBytes
+    // 512e 专用的 0x8000..0x8200 区间会被 4Kn 与光盘的装入窗口拒绝，正式产物不产出这种组合
+    // 不通过时抛异常，消息里带路径与两个上限的关系
+    void CheckStubBytes(uint64_t bytes, const std::string& path);
 
     // El Torito 引导目录的一项；sector_count 只有 16 位，表达不了的由调用方给截断值
     struct BootCatalogEntry {

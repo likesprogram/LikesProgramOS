@@ -1,10 +1,10 @@
 # Baleen Stub — 约定与结构
 
-`Stub` 是 BIOS 路径中承接 IPL 的实模式服务层：IPL 把它读到 `0000:7E00` 后直接跳过来，机器此时仍是 16 位实模式；Stub 的入口保存 IPL 交来的介质身份，由自己切到 32 位保护模式，随后自检自身完整性、打开 A20、建立运行期段表与中断表、取内存图、探测并读取启动设备，最后按第二节的契约定位 `BaleenCore`、校验其镜像头与整幅摘要，再把它装到高位、通过交权块交给它。源码分工：`Src/Stub.asm` 与 `Src/Stub.cpp` 是入口与主流程，`Src/SelfCheck.cpp` 是自身完整性自检，`Src/LoadCore.cpp` 是 Core 段、镜像头、装载、摘要校验与交权机制，`Src/Bios.asm` 是 BIOS 服务。`make` 产出 `Out/Bin/BaleenStub.bin`：`objcopy` 之后由 `Tools/Bin/PackImage` 填头里的 BuildId 与 Digest，再由顶层组装进镜像。`Src/Bios.asm` 经实模式弹跳提供扇区探测、E820 内存图与低地址读盘，磁盘服务只读不写；读盘批量失败后从原始 LBA 与目标地址逐扇区重读，读盘只走 EDD，服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转。第三节的 `BaleenStubHeader` 随镜像发布，字段由链接器与打包器共同填出；它与 Core 的镜像头同构，布局的单点定义在 `Packages/Baleen/Common/Include/ImageHeader.hpp`。`Include/Const.inc` 只放本包私有常量，交权契约常量取自 `Packages/Baleen/Common/Include/Contract.inc`。
+`Stub` 是 BIOS 路径中承接 IPL 的实模式服务层：IPL 把它读到 `0000:7E00` 后直接跳过来，机器此时仍是 16 位实模式；Stub 的入口保存 IPL 交来的介质身份，由自己切到 32 位保护模式，随后自检自身完整性、打开 A20、建立运行期段表与中断表、取内存图、探测并读取启动设备，最后按第二节的契约定位 `BaleenCore`、校验其镜像头与整幅摘要，再把它装到高位、通过交权块交给它。源码分工：`Src/Stub.asm` 与 `Src/Stub.cpp` 是入口与主流程，`Src/SelfCheck.cpp` 是自身完整性自检，`Src/LoadCore.cpp` 是 BaleenCore 段、镜像头、装载、摘要校验与交权机制，`Src/Bios.asm` 是 BIOS 服务。`make` 产出 `Out/Bin/BaleenStub.bin`：`objcopy` 之后由 `Tools/Bin/PackImage` 填头里的 BuildId 与 Digest，再由顶层组装进镜像。`Src/Bios.asm` 经实模式弹跳提供扇区探测、E820 内存图与低地址读盘，磁盘服务只读不写；读盘批量失败后从原始 LBA 与目标地址逐扇区重读，主路径与回退都以 EDD 为主（含 4Kn），逐扇区回退在 HDD、512 字节扇区且 `LBA<63` 时可退回 `AH=02h` 的 C0H0；服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转。第三节的 `BaleenStubHeader` 随镜像发布，字段由链接器与打包器共同填出；它与 BaleenCore 的镜像头同构，布局的单点定义在 `Packages/Baleen/Common/Include/ImageHeader.hpp`。`Include/Const.inc` 只放本包私有常量，交权契约常量取自 `Packages/Baleen/Common/Include/Contract.inc`。
 
 IPL 的当前行为以 [Baleen 一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 为准；整个引导器的职责见 [Baleen 引导器](../../../Docs/Specs/Baleen/README.md)。本文的 `BaleenStubHeader` 与介质上的描述符区是两个独立结构；头里的 `Version=1` 与 `HeaderBytes=0x80` 标识当前格式。
 
-**源码分工是一条硬约束**：`_Stub_Main` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都在这一段里，步骤变多也不会散到别的文件；`Src/LoadCore.cpp` 只提供机制（读描述符与镜像头、查内存图、挑弹跳窗口、高位拷贝、摘要校验、填交权块），不打印也不停机，失败只回报原因文本。文件与类型名取「装载 Core」这个动作，避免与 Baleen 的 `Core` 阶段混同；`Src/Bios.asm` 同理，只做固件调用，不做诊断排版。
+**源码分工是一条硬约束**：`_Stub_Main` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都在这一段里，步骤变多也不会散到别的文件；`Src/LoadCore.cpp` 只提供机制（读盘自检、读描述符与镜像头、查内存图、挑弹跳窗口、高位拷贝、摘要校验、填交权块），不打印也不停机，失败只回报原因文本。文件与类型名取「装载 BaleenCore」这个动作，避免与 Baleen 的 `Core` 阶段混同；`Src/Bios.asm` 同理，只做固件调用，不做诊断排版。
 
 ## 一、职责与进入条件
 
@@ -17,31 +17,32 @@ Stub 在清零 BSS 前保存 `CX`，之后将它写入 `_Boot_Sector_Bytes`；�
 Stub 的职责与实现位置：
 
 - 完成 BSS 初始化，在实模式下按链接脚本给出的边界清零；校验自身完整性头字段与整幅镜像的摘要，并核对头里的 `ImageBytes`、`MemoryBytes` 与实际链接布局一致（三、四节）。
-- 建立并核验 A20 状态、取得内存图、维护 BIOS 磁盘会话及必要的调用状态；读盘是有界的两层策略：批量 EDD 请求各自至多 3 次尝试，失败时按会话一次的复位策略处理；某批耗尽后从原始 LBA 与目标地址把整段范围逐扇区重读，单扇区请求在 HDD、逻辑扇区 512 字节且 `LBA<63` 时保留 `AH=02h` 的 C0H0 回退，失败只返回 0。`Src/Bios.asm` 提供扇区探测、E820 内存图与读盘，`Platform::Cpu` 提供 A20 开关与模式识别。
-- 按第二节的契约读取描述符区的 Core 段与 Core 镜像头、校验装载边界与整幅摘要，把 `BaleenCore` 装到高位、清零头声明的未落盘尾部并交权；Core 内部的代码、段与运行期内存仍由 Core 自己负责。
-- 无法完成必要初始化或装载时报告本阶段错误并停止；诊断行按[输出通道与Print](../../../Docs/Specs/输出通道与Print.md)的标签约定输出，失败以 `FATAL` 标签给出原因文本后停机。
+- 建立并核验 A20 状态、取得内存图、维护 BIOS 磁盘会话及必要的调用状态；读盘是有界的两层策略：批量 EDD 请求各自至多 3 次尝试，失败时在本次读盘调用内至多复位一次（预算按每次 `_Bios_Read_Sectors` 调用重置，长读盘不会在开头就用光复位机会）；某批耗尽后从原始 LBA 与目标地址把整段范围逐扇区重读，单扇区请求在 HDD、逻辑扇区 512 字节且 `LBA<63` 时保留 `AH=02h` 的 C0H0 回退，失败只返回 0，并把最后一次失败的 LBA、块数与固件 `AH` 状态写进映像内的失败记录，供 Stub 与 BaleenCore 的诊断行显示。`Src/Bios.asm` 提供扇区探测、E820 内存图与读盘，`Platform::Cpu` 提供 A20 开关与模式识别。
+- 按第二节的契约读取描述符区的 BaleenCore 段与 BaleenCore 镜像头、校验装载边界与整幅摘要，把 `BaleenCore` 装到高位、清零头声明的未落盘尾部并交权；BaleenCore 内部的代码、段与运行期内存仍由 BaleenCore 自己负责。
+- 无法完成必要初始化或装载时报告本阶段错误并停止；诊断行按[输出通道与Print](../../../Docs/Specs/输出通道与Print.md)的标签约定输出，失败以 `FATAL` 标签给出**稳定编号**与原因文本后停机（`E-STUB-nn`，登记表见[失败诊断编号](../../../Docs/Specs/Baleen/失败诊断编号.md)）。
+- 进入时先取一次 TSC 时间戳并用 PIT 通道 2 校准，两项随交权块交给 BaleenCore；交权前打印一行 `StubMs=`（从 Stub 进入到跳转前的毫秒数）与 `TscPerMs=`（每毫秒的 TSC 计数），引导总耗时与预算判定由 BaleenCore 报出（见[一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 5.3）。
 
-`BaleenLayout.bin` 的系统卷语义、Ext4、内核集选版、签名策略和引导状态持久化属于 Core / UEFI。Stub 不承担这些策略。它对自身与 Core 的完整性检查都不是签名认证，也不等于实现了内核集签名链。
+`BaleenLayout.bin` 的系统卷语义、Ext4、内核集选版、签名策略和引导状态持久化属于 BaleenCore / UEFI。Stub 不承担这些策略。它对自身与 BaleenCore 的完整性检查都不是签名认证，也不等于实现了内核集签名链。
 
-## 二、Core 的介质定位、装载与交权
+## 二、BaleenCore 的介质定位、装载与交权
 
-这一节是 Stub → Core 的当前 ABI，两侧由 `Packages/Baleen/Common/Include/Contract.inc` 的 `CORE_*` 常量、`CoreHandoff.hpp` 的交权块结构与 `ImageHeader.hpp` 的镜像头布局共同约束，改一处必须两边同时改。与描述符区一样，本节格式的改动必须两侧同步。
+这一节是 Stub → BaleenCore 的当前 ABI，两侧由 `Packages/Baleen/Common/Include/Contract.inc` 的 `CORE_*` 常量、`CoreHandoff.hpp` 的交权块结构与 `ImageHeader.hpp` 的镜像头布局共同约束，改一处必须两边同时改。与描述符区一样，本节格式的改动必须两侧同步。
 
-### 2.1 介质上的 Core 段
+### 2.1 介质上的 BaleenCore 段
 
-`CoreDescriptor` 是描述符区里的一个段：与 Stub 段同处一个扇区，段头之后是 Core 载荷的起止位置（512 字节基准）。Stub 按 IPL 交来的描述符区扇区号读入该扇区，按段长遍历、按标记找到它，再按会话单位把位置字段换算成本地扇区号。
+`CoreDescriptor` 是描述符区里的一个段：与 Stub 段同处一个扇区，段头之后是 BaleenCore 载荷的起止位置（512 字节基准）。Stub 按 IPL 交来的描述符区扇区号读入该扇区，按段长遍历、按标记找到它，再按会话单位把位置字段换算成本地扇区号。
 
 | 偏移 | 字节数 | 字段 | 当前要求 |
 | --- | --- | --- | --- |
 | `0x00` | 4 | Magic | `0x52444342`，介质字节为 `BCDR` |
 | `0x04` | 2 | Version | 当前值 `1` |
 | `0x06` | 2 | Length | 段长，含段头；至少 `16` |
-| `0x08` | 4 | CoreLba | Core 载荷的起始位置，512 字节基准；换算成本地 LBA 后必须大于描述符区扇区 |
+| `0x08` | 4 | CoreLba | BaleenCore 载荷的起始位置，512 字节基准；换算成本地 LBA 后必须大于描述符区扇区 |
 | `0x0C` | 4 | CoreEndLba | 结束位置，512 字节基准，含；换算后不得早于起始，扇区数不超过 `0x400000` 按单位上取整 |
 
 **位置字段以 512 字节为基准（值 = 字节偏移 / 512）。** 校验与 IPL 对描述符区的校验同构：段头标记、段长范围、本区位置一致、起止位置次序与窗口上限。任一项不通过即打印原因并停机，不装载、不跳转。
 
-**`CoreDescriptor` 只定位文件。** 装载地址固定，入口与内存跨度来自 Core 镜像头（2.3）；描述符不装这些字段，也不装摘要与签名：它们由镜像头承载、由 Stub 校验，把策略性字段塞进描述符会与后续阶段的设计冲突。
+**`CoreDescriptor` 只定位文件。** 装载地址固定，入口与内存跨度来自 BaleenCore 镜像头（2.3）；描述符不装这些字段，也不装摘要与签名：它们由镜像头承载、由 Stub 校验，把策略性字段塞进描述符会与后续阶段的设计冲突。
 
 ### 2.2 装载与交权
 
@@ -50,57 +51,62 @@ Stub 的职责与实现位置：
 | 镜像形态 | 直接装入的平坦镜像：文件偏移 0 起是入口前缀与完整性头，`0x90` 起是代码；不使用压缩、重定位或 ELF 头 |
 | 装载地址 | 物理 `0x100000`（1MiB），即镜像基址；交权入口 = 基址 + 头里的 `EntryOffset`（当前 `0x90`） |
 | 装载前检查 | 读入跨度与头里 `MemoryBytes` 的较大者必须整段落在 E820 可用区；不假定 1MiB 以上一定可写 |
-| 装载方式 | 读盘只能落低 1MiB，高位因此分两步：先读进低地址弹跳窗口，再用 32 位平坦段整段拷上去。窗口从 `0x10000` 起按 64KiB 步进，取第一段整段可用者；不引入 unreal 模式，也不要求固件认识高位缓冲 |
-| 尾部填充 | 按扇区上取整读入，最后一个扇区的填充也会写进内存；Core 不得把填充当成自己的内容 |
-| 未落盘尾部 | 头里的 `MemoryBytes` 超出文件的部分由 Stub 在交权前清零；Core 不得依赖残留内容 |
-| 进入状态 | 32 位保护模式、平坦段（`CS=0x08`、`DS/ES/SS=0x10`）、分页关闭、`IF=0`、`DF=0`；`ESI` 指向交权块，`ESP` 仍指向 Stub 的保护模式栈（栈顶 `0x7000`，Core 应在做重活前换成自己的栈） |
-| 返回 | 不返回。Core 一旦进入即持有机器控制权；Stub 冻结常驻，其静态内存、交权块与固件服务在 Core 运行期间持续有效 |
-| 失败 | 描述符或镜像头非法、摘要不符、装载区不可用、找不到弹跳窗口、读盘失败各自打印原因并停机；**绝不带着未检查的内容跳转** |
+| 装载方式 | 读盘只能落低 1MiB，高位因此分两步：先读进低地址弹跳窗口，再用 32 位平坦段整段拷上去。窗口从 `0x10000` 起按 64KiB 步进到 `0x80000`（不含），取第一段整段可用者；可用性按内存图判定，相邻的可用条目可以合并覆盖同一个窗口，Stub 与 BaleenCore 共用同一份判定（`Packages/Baleen/Common/Src/BootMemory.cpp`），不引入 unreal 模式，也不要求固件认识高位缓冲 |
+| 尾部填充 | 按扇区上取整读入，最后一个扇区的填充也会写进内存；BaleenCore 不得把填充当成自己的内容 |
+| 未落盘尾部 | 头里的 `MemoryBytes` 超出文件的部分由 Stub 在交权前清零；BaleenCore 不得依赖残留内容 |
+| 进入状态 | 32 位保护模式、平坦段（`CS=0x08`、`DS/ES/SS=0x10`）、分页关闭、`IF=0`、`DF=0`；`ESI` 指向交权块，`ESP` 仍指向 Stub 的保护模式栈（在 Stub 未初始化区末尾，栈顶为链接符号 `_Stub_Stack_Top`，BaleenCore 应在做重活前换成自己的栈） |
+| 返回 | 不返回。BaleenCore 一旦进入即持有机器控制权；Stub 冻结常驻，其静态内存、交权块与固件服务在 BaleenCore 运行期间持续有效 |
+| 失败 | 描述符或镜像头非法、摘要不符、装载区不可用、找不到弹跳窗口、读盘失败各自打印原因并停机；读盘失败另补一行失败现场（`Lba`、`Count`、`Ah`、`Phase`），**绝不带着未检查的内容跳转** |
 
-### 2.3 Core 镜像头
+### 2.3 BaleenCore 镜像头
 
-`BaleenCore.bin` 与 Stub 同构：文件偏移 `0` 起是 16 位近跳转前缀与保留区，`0x10` 起是 128 字节完整性头，`0x90` 起是代码；两种镜像只有格式标记不同（Core 为 `BLNCORE`），字段偏移、固定取值与摘要覆盖区间完全一致，字节表见第三节。布局的单点定义在 `Packages/Baleen/Common/Include/ImageHeader.hpp`，目标侧的字段校验与摘要比对在 `Packages/Baleen/Common/Src/ImageHeader.cpp`。
+`BaleenCore.bin` 与 Stub 同构：文件偏移 `0` 起是 16 位近跳转前缀与保留区，`0x10` 起是 128 字节完整性头，`0x90` 起是代码；两种镜像只有格式标记不同（BaleenCore 为 `BLNCORE`），字段偏移、固定取值与摘要覆盖区间完全一致，字节表见第三节。布局的单点定义在 `Packages/Baleen/Common/Include/ImageHeader.hpp`，目标侧的字段校验与摘要比对在 `Packages/Baleen/Common/Src/ImageHeader.cpp`。
 
 Stub 分两步核对，任一项不通过都停机，不跳转：
 
 1. **装载前**读文件首扇区核对头字段：格式标记、版本、头长、标志、摘要算法、`BuildId` 长度、保留区、入口前缀与 `EntryOffset` 一致；头里的 `ImageBytes` 必须与 `CoreDescriptor` 的文件长度相等，`MemoryBytes` 必须覆盖文件且不超过 `0x400000`。
 2. **读入高位后**比对整幅摘要：按第四节的覆盖区间把 `Digest` 字段视作 32 个零，与头里的摘要逐字节比较；随后按 `MemoryBytes` 清零未落盘尾部，入口取 `CoreLoad + EntryOffset`。
 
-头里的 `ImageBytes`、`MemoryBytes`、`EntryOffset` 与 `Digest` 都由打包器填出：正式 Core 走 `Tools/Bin/PackImage`，占位 Core 由 `MakePayloads` 组装同样的头并用同一套规则填充。头之后的代码、段与 Core 内部结构不由 Stub 解释。
+头里的 `ImageBytes`、`MemoryBytes`、`EntryOffset` 与 `Digest` 都由打包器填出：正式 BaleenCore 走 `Tools/Bin/PackImage`，占位 BaleenCore 由 `MakePayloads` 组装同样的头并用同一套规则填充。头之后的代码、段与 BaleenCore 内部结构不由 Stub 解释。
 
 一条边界要写清：**头没有被认证**。改内容并同时重算摘要的文件能通过这套校验，它检测的是非预期字节变化，不是执行前认证；信任锚仍未定义，见第六节。
 
 ### 2.4 交权块
 
-只跳转不构成交权：Core 需要介质身份、内存图与可用的固件服务入口，而描述符区的读盘缓冲早已被 Stub 覆盖。这些事实由交权块传递，定义在 `Packages/Baleen/Common/Include/CoreHandoff.hpp`，长度固定 64 字节；入口时 `ESI` 指向它，指针是物理地址（分页关闭，虚拟地址等于物理地址）。
+只跳转不构成交权：BaleenCore 需要介质身份、内存图、可用的固件服务入口与读盘失败现场，而描述符区的读盘缓冲早已被 Stub 覆盖。这些事实由交权块传递，定义在 `Packages/Baleen/Common/Include/CoreHandoff.hpp`，长度固定 68 字节；入口时 `ESI` 指向它，指针是物理地址（分页关闭，虚拟地址等于物理地址）。
 
 | 块内偏移 | 字段 | 含义 |
 | --- | --- | --- |
-| `0x00` | Magic / Version / Bytes | `0x484E4C42`（`BLNH`）/ `1` / `64`；Core 先核对这三项再读取其余字段 |
+| `0x00` | Magic / Version / Bytes | `0x484E4C42`（`BLNH`）/ `3` / `80`；BaleenCore 先核对这三项再读取其余字段 |
 | `0x0C` | Drive | 启动驱动器的 BIOS 号，即 IPL 交权时的 `DL` |
 | `0x10` | Media / SectorBytes | 介质编号（同 `Boot::Media`）与本地扇区大小，读盘的块数以后者为单位 |
-| `0x18` | CoreBytes / CoreSectors | Core 的文件字节数与按扇区上取整后的读入跨度 |
-| `0x20` | CoreLoad | Core 的装入物理地址，即镜像基址；本次入口 = 它 + 镜像头里的 `EntryOffset` |
+| `0x18` | CoreBytes / CoreSectors | BaleenCore 的文件字节数与按扇区上取整后的读入跨度 |
+| `0x20` | CoreLoad | BaleenCore 的装入物理地址，即镜像基址；本次入口 = 它 + 镜像头里的 `EntryOffset` |
 | `0x24` | MemoryMapCount / MemoryMapTruncated | 内存图条数与截断标志 |
 | `0x2C` | MemoryMap | 指向 Stub 静态缓冲里的 E820 条目数组，条目布局见 `Boot::MemoryMapEntry` |
-| `0x30` | Write | 写入 Stub 的控制台（VGA 文本、`0xE9` 与 COM1），Core 不必自己初始化输出 |
+| `0x30` | Write | 写入 Stub 的控制台（VGA 文本、`0xE9` 与 COM1），BaleenCore 不必自己初始化输出 |
 | `0x34` | ReadSectors | 读盘 `(lba, count, dest, sectorBytes)`：成功返回 1，失败返回 0；`dest` 须 16 字节对齐且落低 1MiB |
 | `0x38` | SectorSize | 探测启动驱动器的扇区大小 |
 | `0x3C` | MemoryMapQuery | 重新取内存图，签名与语义同 `_Bios_E820` |
+| `0x40` | LastReadFailure | 指向 Stub 映像里的读盘失败记录，常驻有效；字段为 `Lba`、`Count`、`Status`（固件 `AH`）与 `Phase`，布局见 `Packages/Baleen/Common/Include/ReadFailure.hpp` 与 `Contract.inc` 的 `READ_FAIL_*` |
+| `0x44` | BootTsc | 进入 Stub 时的时间戳（低 32 位在 `0x44`、高 32 位在 `0x48`），自由运行的 TSC 读数 |
+| `0x4C` | TicksPerMs | 每毫秒的 TSC 计数，Stub 用 PIT 通道 2 校准；为 `0` 表示无可用计时，两个时间戳字段无意义 |
 
-服务入口是 Stub 里的函数地址：Stub 常驻不动，Core 在保护模式下直接调用，由 Stub 负责弹回实模式、还原现场再返回。
+服务入口是 Stub 里的函数地址：Stub 常驻不动，BaleenCore 在保护模式下直接调用，由 Stub 负责弹回实模式、还原现场再返回。
 
-读盘服务要求 `sectorBytes` 与 IPL 会话单位一致，拒绝零块数、长度乘法溢出、末端 LBA 超出 32 位、低 1MiB 越界与非 16 字节对齐。每次 EDD 重试重新填写整个 DAP；读盘与复位调用保存通用寄存器及 DS/ES，并预置 CF、开启固件需要的中断；只走 EDD（含 4Kn），没有 CHS 路径。`sectorSize` 仍为独立 AH=48 查询，失败或返回短表时返回 0，不更改会话大小。
+读盘服务要求 `sectorBytes` 与 IPL 会话单位一致，拒绝零块数、长度乘法溢出、末端 LBA 超出 32 位、低 1MiB 越界与非 16 字节对齐。每次 EDD 重试重新填写整个 DAP；设备复位只在失败重试路径里发，预算按每次读盘调用重置，一次调用至多一次；读盘与复位调用保存通用寄存器及 DS/ES，并预置 CF、开启固件需要的中断；批量与逐扇区回退都以 EDD 为主（含 4Kn），逐扇区回退在 HDD、512 字节扇区且 `LBA<63` 时可退回 `AH=02h` 的 C0H0。`sectorSize` 仍为独立 AH=48 查询，失败或返回短表时返回 0，不更改会话大小。
 
-**这些服务不改变所有权**：Core 不能要求 Stub 在交权后做别的工作，Stub 也不再观察 Core 的状态。
+每次读盘调用进入时清空失败记录，失败时写入失败请求的起始 LBA、块数、固件 `AH` 状态与失败阶段；成功返回的调用不留下记录，`Phase` 区分参数拒绝、批量 EDD、逐扇区 EDD、CHS 回退与 64KiB 窗口放不下五类。两阶段的诊断行都按这份记录补一行 `Lba=`、`Count=`、`Ah=`、`Phase=`。
 
-块的指针宽度与字段偏移由 `CoreHandoff.hpp` 的 `static_assert` 在 32 位目标上固定；占位 Core 的汇编常量由 `Tools/Build/MakePayloads` 从同一头文件取值拼出，两侧不会各写一份。
+**这些服务不改变所有权**：BaleenCore 不能要求 Stub 在交权后做别的工作，Stub 也不再观察 BaleenCore 的状态。
+
+块的指针宽度与字段偏移由 `CoreHandoff.hpp` 的 `static_assert` 在 32 位目标上固定；占位 BaleenCore 的汇编常量由 `Tools/Build/MakePayloads` 从同一头文件取值拼出，两侧不会各写一份。
 
 ## 三、镜像完整性头（BaleenStubHeader / BaleenCoreHeader）
 
 ### 3.1 生成责任
 
-整数的字节序与填充由字节表固定：均以小端序逐字节编码，不允许编译器插入填充；解析时须核对格式标记、头长、摘要算法与保留字段，不能对不认识的结构猜测读取。各字段的填出方：`Src/Stub.asm` 组装 Magic、版本、头长、标志、入口、算法与保留字段；链接器按 `__image_end` 与 `__bss_end` 填 `ImageBytes` 与 `MemoryBytes`；`Tools/Bin/PackImage` 填 `BuildId` 与 `Digest`。运行期由 `Src/SelfCheck.cpp` 校验，宿主侧由 `Tools/Build/Common` 的 `BaleenImage` 供 PackImage 与两个组装器共用；Core 的镜像头同构，见 2.3。
+整数的字节序与填充由字节表固定：均以小端序逐字节编码，不允许编译器插入填充；解析时须核对格式标记、头长、摘要算法与保留字段，不能对不认识的结构猜测读取。各字段的填出方：`Src/Stub.asm` 组装 Magic、版本、头长、标志、入口、算法与保留字段；链接器按 `__image_end` 与 `__bss_end` 填 `ImageBytes` 与 `MemoryBytes`；`Tools/Bin/PackImage` 填 `BuildId` 与 `Digest`。运行期由 `Src/SelfCheck.cpp` 校验，宿主侧由 `Tools/Build/Common` 的 `BaleenImage` 供 PackImage 与两个组装器共用；BaleenCore 的镜像头同构，见 2.3。
 
 `Version=1` 与 `HeaderBytes=0x80` 标识当前格式；格式变动须同步上述各处。
 
@@ -114,15 +120,15 @@ Stub 分两步核对，任一项不通过都停机，不跳转：
 | `[0x03, 0x10)` | 前缀保留字节 | 全 0 |
 | `[0x10, 0x90)` | `BaleenStubHeader` | 固定为 128 字节，字段偏移在汇编期与 C++ 侧各有断言 |
 | `[0x90, ImageBytes)` | 早期初始化代码、其余代码与落盘数据 | 包含 `EntryOffset` 指向的入口；直接装入的平坦镜像，不使用压缩或重定位；落盘部分保持只读，见 3.4 |
-| `[ImageBytes, MemoryBytes)` | 未落盘的静态内存尾部 | 包含 BSS 与所需静态对齐空间，由 Stub 验证范围并在实模式下清零 |
+| `[ImageBytes, MemoryBytes)` | 未落盘的静态内存尾部 | 包含 BSS、保护模式栈与所需静态对齐空间，由 Stub 验证范围并在实模式下清零 |
 
-Core 的文件布局同构，只有格式标记与入口之后的代码不同，见 2.3。前缀是 Stub 的可执行内容，解决“固定 `0x7E00` 入口与数据头共存”的布局问题。IPL 不识别前缀、不检查其位移、不查找头。`EntryOffset` 是 Stub 自己的早期入口元数据，不是新的 IPL 交权地址，也不是 Core 的入口。
+BaleenCore 的文件布局同构，只有格式标记与入口之后的代码不同，见 2.3。前缀是 Stub 的可执行内容，解决“固定 `0x7E00` 入口与数据头共存”的布局问题。IPL 不识别前缀、不检查其位移、不查找头。`EntryOffset` 是 Stub 自己的早期入口元数据，不是新的 IPL 交权地址，也不是 BaleenCore 的入口。
 
 链接脚本把代码与只读数据、可写数据分别声明为两个权限不同的 `LOAD` 段（`R E` 与 `RW`），链接以 `--fatal-warnings` 执行；产物是 `objcopy` 出的扁平镜像，段边界不落盘，装载后的内存跨度仍由头里的长度字段与低 64KiB 窗口约束决定。
 
 ### 3.3 头字段字节表
 
-下表偏移相对于头起点（文件偏移 `0x10`）；“填出方”一列说明该字段的来源。同一套字节表适用于 Stub 与 Core 两种镜像，差异只有 `Magic`：Core 为 `BLNCORE` 加终止零，其余字段的语义、填出方与约束相同。
+下表偏移相对于头起点（文件偏移 `0x10`）；“填出方”一列说明该字段的来源。同一套字节表适用于 Stub 与 BaleenCore 两种镜像，差异只有 `Magic`：BaleenCore 为 `BLNCORE` 加终止零，其余字段的语义、填出方与约束相同。
 
 | 头内偏移 | 字节数 | 字段 | 当前语义 | 填出方 |
 | --- | --- | --- | --- | --- |
@@ -131,7 +137,7 @@ Core 的文件布局同构，只有格式标记与入口之后的代码不同，
 | `0x0A` | 2 | HeaderBytes | `0x80` | 汇编常量 |
 | `0x0C` | 4 | Flags | `0`，当前不定义可选标志 | 汇编常量 |
 | `0x10` | 4 | ImageBytes | Stub 整个文件的实际字节数，含入口前缀、完整头、代码与落盘数据；不含扇区填充和 BSS | 链接器按 `__image_end` |
-| `0x14` | 4 | MemoryBytes | 从物理 `0x7E00` 起的静态内存跨度，包含文件和未落盘尾部；不包含外部栈、内存图缓冲、磁盘缓冲或 Core 的单独分配 | 链接器按 `__bss_end` |
+| `0x14` | 4 | MemoryBytes | 从物理 `0x7E00` 起的静态内存跨度，包含文件与未落盘尾部：BSS、内存图缓冲、扇区缓冲与保护模式栈都在未初始化区里，一并计入；不包含实模式栈与 BaleenCore 的单独分配 | 链接器按 `__bss_end` |
 | `0x18` | 4 | EntryOffset | 从文件起点算起的早期初始化入口偏移；须在 `[0x90, ImageBytes)`，且与入口前缀一致 | 汇编常量 |
 | `0x1C` | 2 | DigestAlgorithm | `1` = SHA-256；其他值拒绝，无“禁用摘要”值 | 汇编常量 |
 | `0x1E` | 2 | BuildIdBytes | `32` | 汇编常量 |
@@ -139,9 +145,9 @@ Core 的文件布局同构，只有格式标记与入口之后的代码不同，
 | `0x40` | 32 | Digest | 按第四节计算的 SHA-256 原始 32 字节摘要，不是十六进制文本 | PackImage 最后填入 |
 | `0x60` | 32 | Reserved | 全 0 | 汇编常量 |
 
-约束至少包括 `0x90 < ImageBytes <= MemoryBytes`、`MemoryBytes <= 0x8200`，以及入口落在文件已初始化区域。`ImageBytes` 的介质限制为 512 B HDD `<=0x8200`、4Kn HDD / CD `<=0x8000`；共用文件按 `0x8000` 上限检查。Core 镜像的同一组约束把上限换成 `0x400000`（`MemoryBytes` 上限同为 `0x400000`），并去掉低 64KiB 窗口项，见 2.3。所有加法和上取整均先检查溢出。
+约束至少包括 `0x90 < ImageBytes <= MemoryBytes`、`MemoryBytes <= 0x8200`，以及入口落在文件已初始化区域。`ImageBytes` 的介质限制为 512 B HDD `<=0x8200`、4Kn HDD / CD `<=0x8000`；共用文件按 `0x8000` 上限检查。BaleenCore 镜像的同一组约束把上限换成 `0x400000`（`MemoryBytes` 上限同为 `0x400000`），并去掉低 64KiB 窗口项，见 2.3。所有加法和上取整均先检查溢出。
 
-实际占用必须按 `max(MemoryBytes, ceil(ImageBytes / SectorBytes) * SectorBytes)` 预留，并保持 `0x7E00 + 实际占用 <= 0x10000`。完整扇区读取可能已写入 BSS 开头，Stub 仍须按定义清零，不能依赖介质填充碰巧为零。不得覆盖 `[0x7C00, 0x7E00)` 的 IPL；额外栈与其他缓冲必须另行依据内存图和所有权规则检查。
+实际占用必须按 `max(MemoryBytes, ceil(ImageBytes / SectorBytes) * SectorBytes)` 预留，并保持 `0x7E00 + 实际占用 <= 0x10000`。完整扇区读取可能已写入 BSS 开头，Stub 仍须按定义清零，不能依赖介质填充碰巧为零。不得覆盖 `[0x7C00, 0x7E00)` 的 IPL。Stub 的运行期缓冲都排在 `[0x7E00, 0x10000)` 窗口内：保护模式栈在未初始化区末尾，栈顶即 `__bss_end`（由 `Stub.ld` 的断言盯住），因此它落在头声明的 `MemoryBytes` 里，一同受构建期检查与 `CheckSelf` 的显式核对；实模式弹跳栈是 `0x7C00` 以下的契约栈区，只在固件调用期间使用，不属于 Stub 的静态内存。
 
 `PackImage` 在构建期核对 `ImageBytes` 与实际文件长度、长度上限、入口前缀与 `EntryOffset` 一致、`MemoryBytes` 的落点约束以及整幅摘要；`Src/SelfCheck.cpp` 在运行期把 `ImageBytes`、`MemoryBytes` 与链接脚本符号 `__image_end`、`__bss_end` 比对，头字段与实际布局不符时在取摘要之前就拒绝。
 
@@ -164,11 +170,11 @@ Digest = SHA-256(F[0x00:0x50] || 32 个零字节 || F[0x70:ImageBytes])
 
 这里的切片右端均不含，`||` 表示字节串拼接。`Magic`、版本、长度、入口、BuildId、所有保留字节、入口前缀、代码和落盘数据均被覆盖；只有摘要本身按规则归零，避免自引用。SHA-256 的标准依据为 NIST [Hash Functions](https://csrc.nist.gov/projects/hash-functions) 与其列出的 [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)；目标侧实现在 `Packages/Baleen/Common/Src/Sha256.cpp`，宿主侧实现在 `Tools/Build/Common/Src/Sha256.cpp`。
 
-覆盖范围不包含介质上的描述符区、最后一个本地扇区的文件外填充、BSS、其他运行时缓冲、Core、`BaleenLayout.bin` 或内核集。
+覆盖范围不包含介质上的描述符区、最后一个本地扇区的文件外填充、BSS、其他运行时缓冲、BaleenCore、`BaleenLayout.bin` 或内核集。
 
-打包顺序：链接器填好长度字段、`objcopy` 产出平坦镜像、`PackImage` 先按第五节规则填 `BuildId`，再把 `Digest` 置零并按上式填入摘要，最后复核整幅镜像；占位 Core 由 `MakePayloads` 组装同样的头并调用同一套填充与校验。摘要写入后修改任何被覆盖字节都必须重跑打包器；校验器流式代入零字节，不改写被校验的代码或头。
+打包顺序：链接器填好长度字段、`objcopy` 产出平坦镜像、`PackImage` 先按第五节规则填 `BuildId`，再把 `Digest` 置零并按上式填入摘要，最后复核整幅镜像；占位 BaleenCore 由 `MakePayloads` 组装同样的头并调用同一套填充与校验。摘要写入后修改任何被覆盖字节都必须重跑打包器；校验器流式代入零字节，不改写被校验的代码或头。
 
-运行期自检顺序：先核对格式标记、版本、头长、标志、摘要算法、BuildId 长度与保留字段，再核对 `ImageBytes`、`MemoryBytes` 与链接布局、静态内存落在低 64KiB 窗口内、入口前缀与 `EntryOffset` 一致，最后流式代入 32 个零字节计算 SHA-256 并与头里的 `Digest` 比对；实现在 `Src/SelfCheck.cpp`。任一项不通过都打印 `FATAL` 原因并停机，不带着未通过校验的镜像继续。Core 镜像的同类检查在 `Src/LoadCore.cpp`，由 Stub 在交权前执行（2.3）。
+运行期自检顺序：先核对格式标记、版本、头长、标志、摘要算法、BuildId 长度与保留字段，再核对 `ImageBytes`、`MemoryBytes` 与链接布局、静态内存落在低 64KiB 窗口内、保护模式栈整段落在静态内存里、入口前缀与 `EntryOffset` 一致，最后流式代入 32 个零字节计算 SHA-256 并与头里的 `Digest` 比对；实现在 `Src/SelfCheck.cpp`。任一项不通过都打印 `FATAL` 原因并停机，不带着未通过校验的镜像继续。BaleenCore 镜像的同类检查在 `Src/LoadCore.cpp`，由 Stub 在交权前执行（2.3）。
 
 自校验针对**刚装入、尚未改写的文件字节**进行，3.4 节的只读约束保证这一点。自修改、重定位或把临时状态写进被覆盖数据区都会改变输入，实现不允许靠忽略这类字节来维持校验。
 
@@ -182,34 +188,36 @@ BuildId 由 Baleen 构建阶段分配，32 字节按原样比较；应绑定确�
 
 **诊断行与构建日志的 BuildId 写法一致**：Stub 显示的是头里 BuildId 前 4 字节按字节顺序的十六进制（例如 `0xF67B9D1E`），与 `PackImage` / 组装器打印的 `F67B9D1E` 是同一串字节，不引入小端整数解释。
 
-Stub 与 Core 的 BuildId 各自独立，且都覆盖在各自摘要的范围内；两者相同不证明接口兼容、内容完整或来源可信。内核集的选择与签名仍由 Core / UEFI 处理。
+Stub 与 BaleenCore 的 BuildId 各自独立，且都覆盖在各自摘要的范围内；两者相同不证明接口兼容、内容完整或来源可信。内核集的选择与签名仍由 BaleenCore / UEFI 处理。
 
 ## 六、检查责任与信任边界
 
 | 执行方 | 检查责任 | 限制 |
 | --- | --- | --- |
-| IPL（当前） | 驱动器与逻辑扇区确认、描述符区与 Stub 段结构、起止扇区、全部必要扇区的读盘结果 | 不读取 Stub 头、不检查 BSS、BuildId 或摘要，也不读 Core 段；只通过 `CX` 补充逻辑扇区事实 |
-| 打包与组装器（当前） | `PackImage` 填 Stub 与 Core 的 BuildId 与 Digest 并校验头字段、长度、入口前缀与摘要；`MakeImage` / `TestInstaller` 对带头 Stub 与 Core 复核同样内容并把 BuildId 打进构建输出；`MakePayloads` 组装的占位 Core 带头并经同一套校验 | 只做构建期检查；无头的开发占位件与 `--stub-unchecked` / `--core-unchecked` 免除校验的载荷不构成对正式产物的检查 |
-| Stub（当前） | 先自检头字段、布局一致性与摘要，再有界检查描述符区的 Core 段与 Core 镜像头、校验装载区落在 E820 可用区与 Core 摘要，随后装载、清零未落盘尾部并交权 | 描述符缓冲已被覆盖，不能假设能从传入指针独立复核 IPL 实际读取的文件字节数；自检只覆盖 Stub 自己的镜像字节 |
-| Stub 回归（`Tools/Bin/CheckStub`，当前） | 用真实 IPL 与 Stub 加内嵌探针 Core 组装镜像，在 QEMU 里核对成功路径、交权块四个服务在 Core 运行期的可用性、自身自检与 Core 装载的各类拒绝路径 | 手工执行；不覆盖依赖内存图注入的“找不到弹跳窗口” |
-| Core（当前入口 / 后续装载） | 核对交权块的格式标记与长度；镜像头与摘要已由 Stub 在交权前核对，不重复取摘要；交权块里没有的项自行探测或拒绝，并核对自身运行期内存需求 | 不能从文件名或寄存器残留推导事实；不把 Stub 已做的核对当成对运行期环境的保证 |
+| IPL（当前） | 驱动器与逻辑扇区确认、描述符区与 Stub 段结构、起止扇区、全部必要扇区的读盘结果 | 不读取 Stub 头、不检查 BSS、BuildId 或摘要，也不读 BaleenCore 段；只通过 `CX` 补充逻辑扇区事实 |
+| 打包与组装器（当前） | `PackImage` 填 Stub 与 BaleenCore 的 BuildId 与 Digest 并校验头字段、长度、入口前缀与摘要；`MakeImage` / `TestInstaller` 对带头 Stub 与 BaleenCore 复核同样内容并把 BuildId 打进构建输出；`MakePayloads` 组装的占位 BaleenCore 带头并经同一套校验 | 只做构建期检查；无头的开发占位件与 `--stub-unchecked` / `--core-unchecked` 免除校验的载荷不构成对正式产物的检查 |
+| Stub（当前） | 先自检头字段、布局一致性与摘要，再有界检查描述符区的 BaleenCore 段与 BaleenCore 镜像头、校验装载区落在 E820 可用区与 BaleenCore 摘要，随后装载、清零未落盘尾部并交权 | 描述符缓冲已被覆盖，不能假设能从传入指针独立复核 IPL 实际读取的文件字节数；自检只覆盖 Stub 自己的镜像字节 |
+| Stub 回归（`Tools/Bin/CheckStub`，当前） | 用真实 IPL 与 Stub 加内嵌探针 BaleenCore 组装镜像，在 QEMU 里核对成功路径、交权块四个服务在 BaleenCore 运行期的可用性、自身自检与 BaleenCore 装载的各类拒绝路径；`--stack-probe` 模式另用三种介质各核对一例实模式栈探针判定 | 手工执行；不覆盖依赖内存图注入的“找不到弹跳窗口” |
+| BaleenCore（当前入口 / 后续装载） | 核对交权块的格式标记与长度；镜像头与摘要已由 Stub 在交权前核对，不重复取摘要；交权块里没有的项自行探测或拒绝，并核对自身运行期内存需求 | 不能从文件名或寄存器残留推导事实；不把 Stub 已做的核对当成对运行期环境的保证 |
 
 组装器必须保证描述符区里 Stub 段的起止扇区与实际 Stub 文件长度按本地扇区上取整后一致；`CoreDescriptor` 段的字段与 Stub 读取时执行的校验一致（段产物 `Src/Descs/CoreDescriptor.asm` 与 `Src/LoadCore.cpp` 各有一份，取值同源）。Stub 的本地检查可使用 `DH` 选择文件上限，但它没有来自 IPL 的持久描述符副本；这不构成对原描述符和镜像匹配关系的独立证明。若未来需要重新读取并核对描述符，其过程、缓冲和失败语义另行设计，不能暗增 IPL 参数。
 
-**Stub 自校验发生在 IPL 已经跳入并执行 Stub 之后，不能构成执行前认证，也不是信任根。** Core 的摘要由 Stub 在跳转前比对，检测的同样是非预期字节变化：攻击者若能同时改写 Core 与头里的摘要就能绕过。无密钥摘要最多用于检测非预期字节变化；真实的执行前认证需要可信的更早阶段或外部认证链，该方案尚未定义，不以扩大 IPL 职责冒充已经解决。
+**实模式栈探针**：`make -C Packages/Baleen/Stub STACK_PROBE=1` 产出探针版，落在 `Out/Probe/Bin`，不覆盖正式产物。它在每次弹跳前把 `[0x4000, 0x7C00)` 填成花码、回到保护模式时扫描被写坏的最低地址，量出固件在实模式栈区实际用掉的深度（含 Stub 自己的调用帧：AH=48 与读盘约 46 字节，E820 约 6 字节），并在 `_Stub_Main` 里按门限打印一行：`Ah48=`、`E820=`、`Read=`、`Bounces=`、`Sect=`、`Limit=`、`Verdict=`。它只服务观测与回归，不参与启动决策——超限只打 `WARN`，不停机也不改流程；AH=48 平时只作为交权块服务存在，探针版主动走一次，让那一格也有数据。`CheckStub --stack-probe` 用三种介质各核对一例的 `Verdict=Ok`。门限 `0x400` 是实测最深值（100 字节）的 10 倍，不是安全边界；为什么不给这段区域加 E820 门禁、实测数据与理由见 [一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 2.2。
 
-IPL 没有验头不等于缺陷，这是现有边界。Stub 因自身头、BSS、A20、内存图，或 Core 的头、摘要与装载失败，应报告为 Stub 阶段错误；不能把错误归到 IPL，也不能失败后继续使用未检查的 Core。
+**Stub 自校验发生在 IPL 已经跳入并执行 Stub 之后，不能构成执行前认证，也不是信任根。** BaleenCore 的摘要由 Stub 在跳转前比对，检测的同样是非预期字节变化：攻击者若能同时改写 BaleenCore 与头里的摘要就能绕过。无密钥摘要最多用于检测非预期字节变化；真实的执行前认证需要可信的更早阶段或外部认证链，该方案尚未定义，不以扩大 IPL 职责冒充已经解决。
+
+IPL 没有验头不等于缺陷，这是现有边界。Stub 因自身头、BSS、A20、内存图，或 BaleenCore 的头、摘要与装载失败，应报告为 Stub 阶段错误；不能把错误归到 IPL，也不能失败后继续使用未检查的 BaleenCore。
 
 ## 七、尚待后续设计与实现
 
 | 项目 | 当前尚未确定或实现的内容 |
 | --- | --- |
-| Core 的镜像内结构 | 完整性头与入口前缀已定（2.3，与 Stub 同构）；头之后的代码、段、重定位与对齐仍由 Core 后续自行定义 |
-| Stub 实模式服务 | 磁盘服务只读不写，写盘需求由 Core 侧自行实现；读盘服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转；两层读盘回退与 HDD 的 `AH=02h` 回退是项目的有界重试策略，不承诺无 EDD 或任意几何的机器都能读完整段。A20 与模式识别由 `Packages/Common` 的 `Platform::Cpu` 提供 |
+| BaleenCore 的镜像内结构 | 完整性头与入口前缀已定（2.3，与 Stub 同构）；头之后的代码、段、重定位与对齐仍由 BaleenCore 后续自行定义 |
+| Stub 实模式服务 | 磁盘服务只读不写，写盘需求由 BaleenCore 侧自行实现；读盘服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转；两层读盘回退与 HDD 的 `AH=02h` 回退是项目的有界重试策略，不承诺无 EDD 或任意几何的机器都能读完整段。A20 与模式识别由 `Packages/Common` 的 `Platform::Cpu` 提供 |
 | Baleen 构建元数据 | BuildId 的派生规则、输入与规范化编码已定（第五节与 [PackImage 说明](../../../Tools/Build/PackImage/README.md)）；统一清单与 UEFI 携带方式仍未定 |
 | 验证与认证 | 执行前认证及其信任锚未定义，无密钥摘要不是信任根；头字段与摘要的构建期、运行期检查见第三、四节，行为回归见第六节的 `CheckStub` |
-| Core / UEFI 的上层职责 | `BaleenLayout.bin` 详细格式与位置、Ext4 实现、内核集验证和选版需要各自的后续实现 |
+| BaleenCore / UEFI 的上层职责 | `BaleenLayout.bin` 详细格式与位置、Ext4 实现、内核集验证和选版需要各自的后续实现 |
 
-不得仅为满足头格式而在 `Stub/Out/Bin/` 生成同名空壳或停机件，让顶层“真实产物优先”逻辑误把它当成正式实现。`Tools/Build/MakePayloads` 生成的占位 Core 是一段真正的 32 位映像：它带完整性与头入口，经 Stub 校验头与摘要后被装入，再经交权块调用 Stub 的控制台打印标识后停机，用来证明定位、装载、校验与交权真的走通；它不是 Core 实现，不代表 Baleen 已能引导内核。
+不得仅为满足头格式而在 `Stub/Out/Bin/` 生成同名空壳或停机件，让顶层“真实产物优先”逻辑误把它当成正式实现。`Tools/Build/MakePayloads` 生成的占位 BaleenCore 是一段真正的 32 位映像：它带完整性与头入口，经 Stub 校验头与摘要后被装入，再经交权块调用 Stub 的控制台打印标识后停机，用来证明定位、装载、校验与交权真的走通；它不是 BaleenCore 实现，不代表 Baleen 已能引导内核。
 
 正常构建只能依赖正式源码与工具，不依赖不上传的 `Test` 目录或本地测试脚本；格式与打包检查由 NASM 汇编期断言和正式 C++ 工具承担，额外的本地测试不构成本目录交付所必需的文件。

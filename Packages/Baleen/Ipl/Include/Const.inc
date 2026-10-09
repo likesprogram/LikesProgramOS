@@ -1,5 +1,5 @@
 ; Const.inc
-;    IPL 运行期常量：描述符位置、读盘上限与调试口开关
+;    IPL 运行期常量：描述符位置、读盘上限、失败诊断码与调试口开关
 
 ; 装载窗口、实模式栈顶与介质编号是交权契约的一部分，由 Baleen 共享定义提供
 %INCLUDE "Contract.inc"
@@ -37,6 +37,16 @@ MAX_STUB_BYTES   EQU ((LOAD_CEIL - LOAD_TOP) >> SECT_SHIFT) << SECT_SHIFT
 %IF (MAX_STUB_BYTES >> 9) > 127
 %ERROR "IPL 单批读取超过 EDD 的 127 块上限"
 %ENDIF
+
+; —— 失败诊断码：大于零的整数，输出时转成一位十六进制字符；登记编号与含义见 Docs/Specs/Baleen/失败诊断编号.md ——
+; 码值与登记编号同号，按检查顺序连续编号
+ERR_DESC_READ    EQU 1           ; 描述符所在扇区读取失败（仅硬盘入口）
+ERR_MEDIA        EQU 2           ; 驱动器号或 AH=48 查询结果不受支持
+ERR_DESC_HEAD    EQU 3           ; 描述符头部或段序列非法
+ERR_STUB_RANGE   EQU 4           ; Stub 段起止位置非法
+ERR_CD_PROBE     EQU 5           ; 光盘候选驱动器探测未取得合法描述符
+ERR_STUB_SIZE    EQU 6           ; Stub 扇区数超过装载窗口上限
+ERR_STUB_READ    EQU 7           ; 描述符通过后 Stub 读盘最终失败
 
 ; 0xE9 调试口开关，默认开；构建期用 -DENABLE_E9=0 关闭
 %IFNDEF ENABLE_E9

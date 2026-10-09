@@ -22,7 +22,8 @@
 #      make clean                 删除顶层 Out/；make clean-all 连同子包与工具的产物
 #
 #    载荷来源：各子包的真实产物优先，缺失时用 Tools/Bin/MakePayloads 生成的占位件
-#    （EFI 引导镜像、Ext4 系统卷、布局描述尚用占位件；Stub 与 Core 已有阶段性实现，
+#    （EFI 引导镜像尚用占位件；系统卷由 Packages/LikesProgramOS 生成并含内核映像；
+#    布局描述由组装器生成；Stub、BaleenCore 与内核侧 Core 已有阶段性实现，
 #    每个占位件都写明身份，构建时会打印实际用到的那一份）
 
 # 顶层产物目录
@@ -46,7 +47,7 @@ DESC_DIR      ?= Packages/Baleen/Common/Out/Descs
 # 所有子包的 Makefile
 SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
 # 需要构建的宿主工具目录
-TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl Tools/Build/CheckStub
+TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/RunBootCase Tools/Build/CheckIpl Tools/Build/CheckStub Tools/Build/CheckStorage Tools/Build/CheckExt4
 
 # —— 载荷：真实产物优先，缺失时退到占位件 ——
 # 一级引导产物目录
@@ -65,8 +66,8 @@ EFI_IMAGE     ?= $(firstword $(wildcard Packages/Baleen/Uefi/Out/Bin/Efi.img) $(
 ESP_IMAGE     ?= $(EFI_IMAGE)
 # Ext4 系统卷镜像
 SYSTEM_VOLUME ?= $(firstword $(wildcard Packages/LikesProgramOS/Out/LikesProgram.img) $(PAYLOAD_DIR)/SystemVolume.img)
-# 布局描述
-LAYOUT        ?= $(firstword $(wildcard Packages/LikesProgramOS/Out/BaleenLayout.bin) $(PAYLOAD_DIR)/BaleenLayout.bin)
+# 布局描述模板：系统本体产出的正式布局描述（若存在）；缺省时组装器按默认内核路径生成并回填位置字段
+LAYOUT        ?= $(firstword $(wildcard Packages/LikesProgramOS/Out/BaleenLayout.bin))
 
 # —— 启动 ——
 # 模拟器
@@ -203,13 +204,13 @@ $(ISO): payloads
 	Tools/Bin/MakeImage --out $@ --boot-image $(BOOT_IMAGE) --mbr $(MBR) \
 	    --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --efi $(EFI_IMAGE) --esp $(ESP_IMAGE) \
 	    --system-volume $(SYSTEM_VOLUME) --iso-name $(SYSTEM_VOLUME_ISO_NAME) \
-	    --volume-id $(VOLUME_ID) --sector-bytes $(DISK_SECTOR_BYTES) --file BaleenLayout.bin=$(LAYOUT) \
+	    --volume-id $(VOLUME_ID) --sector-bytes $(DISK_SECTOR_BYTES) $(if $(LAYOUT),--layout $(LAYOUT),) \
 	    --manifest $(OUT_DIR)/LikesProgram.iso.json
 
 # 组装整盘镜像（TestInstaller，测试安装器）：供写入内置硬盘 / 移动硬盘 / U 盘
 $(HDD): payloads
 	@$(MAKE) --no-print-directory payload-report
-	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) --manifest $(OUT_DIR)/LikesProgram.hdd.json
+	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) $(if $(LAYOUT),--layout $(LAYOUT),) --manifest $(OUT_DIR)/LikesProgram.hdd.json
 
 # 打印实际用到的是真实产物还是占位件
 payload-report:
@@ -217,10 +218,10 @@ payload-report:
 	@printf '  引导镜像  %s\n' "$(BOOT_IMAGE)"
 	@printf '  MBR       %s\n' "$(MBR)"
 	@printf '  Stub      %s%s\n' "$(STUB)" "$(if $(findstring $(PAYLOAD_DIR),$(STUB)),  <- 占位件,)"
-	@printf '  Core      %s%s\n' "$(CORE)" "$(if $(findstring $(PAYLOAD_DIR),$(CORE)),  <- 占位件,)"
+	@printf '  BaleenCore %s%s\n' "$(CORE)" "$(if $(findstring $(PAYLOAD_DIR),$(CORE)),  <- 占位件,)"
 	@printf '  EFI 镜像  %s%s\n' "$(EFI_IMAGE)" "$(if $(findstring $(PAYLOAD_DIR),$(EFI_IMAGE)),  <- 占位件,)"
 	@printf '  系统卷    %s%s\n' "$(SYSTEM_VOLUME)" "$(if $(findstring $(PAYLOAD_DIR),$(SYSTEM_VOLUME)),  <- 占位件,)"
-	@printf '  布局描述  %s%s\n' "$(LAYOUT)" "$(if $(findstring $(PAYLOAD_DIR),$(LAYOUT)),  <- 占位件,)"
+	@printf '  布局模板  %s\n' "$(if $(LAYOUT),$(LAYOUT),无（组装器按默认内核路径生成）)"
 
 # —— 启动：make run / run-win <hdd|iso> <qemu|bochs> <built|usb> <bios|uefi> ——
 # 检查本次运行的参数组合与外部依赖
@@ -349,4 +350,4 @@ help:
 	    '  make run-uefi          = make run iso qemu built uefi' \
 	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与工具' \
 	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；只影响 Ext4 分区项，ESP 固定双份' \
-	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME / LAYOUT（默认取真实产物，缺失时用占位件）'
+	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME（默认取真实产物，缺失时用占位件）；LAYOUT 为可选的布局描述模板'

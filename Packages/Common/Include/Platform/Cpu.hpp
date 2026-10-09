@@ -1,9 +1,9 @@
 /* Cpu.hpp
     CPU 事实探测与早期控制：工作模式识别、CPUID 能力快照、A20 门开关
 
-    调用环境是 32 位保护模式（Baleen Stub / Core 的 C++ 环境，平坦段）；实模式与虚拟 8086
+    调用环境是 32 位保护模式（Baleen Stub / BaleenCore 的 C++ 环境，平坦段）；实模式与虚拟 8086
     只作为 Mode 的识别结果，不作为本类的调用环境。模式提升（实模式 → 保护模式 → 长模式）
-    尚未实现：Core 的交权模式与内存布局未定，带远跳转的切换留在各阶段汇编入口，本类只探测
+    尚未实现：BaleenCore 的交权模式与内存布局未定，带远跳转的切换留在各阶段汇编入口，本类只探测
     成员初值都是常量，静态实例不依赖启动运行库
 */
 #pragma once
@@ -34,6 +34,8 @@ namespace Platform {
         bool HasPae() const { return m_hasPae; }
         // 是否支持 IA-32e 长模式
         bool HasLongMode() const { return m_hasLongMode; }
+        // 是否支持不可执行位（NX）
+        bool HasNx() const { return m_hasNx; }
         // CPUID 基本功能号上限；无 CPUID 时为 0
         uint32_t MaxBasicLeaf() const { return m_maxBasicLeaf; }
         // CPUID 扩展功能号上限；无扩展功能号时为 0
@@ -50,6 +52,7 @@ namespace Platform {
         bool m_hasCpuid = false;             // 是否支持 CPUID
         bool m_hasPae = false;               // 是否支持 PAE
         bool m_hasLongMode = false;          // 是否支持长模式
+        bool m_hasNx = false;                // 是否支持不可执行位
         uint32_t m_maxBasicLeaf = 0;         // CPUID 基本功能号上限
         uint32_t m_maxExtendedLeaf = 0;      // CPUID 扩展功能号上限
         char m_vendor[13] = {};              // 厂商标识串，12 个字符加结尾零

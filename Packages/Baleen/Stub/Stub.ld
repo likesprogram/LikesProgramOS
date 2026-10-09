@@ -5,6 +5,8 @@
     就无法用 16 位偏移进入；末尾断言把这条约束与文件长度上限交给链接器检查
     __image_start / __image_end / __bss_end 同时供头字段与运行期自检使用：
     头里的 ImageBytes、MemoryBytes 由它们算出，自检再拿头字段与它们比对
+    保护模式栈排在未初始化区最后，栈顶即 __bss_end：它因此落在头声明的 MemoryBytes 里，
+    与其余静态内存一同受低 64KiB 窗口约束，不再借用 IPL 之下的地址
 
     段权限按代码与数据分开声明，代码段只读可执行、数据段可读写，免得链接器
     对单一读写执行段告警；产物是 objcopy 出的扁平镜像，段边界不落盘
@@ -35,9 +37,12 @@ SECTIONS {
     . = ALIGN(4);
     __bss_start = .;
     .bss : { *(.bss*) *(COMMON) } :data
+    /* 保护模式栈排在未初始化区最后：栈顶即静态内存末端，ESP 直接取 _Stub_Stack_Top */
+    .stub.stack (NOLOAD) : { *(.stub.stack) } :data
     __bss_end = .;
     __bss_bytes = __bss_end - __bss_start;   /* 入口在实模式下按它清零未初始化区 */
 
     ASSERT(__image_end - __image_start <= 0x8000, "Stub 文件超出两种介质共用的 0x8000 上限")
     ASSERT(__bss_end <= 0x10000, "Stub 镜像连同未初始化区超出低 64KiB")
+    ASSERT(_Stub_Stack_Top <= 0x10000, "Stub 保护模式栈顶越出低 64KiB 窗口")
 }

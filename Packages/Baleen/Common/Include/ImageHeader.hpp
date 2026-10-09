@@ -1,17 +1,20 @@
 /* ImageHeader.hpp
-    Baleen 镜像完整性头：Stub 与 Core 共用的固定布局、字段视图与校验
+    Baleen 镜像完整性头：Stub 与 BaleenCore 共用的固定布局、字段视图与校验
 
     两种镜像同构：文件偏移 0 起是 16 位近跳转前缀与保留区，0x10 起是 128 字节头，
-    0x90 起是早期入口；只有格式标记不同（Stub 为 BLNSTUB、Core 为 BLNCORE），
+    0x90 起是早期入口；只有格式标记不同（Stub 为 BLNSTUB、BaleenCore 为 BLNCORE），
     字段偏移、固定取值与摘要覆盖区间完全一致
     字节表与自引用处理见 Packages/Baleen/Stub/README.md 第三、四节
-    本文件只做机制：校验失败只回报原因文本，打印与停机由调用方决定
+    本文件只做机制：校验失败只回报带编号的原因，打印与停机由调用方决定
+    同一原因在检测阶段各有编号（Stub 阶段 E-STUB-40 起、BaleenCore 阶段 E-CORE-40 起）：
+    编号标识在哪个阶段查出什么，序号在两个阶段一致
 */
 
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
 
+#include <Diagnostics.hpp>
 #include <Sha256.hpp>
 
 namespace Baleen {
@@ -88,6 +91,12 @@ namespace Baleen {
         uint32_t buildId;       // BuildId 前 4 字节按字节顺序装入的值，仅用于诊断
     };
 
+    // 检测阶段：决定失败原因用哪套编号前缀
+    enum class ImageDiagStage : uint32_t {
+        Stub = 0,   // Stub 阶段，编号前缀 E-STUB
+        Core = 1,   // BaleenCore 阶段，编号前缀 E-CORE
+    };
+
     // 按小端读取 16 位
     uint16_t ReadU16(const uint8_t* field);
 
@@ -95,9 +104,9 @@ namespace Baleen {
     // 保留区、长度与入口范围、入口前缀与 EntryOffset 一致
     // 成功返回空指针并把头声明的事实写进 facts；不检查摘要，也不检查长度与实际布局或
     // 介质描述的对应关系：那是调用方的环境事实
-    const char* CheckImageHeader(const uint8_t* image, const uint8_t magic[8], ImageFacts& facts);
+    Diagnostic CheckImageHeader(const uint8_t* image, const uint8_t magic[8], ImageFacts& facts, ImageDiagStage stage);
 
     // 比对整幅镜像的 SHA-256 摘要：Digest 字段按 32 个零代入，不改写镜像
     // imageBytes 必须已由 CheckImageHeader 核对过，且不小于摘要覆盖区间
-    const char* CheckImageDigest(const uint8_t* image, uint32_t imageBytes);
+    Diagnostic CheckImageDigest(const uint8_t* image, uint32_t imageBytes, ImageDiagStage stage);
 }

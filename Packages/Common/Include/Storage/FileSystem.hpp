@@ -81,8 +81,7 @@ namespace Storage {
         }
         // 从 start 起读下一个目录项，名字写入 name 并更新 start；遍历结束返回 NotFound
         // name 是不带分隔符的单个分量，长度写入 nameLength；start 的取值含义由实现定义
-        virtual Error ReadDirectory(const FileId& id, uint64_t& start, char* name, uint32_t nameBytes,
-                                    uint32_t& nameLength, FileInfo& info) {
+        virtual Error ReadDirectory(const FileId& id, uint64_t& start, char* name, uint32_t nameBytes, uint32_t& nameLength, FileInfo& info) {
             (void)id;
             (void)start;
             (void)name;

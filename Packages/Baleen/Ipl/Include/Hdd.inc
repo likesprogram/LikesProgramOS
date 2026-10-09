@@ -4,7 +4,7 @@
 %INCLUDE "Init.inc"
 
     CMP DL, 0x80
-    JB _Err_Desc
+    JB _Err_Media
     CALL _Disk_Reset
     ; AH=48 的最小参数表借用尚未装入 Stub 的缓冲；查询失败保留 512 字节兼容值与不移位
     ; 只声明表长，不预清大小字段：返回短表会被长度检查挡下，不会读到未写入的值
@@ -13,12 +13,12 @@
     CALL Read_Params
     JC .SectorReady
     CMP WORD [SI], 0x1A
-    JB _Err_Desc
+    JB _Err_Media
     MOV AX, [SI + 0x18]
     CMP AX, 512
     JE .SaveSector
     CMP AX, 4096
-    JNE _Err_Desc
+    JNE _Err_Media
     MOV BYTE [_Sect_Shift], 3   ; 4096 字节扇区：512 字节基准右移三位
 .SaveSector:
     MOV [_Sector_Bytes], AX
@@ -35,7 +35,7 @@
     JC _Err_Read
     MOV SI, LOAD_TOP - BIOS_LOAD   ; 描述符独占整扇区，缓冲内偏移为 0
     CMP DWORD [SI], DESC_AREA_MAGIC
-    JNE _Err_Desc
+    JNE _Err_Head
 
 %INCLUDE "Body.inc"
 %INCLUDE "Error.inc"

@@ -1,6 +1,9 @@
 /* PrintTarget.hpp
     Baleen BIOS 路径引导期控制台：组合 VGA 文本、调试口与串口并安装为当前 Print 目标，
     另给出诊断行前缀的标签写法：方括号内的标签在屏幕上有颜色，流式通道只收到纯文本
+
+    装配前读 BDA 的当前显示模式：80×25 文本才直写显存，否则退到电传与流式通道，
+    显示设备在图形模式下接管时屏幕输出不会消失
 */
 
 #pragma once
@@ -9,15 +12,18 @@
 #include <Print.hpp>
 #include <Print/DebugPortTarget.hpp>
 #include <Print/SerialTarget.hpp>
+#include <Print/TeletypeTarget.hpp>
 #include <Print/VgaTextTarget.hpp>
 
 namespace Baleen {
+    struct Diagnostic;   // 诊断编号条目；定义在 Diagnostics.hpp，避免头文件互相包含
+
     namespace PrintTargets {
         // 诊断行前缀的标签：方括号内的内容，模块名与等级名同属一套写法
         enum class Tag : uint8_t {
             Continue, // 延续上一行信息
-            Stub,     // 模块名：Stub 阶段
-            Core,     // 模块名：Core 阶段
+            BaleenStub,     // 模块名：Stub 阶段
+            BaleenCore, // 模块名：BaleenCore 阶段
             Info,     // 状态说明，与模块名同为白字黑底
             Debug,    // 诊断值
             Ok,       // 步骤已推进
@@ -30,8 +36,8 @@ namespace Baleen {
         // 属性只在支持显示属性的目标上生效，取值按 VGA 文本模式的属性字节
         constexpr uint8_t TagAttribute(Tag tag) {
             switch (tag) {
-                case Tag::Stub:
-                case Tag::Core:
+                case Tag::BaleenStub:
+                case Tag::BaleenCore:
                 case Tag::Info: return Devices::Vga::kDefaultAttribute;
                 case Tag::Continue:
                 case Tag::Debug: return 0x07;   // 亮灰字黑底
@@ -47,8 +53,8 @@ namespace Baleen {
         constexpr const char* TagName(Tag tag) {
             switch (tag) {
                 case Tag::Continue: return "...";
-                case Tag::Stub: return "STUB";
-                case Tag::Core: return "CORE";
+                case Tag::BaleenStub: return "BALEENSTUB";
+                case Tag::BaleenCore: return "BALEENCORE";
                 case Tag::Info: return "INFO";
                 case Tag::Debug: return "DEBUG";
                 case Tag::Ok: return "OK";
@@ -70,10 +76,13 @@ namespace Baleen {
         // 而 IPL 交权后仍处于固件给出的文本模式，显存直写快几个数量级
         class BiosConsole {
         public:
-            // 初始化绑定的 VGA 设备，组合三路目标并安装为当前 Print 目标；可重复调用
-            void Install(Devices::Vga& vga);
+            // 装配控制台并安装为当前 Print 目标；可重复调用
+            // 当前显示模式是 80×25 文本时直写显存；否则跳过 VGA，退到电传（teletype 非空时）与流式通道，
+            // 并用 fallback（非空时）输出一条 WARN 说明退化原因；fallback 的编号按调用阶段取前缀
+            void Install(Devices::Vga& vga, Print::TeletypeTarget::WriteFn teletype, const Diagnostic* fallback);
         private:
             Print::VgaTextTarget m_text;          // VGA 文本目标
+            Print::TeletypeTarget m_teletype;     // 电传目标：显示模式不是 80×25 文本时的回退
             Print::DebugPortTarget m_debug;       // 0xE9 调试口目标
             Print::SerialTarget m_serial;         // COM1 串口目标
             Print::MultiplexTarget m_multiplex;   // 扇出目标

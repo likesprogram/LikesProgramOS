@@ -64,13 +64,14 @@ namespace Platform {
         uint64_t m_entries[kMaxEntries] = {};   // 段描述符存储，每个槽位 8 字节，按小端连续排列
     };
 
-    // 中断描述符表：256 个门槽位与装载入口
+    // 中断描述符表：门槽位数量由使用方选定
     // 处理器入口代码不在这里生成：Baleen 的停机诊断入口与内核的异常、IRQ 框架各自在自己的汇编里定义，
     // 本类只把入口地址写进门描述符
-    class Idt {
+    // 运行期关中断的阶段只需要覆盖处理器异常向量（0..31），用小表省静态内存；
+    // 运行期开放中断的内核用 256 向量的全量表（Platform::Idt）
+    template <uint32_t kVectorCount>
+    class IdtTable {
     public:
-        // 向量数量，由架构固定；表限长始终覆盖全部向量
-        static constexpr uint32_t kVectorCount = 256;
 #if defined(__x86_64__)
         // 门描述符宽度：IA-32e 长模式
         static constexpr uint32_t kEntryBytes = 16;
@@ -94,6 +95,9 @@ namespace Platform {
     private:
         uint64_t m_entries[kVectorCount * (kEntryBytes / sizeof(uint64_t))] = {};   // 门存储，按小端连续排列
     };
+
+    // 全量中断描述符表：覆盖架构固定的 256 个向量，运行期开放中断的内核用
+    using Idt = IdtTable<256>;
 
     // 把 TSS 选择子装入任务寄存器（LTR）：仅特权级 0 可用，选择子须指向表内的可用 TSS 描述符
     // 长模式下处理器按 16 字节描述符取得 64 位基址；内核的 IST 与特权级栈切换依赖它，Baleen 不建立 TSS

@@ -42,7 +42,7 @@ namespace {
     constexpr uint8_t kMaxIst = 7;                // IST 字段三位
 
     // 一个门描述符占的 64 位槽位数
-    constexpr uint32_t kGateWords = Platform::Idt::kEntryBytes / sizeof(uint64_t);
+    constexpr uint32_t kGateWords = Platform::Idt::kEntryBytes / sizeof(uint64_t);   // 一个门描述符占的 64 位槽位数，两种表容量相同
 
     // 表寄存器内容：32 位保护模式是 16 位限长加 32 位基址，长模式是 16 位限长加 64 位基址
     struct TablePointer {
@@ -120,11 +120,13 @@ namespace Platform {
         _Gdt_ReloadCodeSegment(codeSelector);
     }
 
-    void Idt::Clear() {
+    template <uint32_t kVectorCount>
+    void IdtTable<kVectorCount>::Clear() {
         for (uint32_t i = 0; i < kVectorCount * kGateWords; ++i) m_entries[i] = 0;
     }
 
-    bool Idt::SetGate(uint32_t vector, uintptr_t handler, uint16_t selector, GateType type, uint8_t dpl, uint8_t ist) {
+    template <uint32_t kVectorCount>
+    bool IdtTable<kVectorCount>::SetGate(uint32_t vector, uintptr_t handler, uint16_t selector, GateType type, uint8_t dpl, uint8_t ist) {
         if (vector >= kVectorCount || selector == 0 || dpl > kMaxDpl || ist > kMaxIst) return false;
 #if !defined(__x86_64__)
         if (ist != 0) return false;   // 32 位保护模式的门没有 IST 字段，字节 4 保留为 0
@@ -143,7 +145,8 @@ namespace Platform {
         return true;
     }
 
-    void Idt::Load() const {
+    template <uint32_t kVectorCount>
+    void IdtTable<kVectorCount>::Load() const {
         const TablePointer pointer{ static_cast<uint16_t>(Limit()), reinterpret_cast<uintptr_t>(Base()) };
         _Idt_LoadPointer(&pointer);
     }
@@ -151,4 +154,11 @@ namespace Platform {
     void LoadTaskRegister(uint16_t selector) {
         _Gdt_LoadTaskRegister(selector);
     }
+
+    // 中断描述符表的模板实现在本文件：使用方用到的容量必须在这里显式实例化，
+    // 新增容量时同步加一行，否则链接期报未定义引用
+    // 32：运行期关中断的 Baleen 阶段，只覆盖处理器异常向量
+    // 256：运行期开放中断的内核（Platform::Idt）
+    template class IdtTable<32>;
+    template class IdtTable<256>;
 }

@@ -63,6 +63,13 @@ namespace hostbuild {
         }
     }
 
+    void CheckStubBytes(uint64_t bytes, const std::string& path) {
+        // 按共用产物上限而不是 512e 的窗口上限 0x8200 检查：同一份字节写进 4Kn 或光盘后，
+        // 0x8000 以上的部分会被 IPL 按窗口上限拒绝，组装期必须提前挡下这种组合
+        if (bytes == 0 || bytes > DescriptorArea::kCompatibleStubBytes)
+            throw std::runtime_error("Stub 长度必须非 0 且不超过跨介质共用上限 0x8000（512e 的 0x8200 在 4Kn 与光盘上不可引导）：" + path);
+    }
+
     std::vector<uint8_t> BuildDescriptorArea(const std::string& descs, const Placed* stub, const Placed* core) {
         std::vector<uint8_t> area = ReadFile(descs + "/Head.bin");
         if (area.size() != DescriptorArea::kHeadBytes) throw std::runtime_error("描述符区头部长度不是 " + std::to_string(DescriptorArea::kHeadBytes) + " 字节");
@@ -85,13 +92,13 @@ namespace hostbuild {
             switch (Get32(segment.data())) {
                 case DescriptorArea::kStubMagic: {
                     if (stub == nullptr) throw std::runtime_error("有 Stub 段却没有 Stub 载荷：" + name);
-                    const auto [first, last] = SectorRange(*stub, DescriptorArea::kMaxStubBytes, "Stub");
+                    const auto [first, last] = SectorRange(*stub, DescriptorArea::kCompatibleStubBytes, "Stub");
                     Put32Le(segment.data() + DescriptorArea::kFieldSegmentLba, first);
                     Put32Le(segment.data() + DescriptorArea::kFieldSegmentEndLba, last);
                     break;
                 }
                 case DescriptorArea::kCoreMagic: {
-                    if (core == nullptr) throw std::runtime_error("有 Core 段却没有 Core 载荷：" + name);
+                    if (core == nullptr) throw std::runtime_error("有 BaleenCore 段却没有 BaleenCore 载荷：" + name);
                     const auto [first, last] = SectorRange(*core, DescriptorArea::kMaxCoreBytes, "Core");
                     Put32Le(segment.data() + DescriptorArea::kFieldSegmentLba, first);
                     Put32Le(segment.data() + DescriptorArea::kFieldSegmentEndLba, last);
@@ -108,7 +115,7 @@ namespace hostbuild {
         const uint32_t first = static_cast<uint32_t>(DescriptorArea::kWriteOffset / kBase);
         const uint64_t endBytes = static_cast<uint64_t>(first) * kBase + area.size();
         if (stub != nullptr && endBytes > stub->offset) throw std::runtime_error("描述符区与 Stub 载荷重叠");
-        if (core != nullptr && endBytes > core->offset) throw std::runtime_error("描述符区与 Core 载荷重叠");
+        if (core != nullptr && endBytes > core->offset) throw std::runtime_error("描述符区与 BaleenCore 载荷重叠");
         const uint32_t end = first + static_cast<uint32_t>((area.size() + kBase - 1) / kBase) - 1;
         Put32Le(area.data() + DescriptorArea::kFieldDescLba, first);
         Put32Le(area.data() + DescriptorArea::kFieldDescEndLba, end);

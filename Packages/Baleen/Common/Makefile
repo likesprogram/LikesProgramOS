@@ -1,5 +1,5 @@
 # Makefile
-#    Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法与镜像完整性头的目标文件，供 Stub 与 Core 共用
+#    Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法、镜像完整性头、内存图判定与读盘失败记录的目标文件，供 Stub 与 BaleenCore 共用
 
 # 产物根目录
 OUT_DIR   ?= Out
@@ -15,7 +15,9 @@ COMMON_DIR := ../../Common
 # C++ 编译器
 CXX       ?= g++
 # 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
-CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
+# 优化级别取 -Os：Baleen 的 32 位阶段在低 64KiB 静态窗口里运行，代码体积优先于指令数；
+# 宿主工具与 64 位内核各自按 -O2 编译，不受这里影响
+CXXFLAGS  ?= -m32 -std=c++20 -Os -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR) -I$(COMMON_DIR)/Include
 
@@ -24,7 +26,7 @@ NASM      ?= nasm
 NASMFLAGS ?= -f bin -Werror -I$(INC_DIR)/
 
 # 源与产物
-CPP_OBJS  := $(addprefix $(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o Sha256.o ImageHeader.o)
+CPP_OBJS  := $(addprefix $(OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o ImageHeader.o BootMemory.o ReadFailure.o)
 # 描述符段的产物：头部与各段分别输出，不合并；顺序即段表顺序，位置字段待写入程序回填
 DESC_DIR  := $(OUT_DIR)/Descs
 DESC_BINS := $(DESC_DIR)/Head.bin $(DESC_DIR)/BootDescriptor.bin $(DESC_DIR)/CoreDescriptor.bin
@@ -50,7 +52,7 @@ clean:
 
 # 打印用法
 help:
-	@printf '%s\n' 'Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法、镜像完整性头与描述符段' \
+	@printf '%s\n' 'Packages/Baleen/Common：BIOS 路径引导期控制台、摘要算法、镜像完整性头、内存图判定、读盘失败记录与描述符段' \
 	  '  make [all]  构建 $(CPP_OBJS) 与 $(DESC_BINS)' \
 	  '  make clean  删除 $(OUT_DIR)/' \
 	  '  变量：OUT_DIR / CXX / CXXFLAGS / NASM / NASMFLAGS 可覆盖'

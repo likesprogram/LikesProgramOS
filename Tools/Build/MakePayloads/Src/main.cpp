@@ -1,5 +1,5 @@
 /* main.cpp
-    MakePayloads：生成带 PLACEHOLDER 标识的开发占位载荷，不实现 Baleen Stub/Core/UEFI 加载器或系统卷装配
+    MakePayloads：生成带 PLACEHOLDER 标识的开发占位载荷，不实现 Baleen Stub/BaleenCore/UEFI 加载器或系统卷装配
 */
 
 #include <algorithm>
@@ -155,12 +155,12 @@ _Stub:
 _Msg: DB "PLACEHOLDER-STUB (BaleenStub not implemented yet)", 13, 10, 0
 )ASM";
 
-    // 占位 Core 的尾部填充长度：跨过 64KiB，让 Stub 的高位装载分两轮走完，而不是只读一个扇区
+    // 占位 BaleenCore 的尾部填充长度：跨过 64KiB，让 Stub 的高位装载分两轮走完，而不是只读一个扇区
     constexpr std::size_t kPlaceholderCoreBytes = 0x11000;
-    // Core 映像的装入物理地址，取值与 Contract.inc 的 CORE_LOAD 一致；入口偏移取自镜像头布局
+    // BaleenCore 映像的装入物理地址，取值与 Contract.inc 的 CORE_LOAD 一致；入口偏移取自镜像头布局
     constexpr uint32_t kCoreLoad = 0x100000;
 
-    // 占位 Core：Stub 把它装到 1MiB 并按 32 位保护模式进入，入口时 ESI 指向交权块
+    // 占位 BaleenCore：Stub 把它装到 1MiB 并按 32 位保护模式进入，入口时 ESI 指向交权块
     // 交权块可用就经 Stub 的控制台打印标识；不可用时退回直接写 0xE9 与 COM1，标记仍要出现
     // @...@ 是待替换的交权块常量，由 FillHandoffConstants 用 CoreHandoff.hpp 的取值填上
     constexpr std::string_view CoreAssembly = R"ASM(BITS 32
@@ -199,11 +199,11 @@ _Entry:
 .Hang:
     HLT
     JMP .Hang
-_Msg: DB "PLACEHOLDER-CORE-IMAGE (BaleenCore not implemented yet)", 13, 10, 0
-_MsgDirect: DB "PLACEHOLDER-CORE-IMAGE (handoff unavailable)", 13, 10, 0
+_Msg: DB "PLACEHOLDER-BALEENCORE-IMAGE (BaleenCore not implemented yet)", 13, 10, 0
+_MsgDirect: DB "PLACEHOLDER-BALEENCORE-IMAGE (handoff unavailable)", 13, 10, 0
 )ASM";
 
-    // 把占位 Core 汇编里的 @...@ 换成头文件里的常量：交权块字段与入口地址
+    // 把占位 BaleenCore 汇编里的 @...@ 换成头文件里的常量：交权块字段与入口地址
     // 偏移只在头文件里写一次：结构体一改，这里与 Stub 侧的断言会同时失败
     std::string FillAssemblyConstants(std::string_view source) {
         // 按 0x 加 8 位大写十六进制格式化，与汇编里的字面量写法一致
@@ -264,11 +264,11 @@ ALIGN 8
 _RelocSlot: DQ 0
 )ASM";
 
-    // 组装占位 Core 的完整镜像：入口前缀 + 保留区 + 完整性头 + 代码，补零到固定长度后填身份
+    // 组装占位 BaleenCore 的完整镜像：入口前缀 + 保留区 + 完整性头 + 代码，补零到固定长度后填身份
     // 占位件也要让 Stub 的头与摘要校验通过：占位是内容性质，不是跳过校验的理由
     Bytes BuildCoreImage(const Bytes& code) {
         const std::size_t entryAt = Baleen::ImageHeaderLayout::kEntryOffset;
-        Require(code.size() + entryAt <= kPlaceholderCoreBytes, "占位 Core 代码超出映像长度上限");
+        Require(code.size() + entryAt <= kPlaceholderCoreBytes, "占位 BaleenCore 代码超出映像长度上限");
         Bytes image(entryAt + code.size(), 0);
         // 文件起点的 16 位近跳转：位移相对指令末端，从装入点的偏移 0 跳到入口
         image[0] = Baleen::ImageHeaderLayout::kNearJumpOpcode;
@@ -426,7 +426,7 @@ _RelocSlot: DQ 0
     // 返回输出目录里还缺哪些载荷；已有的必须仍带着占位标识，否则报错
     std::vector<std::string> CheckExisting(const fs::path& output) {
         std::vector<std::string> missing;
-        for (const char* name : {"BaleenStub.bin", "BaleenCore.bin", "Efi.img", "SystemVolume.img", "BaleenLayout.bin"}) {
+        for (const char* name : {"BaleenStub.bin", "BaleenCore.bin", "Efi.img", "SystemVolume.img"}) {
             const fs::path path = output / name;
             const auto status = fs::symlink_status(path);
             if (status.type() == fs::file_type::not_found) { missing.emplace_back(name); continue; }
@@ -439,17 +439,15 @@ _RelocSlot: DQ 0
                 constexpr uint8_t uuid[] = {0x11,0x11,0x11,0x11,0x22,0x22,0x33,0x33, 0x44,0x44,0x55,0x55,0x55,0x55,0x55,0x55};
                 placeholder = data.size() == 16 * 1024 * 1024 && Get(data, 1024 + 56, 2) == 0xef53 && std::equal(std::begin(uuid), std::end(uuid), data.begin() + 1024 + 104);
             } else if (std::string_view(name) == "BaleenStub.bin" || std::string_view(name) == "BaleenCore.bin") {
-                // 按完整性头与占位标识判定：占位 Core 带头，旧格式（无头）要删掉重生成
+                // 按完整性头与占位标识判定：占位 BaleenCore 带头，旧格式（无头）要删掉重生成
                 const hostbuild::ImageClass cls = hostbuild::ClassifyImage(data);
                 const hostbuild::ImageKind expected = std::string_view(name) == "BaleenStub.bin" ? hostbuild::ImageKind::Stub : hostbuild::ImageKind::Core;
                 placeholder = cls.kind == expected && cls.placeholder && (expected == hostbuild::ImageKind::Stub || cls.header);
-            } else if (std::string_view(name) == "Efi.img") {
+            } else {
                 // ESP 占位件按体积与 FAT 类型判定：双 ESP 布局要求它是 4 MiB 的 FAT16，
                 // 旧的 36 MiB FAT32 认不出来，要删掉重生成
                 const bool fat16 = data.size() >= 0x40 && Get(data, 510, 2) == 0xaa55 && Get(data, 11, 2) == 512 && Get(data, 13, 1) == 1 && Get(data, 22, 2) != 0 && Get(data, 17, 2) != 0;
                 placeholder = data.size() == 4 * 1024 * 1024 && fat16 && bytes.find("MAKEIMAGE-EFI-BOOT-OK") != std::string_view::npos;
-            } else {
-                placeholder = bytes.find("PLACEHOLDER BaleenLayout.bin") != std::string_view::npos;
             }
             // 占位件换过格式时旧文件认不出来，这里只说明要删：本工具不覆写已有文件
             Require(placeholder, "已有文件不是当前格式的占位件（旧格式占位件需先删除），或请使用专门输出目录：" + path.string());
@@ -471,7 +469,7 @@ _RelocSlot: DQ 0
         Staging staging(output);
         const auto& dir = staging.path;
         Assemble(dir, "BaleenStub", StubAssembly);
-        // 占位 Core 是真正的 32 位可执行映像：Stub 会校验它的头与摘要、把它装到 1MiB 并跳进去，
+        // 占位 BaleenCore 是真正的 32 位可执行映像：Stub 会校验它的头与摘要、把它装到 1MiB 并跳进去，
         // 入口前缀与完整性头由 BuildCoreImage 组装；尾部补零跨过 64KiB，高位装载的分批与拷贝路径也会被走到
         Assemble(dir, "coreapp", FillAssemblyConstants(CoreAssembly));
         Write(dir / "BaleenCore.bin", BuildCoreImage(Read(dir / "coreapp.bin")));
@@ -482,15 +480,12 @@ _RelocSlot: DQ 0
         InstallEfi(dir / "Efi.img", efi);
         CreateEmpty(dir / "SystemVolume.img", 16 * 1024 * 1024);
         Run({"mkfs.ext4", "-q", "-F", "-U", "11111111-2222-3333-4444-555555555555", "-E", "hash_seed=66666666-7777-8888-9999-aaaaaaaaaaaa,root_owner=0:0,lazy_itable_init=0,lazy_journal_init=0", (dir / "SystemVolume.img").string()});
-        Bytes layout(512, 0);
-        Text(layout, 0, "PLACEHOLDER BaleenLayout.bin\nBaleen layout descriptor is not specified yet; this file only fills the product slot.\n");
-        Write(dir / "BaleenLayout.bin", layout);
         // 只补缺项。link 原子地拒绝已存在的目标，包括并行构建刚发布的文件；
         // staging 位于同一文件系统，不会出现 rename 覆盖用户修改的系统卷
         for (const auto& name : missing) if (link((dir / name).c_str(), (output / name).c_str()) != 0) throw std::runtime_error("发布失败（不覆盖已存在目标）：" + (output / name).string() + ": " + std::strerror(errno));
         std::cout << "MakePayloads: 已补齐 " << missing.size() << " 个占位件到 " << output
                   << "（已有文件保持原样）\n"
-                  << "MakePayloads: 仅验证引导链，不包含真实 Stub/Core/UEFI 加载器或内核。\n";
+                  << "MakePayloads: 仅验证引导链，不包含真实 Stub/BaleenCore/UEFI 加载器或内核。\n";
     }
 }
 

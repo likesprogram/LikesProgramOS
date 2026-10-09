@@ -107,7 +107,7 @@ PM32:
     MOV SS, AX
     MOV FS, AX
     MOV GS, AX
-    MOV ESP, LOADER_PM_STACK    ; 弹跳槽与 INT 13h 栈都在镜像的未初始化区，不占这里
+    MOV ESP, _Stub_Stack_Top    ; 保护模式栈在未初始化区末尾；实模式弹跳仍用 IPL 之下的实模式栈
     CLD
     ; 驱动器与介质号写进未初始化区：自检要求镜像字节在装入后保持原样，落盘的变量不能在这里写
     MOV [_Boot_Drive], DL
@@ -142,14 +142,23 @@ _Boot_Media:   RESB 1           ; Boot::Media，IPL 交权时的 DH
 _Boot_Sector_Bytes: RESW 1      ; IPL 交权时的 CX：512 / 2048 / 4096
 _Boot_Desc_Lba: RESD 1          ; IPL 交权时的 ESI：描述符所在扇区的 LBA
 
-; Stub → Core 的交权入口：cdecl 参数为交权块指针与 Core 入口地址
+; 保护模式栈：放在未初始化区末尾，不落盘；栈顶即静态内存末端，越界先撞到镜像自身的静态数据
+; 独立成一节，由 Stub.ld 排到未初始化区最后、纳入 __bss_bytes 清零范围，并断言栈顶留在低 64KiB 窗口内
+; 实模式弹跳与固件调用不用这张栈：Bios.asm 在那里换上 IPL 之下的实模式栈
+SECTION .stub.stack nobits alloc write align=16
+GLOBAL _Stub_Stack_Bottom
+GLOBAL _Stub_Stack_Top
+_Stub_Stack_Bottom: RESB STUB_STACK_BYTES
+_Stub_Stack_Top:
+
+; Stub → BaleenCore 的交权入口：cdecl 参数为交权块指针与 BaleenCore 入口地址
 ; 入口状态在此固定：32 位保护模式、平坦段、分页关闭、IF=0、DF=0 都是调用前已有的状态，这里只补齐标志
 ; 跳过去不返回，Stub 从此常驻不动，交权块里的固件服务继续可用
 SECTION .text.handoff progbits alloc exec nowrite
 GLOBAL _Stub_Enter_Core
 _Stub_Enter_Core:
     MOV ESI, [ESP + 4]          ; 交权块
-    MOV EAX, [ESP + 8]          ; Core 入口
+    MOV EAX, [ESP + 8]          ; BaleenCore 入口
     CLI
     CLD
     JMP EAX

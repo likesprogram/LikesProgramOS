@@ -12,7 +12,7 @@ COMMON_DIR := ../Common
 
 # C++ 编译器
 CXX      ?= g++
-# 预处理选项：占位 Core 的汇编常量与镜像头布局取自 Baleen 的公共头，避免取值在本工具里重写一遍
+# 预处理选项：占位 BaleenCore 的汇编常量与镜像头布局取自 Baleen 的公共头，避免取值在本工具里重写一遍
 CPPFLAGS ?= -I$(COMMON_DIR)/Include -I../../../Packages/Baleen/Common/Include -I../../../Packages/Common/Include
 # 编译选项：常见警告全开并视为错误
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror

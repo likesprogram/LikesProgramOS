@@ -13,18 +13,18 @@ make            # 产出 ../../Bin/TestInstaller（中间产物在 Obj/；g++，
 make clean      # 删除 Obj/ 与本工具的可执行文件（Bin 与 MakeImage 共用，不删别人的）
 ```
 
-正常构建只依赖正式 C++ 源码，不依赖未交付的本地回归夹具。本地回归覆盖：MBR 引导代码原样保留且 `0xAA55` 在位、0/1 号分区项的类型与起止 LBA 和实际字节偏移一致、2 号槽留空、描述符区的 Stub 段与 Stub 载荷对齐、Stub/Core/`--raw` 内容逐字节一致、两个分区内容与源镜像逐字节一致且不越界、`fdisk` 能读出两类分区，以及可复现性与失败路径（坏 MBR、非 512 字节 MBR、超长 Stub、未对齐或落在 MBR 区的 `--raw`、非法 `--pad-to`）；有权限时把两个分区切出来分别按 FAT 与 Ext4 挂载验证。
+正常构建只依赖正式 C++ 源码，不依赖未交付的本地回归夹具。本地回归覆盖：MBR 引导代码原样保留且 `0xAA55` 在位、0/1 号分区项的类型与起止 LBA 和实际字节偏移一致、2 号槽留空、描述符区的 Stub 段与 Stub 载荷对齐、Stub/BaleenCore/`--raw` 内容逐字节一致、两个分区内容与源镜像逐字节一致且不越界、`fdisk` 能读出两类分区，以及可复现性与失败路径（坏 MBR、非 512 字节 MBR、超长 Stub、未对齐或落在 MBR 区的 `--raw`、非法 `--pad-to`）；有权限时把两个分区切出来分别按 FAT 与 Ext4 挂载验证。
 
 ## 二、介质与单位支持
 
-产物按目标设备的逻辑扇区单位生成（`--sector-bytes`）。“实测”指在本机 QEMU 上启动到 Baleen Core（BIOS 路径，见 `make run`）或执行 EFI 引导镜像（UEFI 路径，用 OVMF）：
+产物按目标设备的逻辑扇区单位生成（`--sector-bytes`）。“实测”指在本机 QEMU 上沿 BIOS 路径经 IPL → Stub → BaleenCore 进入内核、完成内核侧自检并停在内核阶段边界（见 `make run`），或执行 EFI 引导镜像（UEFI 路径，用 OVMF）：
 
 | 目标介质 | 逻辑扇区单位 | BIOS 路径 | UEFI 路径 |
 | --- | --- | --- | --- |
-| U 盘 / 移动硬盘（USB 存储） | 512e | 实测到 Core | 实测（1 MiB 处的 ESP） |
+| U 盘 / 移动硬盘（USB 存储） | 512e | 实测到内核 | 实测（1 MiB 处的 ESP） |
 | U 盘 / 移动硬盘（USB 存储） | 4Kn | 取决于固件：SeaBIOS 等不枚举 4Kn USB 存储，设备不可见；逻辑层由回归夹具覆盖 | 实测（8 MiB 处的 ESP，**同一份产物**） |
-| 内置硬盘（SATA / IDE / NVMe） | 512e | 实测到 Core | 实测 |
-| 内置硬盘（NVMe） | 4Kn | 实测到 Core | 实测 |
+| 内置硬盘（SATA / IDE / NVMe） | 512e | 实测到内核 | 实测 |
+| 内置硬盘（NVMe） | 4Kn | 实测到内核 | 实测 |
 
 **一份产物通吃两种设备单位**：0xEF 分区项的起点固定写 LBA 2048，512e 固件读到 1 MiB、4Kn 固件读到 8 MiB，两处各放一份同样的 FAT 卷（双 ESP）；BIOS 路径本来就不依赖分区表——位置字段与设备单位无关，装载方自行换算。`--sector-bytes` 现在只决定 Ext4 系统卷那一项的单位，内核对系统卷用布局描述定位，不依赖它。
 
@@ -39,6 +39,7 @@ TestInstaller --out LikesProgram.hdd \
     --core <BaleenCore.bin> \
     --esp  <ESP 的 FAT 镜像> \
     --system-volume <Ext4 系统卷镜像> \
+    [--layout <布局描述模板>] [--kernel-path <卷内路径>] \
     --manifest Out/LikesProgram.hdd.json
 ```
 
@@ -47,10 +48,12 @@ TestInstaller --out LikesProgram.hdd \
 | `--out PATH` | 输出磁盘镜像（必需） |
 | `--mbr PATH` | 磁盘一级引导（`BaleenIPL.bin`，512 字节且带 `0xAA55`，必需） |
 | `--stub PATH` | 实模式服务层：原始扇区放置，位置写进描述符区的 Stub 段 |
-| `--core PATH` | 核心阶段：原始扇区放置，位置写进描述符区的 Core 段 |
+| `--core PATH` | 核心阶段：原始扇区放置，位置写进描述符区的 BaleenCore 段 |
 | `--descs DIR` | 描述符段产物目录（默认 `Packages/Baleen/Common/Out/Descs`）；头部与各段拆开，本工具只回填起止位置 |
 | `--esp PATH` | ESP 的 FAT 镜像（含 `\EFI\BOOT\BOOTX64.EFI`），落到 0 号分区 |
 | `--system-volume PATH` | 构建期装配好的 Ext4 系统卷镜像，落到 1 号分区 |
+| `--layout PATH` | 布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；缺省用 `/LikesProgram/System/LikesProgram.os`（见 [系统卷布局](../../../Docs/Specs/Common/系统卷布局.md)） |
+| `--kernel-path PATH` | 覆盖内核路径（卷内绝对路径），优先于模板 |
 | `--raw 宿主路径[@偏移]` | 原始载荷，可重复；偏移须 4096 对齐且不与已安排区重叠 |
 | `--sector-bytes N` | Ext4 分区项（`0x83`）的 LBA 单位：`512`（默认）或 `4096`；0xEF 项固定按 512 单位写（双 ESP 布局需要），载荷一律 4096 对齐 |
 | `--pad-to N` | 镜像总长向上对齐的粒度，默认 `0x100000`（1 MiB） |
@@ -64,8 +67,8 @@ TestInstaller --out LikesProgram.hdd \
 | 位置 | 内容 |
 | --- | --- |
 | `0x000` | MBR：`BaleenIPL.bin` 的引导代码原样保留，分区表由本工具写实 |
-| 描述符区（字节偏移 `0x22000`） | 描述符区：头部与段序列（当前为 Stub 段与 Core 段），由 `--descs` 的段产物回填后写入 |
-| 描述符区之后，4096 对齐 | 原始载荷：Stub、Core 与 `--raw` 条目，落在未分区的空隙里 |
+| 描述符区（字节偏移 `0x22000`） | 描述符区：头部与段序列（当前为 Stub 段与 BaleenCore 段），由 `--descs` 的段产物回填后写入 |
+| 描述符区之后，4096 对齐 | 原始载荷：Stub、BaleenCore 与 `--raw` 条目，落在未分区的空隙里 |
 | 1 MiB 与 8 MiB | 0 号分区：ESP 的 FAT16 镜像，同一份写两处（详见第五节） |
 | ESP 在 4Kn 视角下的分区范围之后 | 1 号分区：Ext4 系统卷镜像 |
 | 末尾 | 总长向上对齐到 `--pad-to`，默认 1 MiB |
@@ -90,13 +93,13 @@ TestInstaller --out LikesProgram.hdd \
 | 8 | 4 | areaLba | 本区起始位置，512 字节基准：`0x22000 / 512 = 272` |
 | 12 | 4 | areaEndLba | 本区结束位置，512 字节基准，含；由本工具按段序列总长算出 |
 
-段序列（头部之后，按文件名排序）：每段以段头开头——标记 4 字节、版本 2 字节、段长 2 字节（含段头）。Stub 段标记 `0x52445342`（`BSDR`）、Core 段标记 `0x52444342`（`BCDR`），其后各是载荷的起始与结束位置（各 4 字节，512 字节基准，结束含在范围内）。起始位置非 0，换算成本地扇区号后必须大于描述符区扇区号，结束不早于起始，扇区数不超过各自上限。
+段序列（头部之后，按文件名排序）：每段以段头开头——标记 4 字节、版本 2 字节、段长 2 字节（含段头）。Stub 段标记 `0x52445342`（`BSDR`）、BaleenCore 段标记 `0x52444342`（`BCDR`），其后各是载荷的起始与结束位置（各 4 字节，512 字节基准，结束含在范围内）。起始位置非 0，换算成本地扇区号后必须大于描述符区扇区号，结束不早于起始，扇区数不超过各自上限。
 
-**载荷门禁**：`--stub` 与 `--core` 的载荷按各自的完整性头判定，Stub 与 Core 同构、只有格式标记与长度上限不同。带头的载荷校验格式标记、版本、头长、标志、摘要算法、`BuildId` 长度、保留字段、`ImageBytes` 与实际文件长度、该类别的长度上限（Stub 为两种入口共用的 `0x8000`，Core 为 `0x400000`）、入口前缀与 `EntryOffset` 一致、`MemoryBytes` 覆盖文件且不越界（Stub 另查低 64KiB 窗口）以及整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出，便于与构建记录对照。`MakePayloads` 生成的占位内容同样要过这套校验；完全没有头的 `PLACEHOLDER-STUB` 占位件放行并在标准错误上提示未校验。两种标识都没有的载荷默认拒绝；`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验，只给测试夹具与特殊用途，被免除校验的载荷不能算作对正式产物的检查。实现与判定规则见 [BaleenImage](../Common/README.md) 与 [PackImage](../PackImage/README.md)。
+**载荷门禁**：`--stub` 与 `--core` 的载荷按各自的完整性头判定，Stub 与 BaleenCore 同构、只有格式标记与长度上限不同。带头的载荷校验格式标记、版本、头长、标志、摘要算法、`BuildId` 长度、保留字段、`ImageBytes` 与实际文件长度、该类别的长度上限（Stub 为两种入口共用的 `0x8000`，BaleenCore 为 `0x400000`）、入口前缀与 `EntryOffset` 一致、`MemoryBytes` 覆盖文件且不越界（Stub 另查低 64KiB 窗口）以及整幅 SHA-256 摘要，通过后把 BuildId 前 4 字节打进构建输出，便于与构建记录对照。`MakePayloads` 生成的占位内容同样要过这套校验；完全没有头的 `PLACEHOLDER-STUB` 占位件放行并在标准错误上提示未校验。两种标识都没有的载荷默认拒绝；`--stub-unchecked` / `--core-unchecked` 显式免除对应载荷的校验，只给测试夹具与特殊用途，被免除校验的载荷不能算作对正式产物的检查。实现与判定规则见 [BaleenImage](../Common/README.md) 与 [PackImage](../PackImage/README.md)。
 
 ## 六、构建清单
 
-`--manifest` 的 JSON 记录：`total_bytes`、`sector_bytes` 与按该单位的 `total_sectors`、`mbr`、`descriptor_area`（描述符区偏移、位置字段的基准单位（512）与段产物目录）、`stub` / `core` / `raw[]`、`esp` / `system_volume`（偏移与长度），以及 `partitions[]`（槽位、类型、按该单位的起始 LBA 与扇区数）。后续的布局描述生成与验证脚本按它取字节偏移与长度。
+`--manifest` 的 JSON 记录：`total_bytes`、`sector_bytes` 与按该单位的 `total_sectors`、`mbr`、`descriptor_area`（描述符区偏移、位置字段的基准单位（512）与段产物目录）、`stub` / `core` / `raw[]`、`esp` / `system_volume`（偏移与长度）、`layout`（布局描述偏移与长度、状态区域、内核路径；未提供系统卷时为 `null`），以及 `partitions[]`（槽位、类型、按该单位的起始 LBA 与扇区数）。后续的验证脚本按它取字节偏移与长度。
 
 ## 七、可复现性
 
@@ -104,7 +107,7 @@ TestInstaller --out LikesProgram.hdd \
 
 ## 八、边界与待定项
 
-- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；`BaleenLayout.bin` 的字段与落点仍待后续阶段设计，可由 `--raw` 指定位置。IPL 只消费描述符区的 Stub 段；Stub 消费描述符区的 Core 段与 Core 镜像自带的完整性头，其余结构两者都不解析。
+- **不装配内容**：ESP 的 FAT 与 Ext4 系统卷都取现成镜像；布局描述按[布局描述](../../../Docs/Specs/Baleen/布局描述.md)生成并写到偏移 `0x20000`，`0x21000` 的状态区域只保留位置不写内容。IPL 只消费描述符区的 Stub 段；Stub 消费描述符区的 BaleenCore 段与 BaleenCore 镜像自带的完整性头；布局描述由 BaleenCore 读取，IPL 与 Stub 都不解析。
 - **当前只写 MBR 分区表**：引导区（描述符与载荷）按 MBR 与 GPT 共用的位置排布，GPT 分区表的写入由部署侧实现（见[启动介质与文件系统](../../../Docs/Specs/Common/启动介质与文件系统.md) 4.2）；UEFI 固件按分区表里的 ESP 分区项启动。
 - **写入由外部写盘步骤完成**：工具当前产出的是整盘镜像文件，写到内置硬盘、移动硬盘或 U 盘上由 `dd` 一类工具负责；直接面向块设备写入（按目标设备读取逻辑扇区大小、交互选盘）属正式安装器的形态，本工具不涉及。
 - **不做** 签名与信任锚、坏块与磨损处理。

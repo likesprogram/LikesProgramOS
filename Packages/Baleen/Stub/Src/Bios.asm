@@ -15,6 +15,10 @@
 ;    读盘分两层：批量 EDD 请求各自最多 READ_TRIES 次尝试；某批耗尽后不整体放弃，
 ;    而是从原始 LBA 与目标地址起把整段范围逐扇区重读，每个单扇区请求独立计尝试，
 ;    HDD 且 LBA<63 时可在 EDD 失败后退回 CHS；全部尝试有界，失败只返回 0，不停机
+;    设备复位只在失败重试路径里发，预算按每次 _Bios_Read_Sectors 调用重置：
+;    一次调用至多复位一次，长读盘不会因为开局失误就用光整段范围的复位机会
+;    每次读盘调用进入时清空失败记录，失败时写入失败请求的 LBA、块数、固件 AH 与阶段，
+;    记录由 C++ 侧按 Contract.inc 的 READ_FAIL_* 读取并显示；成功返回的调用不留现场
 
 BITS 32
 
@@ -25,6 +29,7 @@ SECTION .text
 GLOBAL _Bios_Sector_Size
 GLOBAL _Bios_E820
 GLOBAL _Bios_Read_Sectors
+GLOBAL _Bios_Teletype
 EXTERN _Boot_Drive
 EXTERN _Boot_Media
 EXTERN _Boot_Sector_Bytes
@@ -45,6 +50,7 @@ EXTERN _Boot_Sector_Bytes
 %DEFINE OP_SECTOR_SIZE 1
 %DEFINE OP_E820 2
 %DEFINE OP_READ 3
+%DEFINE OP_TELETYPE 4
 ; E820 条目字节数与低地址缓冲的条目数上限
 ; 上限与 Core.cpp 的内存图静态缓冲一致：这张图要随交权块一并交给 Core
 %DEFINE E820_ENTRY_BYTES 24
@@ -58,6 +64,14 @@ EXTERN _Boot_Sector_Bytes
 %DEFINE READ_TRIES 3
 ; CHS 回退的 LBA 上限，不含：只覆盖 C=0、H=0 的首 63 个扇区
 %DEFINE CHS_LAST_LBA 63
+
+; 实模式栈探针：只在 STACK_PROBE 构建里编入，默认产物不含这些代码
+; 量固件在 0x7C00 以下实际用多深的栈：每次弹跳前填花码，回到保护模式时扫描被写坏的最低地址
+; 保护区取 [0x4000, 0x7C00)，落在 IPL 失效后的无主常规内存里；判定与打印在 C++ 侧
+%IFDEF STUB_STACK_PROBE
+%DEFINE GUARD_BOTTOM 0x4000
+%DEFINE GUARD_PATTERN 0xA5A5A5A5
+%ENDIF
 
 ; 探测启动驱动器的扇区大小：只认 512、2048、4096，其他结果与调用失败都返回 0
 _Bios_Sector_Size:
@@ -154,6 +168,12 @@ _Bios_Read_Sectors:
     PUSH EBX
     PUSH ESI
     PUSH EDI
+    ; 清空上一次的失败现场：成功返回的调用不留下记录，诊断只取本次失败写入的值
+    XOR EAX, EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_LBA], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_COUNT], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_STATUS], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_PHASE], EAX
     MOV EAX, [EBP + 8]                  ; lba
     MOV [Bios_Lba], EAX
     ; 原始 LBA 与目标地址另存：批量失败后的逐扇区重读必须从它们开始，而不是从失败点
@@ -167,6 +187,7 @@ _Bios_Read_Sectors:
     MOV [Bios_Sect], EAX
     MOV DWORD [Bios_Done], 0
     MOV BYTE [Bios_Ok], 0
+    MOV BYTE [Bios_Reset], 0            ; 复位预算按调用重置：本次调用内至多复位一次
     ; 参数检查：块数非 0、扇区大小是可辨识的值、目标 16 字节对齐且整段落低 1MiB 内
     CMP DWORD [Bios_Count], 0
     JE .Reject
@@ -205,7 +226,35 @@ _Bios_Read_Sectors:
     POP EBP
     RET
 .Reject:
+    ; 参数非法：记录本次请求，未走固件所以没有 AH 状态；这里是 32 位平坦段，
+    ; 记录直接写，不调用 16 位实模式侧的保存例程
+    MOV EAX, [Bios_Count]
+    MOV [_Bios_Read_Failure + READ_FAIL_COUNT], EAX
+    MOV EAX, [Bios_Lba]
+    MOV [_Bios_Read_Failure + READ_FAIL_LBA], EAX
+    MOV DWORD [_Bios_Read_Failure + READ_FAIL_STATUS], 0
+    MOV DWORD [_Bios_Read_Failure + READ_FAIL_PHASE], READ_PHASE_REJECT
     XOR EAX, EAX                        ; 参数非法：失败返回，由调用方按既有语义降级
+    POP EDI
+    POP ESI
+    POP EBX
+    POP EBP
+    RET
+
+; 电传输出：cdecl 参数为以 0 结尾的字符串，成功返回 1，失败 0
+; 只在显示设备不处于 80×25 文本模式时使用：逐字符走固件调用，比显存直写慢几个数量级
+_Bios_Teletype:
+    PUSH EBP
+    MOV EBP, ESP
+    PUSH EBX
+    PUSH ESI
+    PUSH EDI
+    MOV EAX, [EBP + 8]
+    MOV [Bios_Teletype_Cursor], EAX
+    MOV BYTE [Bios_Ok], 0
+    MOV DWORD [Bios_Op], OP_TELETYPE
+    CALL Enter_Real
+    MOVZX EAX, BYTE [Bios_Ok]
     POP EDI
     POP ESI
     POP EBX
@@ -222,6 +271,14 @@ Enter_Real:
     SIDT [Bios_Saved_Idtr]
     CLD                         ; 参数表清零与本文件的 REP 例程都依赖 DF=0
     CLI
+%IFDEF STUB_STACK_PROBE
+    ; 探针：填保护区并计数弹跳，回来时才知道哪些字节被固件写过
+    MOV EDI, GUARD_BOTTOM
+    MOV ECX, (REAL_STACK_TOP - GUARD_BOTTOM) / 4
+    MOV EAX, GUARD_PATTERN
+    REP STOSD
+    INC DWORD [_Bios_StackProbe_Bounces]
+%ENDIF
     ; 段表模板只读，每次弹跳前把副本拷进未初始化区：
     ; 加载 16 位选择子会置位描述符的 Accessed 位并写回，写回必须落在镜像之外
     MOV ESI, Bios_Gdt
@@ -257,6 +314,8 @@ Real_Mode_Entry:
     JE Real_E820
     CMP EAX, OP_READ
     JE Real_Read
+    CMP EAX, OP_TELETYPE
+    JE Real_Teletype
     MOV BYTE [Bios_Ok], 0
     JMP Real_Leave
 
@@ -369,6 +428,9 @@ Real_Read:
     MOV AH, 42h
     CALL Real_Disk_Int
     JNC .Batch_Ok
+    MOV EDX, READ_PHASE_BATCH_EDD       ; 先记下本批失败：复位会覆盖最近一次 AH，记录要赶在它前面
+    MOV EAX, [Bios_Blocks]
+    CALL Real_Save_Read_Fail
     CALL Real_Disk_Reset               ; 失败才复位再重试，正常路径一次都不发
     DEC BYTE [Bios_Tries]
     JNZ .Retry
@@ -382,12 +444,16 @@ Real_Read:
     MOV BYTE [Bios_Ok], 1
     JMP Real_Leave
 .Fail:
-    MOV BYTE [Bios_Ok], 0               ; 连一个扇区都放不下：布局错误，逐扇区同样放不下
+    MOV EDX, READ_PHASE_WINDOW          ; 连一个扇区都放不下：布局错误，逐扇区同样放不下
+    MOV EAX, [Bios_Blocks]
+    CALL Real_Save_Read_Fail
+    MOV DWORD [_Bios_Read_Failure + READ_FAIL_STATUS], 0
+    MOV BYTE [Bios_Ok], 0
     JMP Real_Leave
 
 ; 批量失败后的逐扇区重读：从原始 LBA 与目标地址起读完整段，不复用失败批次的位置
 ; 每个单扇区请求独立计 READ_TRIES 次尝试，每次先 EDD，再在适用时退回 CHS
-; 任一扇区耗尽尝试即整段失败返回 0；与批量路径共用会话一次的复位策略
+; 任一扇区耗尽尝试即整段失败返回 0；与批量路径共用本次调用的复位预算，一次调用至多复位一次
 Real_Read_Fallback:
     MOV DWORD [Bios_Done], 0
 .Loop:
@@ -409,21 +475,30 @@ Real_Read_Fallback:
     MOV EDX, WINDOW_BYTES
     SUB EDX, ECX
     CMP EDX, [Bios_Sect]
-    JB .Fail
+    JB .Window
     MOV BYTE [Bios_Tries], READ_TRIES
 .Retry:
     CALL Real_Fill_Dap
     MOV AH, 42h
     CALL Real_Disk_Int
     JNC .Next
+    MOV EDX, READ_PHASE_SINGLE_EDD      ; 逐扇区 EDD 失败：CHS 若真的发调用并失败，会把阶段改写得更细
+    MOV EAX, [Bios_Blocks]
+    CALL Real_Save_Read_Fail
     CALL Real_Read_Chs                  ; 不适用或失败都返回 CF=1，继续走复位重试
     JNC .Next
     CALL Real_Disk_Reset
     DEC BYTE [Bios_Tries]
     JNZ .Retry
 .Fail:
-    MOV BYTE [Bios_Ok], 0
+    MOV BYTE [Bios_Ok], 0               ; 尝试耗尽：记录里是最后一次请求的现场
     JMP Real_Leave
+.Window:
+    MOV EDX, READ_PHASE_WINDOW          ; 单扇区也放不进窗口：逐扇区同样失败，未走固件
+    MOV EAX, [Bios_Blocks]
+    CALL Real_Save_Read_Fail
+    MOV DWORD [_Bios_Read_Failure + READ_FAIL_STATUS], 0
+    JMP .Fail
 .Next:
     INC DWORD [Bios_Done]
     JMP .Loop
@@ -455,10 +530,32 @@ Real_Read_Chs:
     XOR DH, DH
     MOV AX, 0x0201
     CALL Real_Disk_Int
+    JNC .Done
+    MOV EDX, READ_PHASE_SINGLE_CHS      ; CHS 真的发了调用且失败：阶段比 EDD 失败更细，记录本次现场
+    MOV EAX, [Bios_Blocks]
+    CALL Real_Save_Read_Fail
+    STC
+.Done:
     RET
 .Skip:
     STC
     RET
+
+; INT 10h AH=0Eh：把字符串逐字符写到电传输出，显示模式不是 80×25 文本时的回退通道
+; 游标存内存、每轮重装 SI：固件对寄存器的保留不作承诺，只有内存里的取值可靠
+Real_Teletype:
+.Loop:
+    MOV SI, [Bios_Teletype_Cursor]
+    MOV AL, [SI]
+    TEST AL, AL
+    JZ .Done
+    INC DWORD [Bios_Teletype_Cursor]
+    MOV AH, 0x0E
+    INT 10h
+    JMP .Loop
+.Done:
+    MOV BYTE [Bios_Ok], 1
+    JMP Real_Leave
 
 ; 按 Bios_Lba、Bios_Blocks、Bios_Block_Dest 填 EDD 的 DAP
 ; 偏移字段只有 16 位，段基址取线性地址 >> 4：目的地必须 16 字节对齐且不跨窗口
@@ -478,7 +575,8 @@ Real_Fill_Dap:
     MOV DWORD [SI + 12], 0              ; LBA 高 32 位
     RET
 
-; INT 13h AH=00：设备复位。只在读失败的重试路径里发，一次会话至多一次
+; INT 13h AH=00：设备复位。只在读失败的重试路径里发，预算按每次 _Bios_Read_Sectors 调用重置：
+; 一次调用至多一次；调用方读的段再长，每次调用都有机会复位，总次数仍由调用数与每次调用的一次封顶
 ; 光盘不复位：复位对光驱的开销大且不解决读失败；号小于 0x80 的也不是硬盘
 Real_Disk_Reset:
     CMP BYTE [Bios_Reset], 0
@@ -494,7 +592,21 @@ Real_Disk_Reset:
 .Done:
     RET
 
+; 记录一次读盘失败的事实：EDX 为阶段码，EAX 为失败请求的块数，LBA 取本文件存储的当前请求，
+; AH 取固件最近一次返回的状态；只在失败路径调用，会改写 EAX/EDX，CF 不受影响
+Real_Save_Read_Fail:
+    MOV [_Bios_Read_Failure + READ_FAIL_PHASE], EDX
+    MOV [_Bios_Read_Failure + READ_FAIL_COUNT], EAX
+    MOV EAX, [Bios_Lba]
+    MOV [_Bios_Read_Failure + READ_FAIL_LBA], EAX
+    MOVZX EAX, BYTE [Bios_Last_Ah]
+    MOV [_Bios_Read_Failure + READ_FAIL_STATUS], EAX
+    RET
+
 ; 读盘与复位只消费 CF，保护寄存器与段后才能继续访问低地址会话状态
+; 固件返回的 AH 另存一份：POPAD 之后调用方只能看到 CF，失败记录要取这个状态
+; 存储排在段寄存器还原之后、POPAD 之前：前者让写落在本文件的段里，后者会还原调用方的 AH；
+; 中间只有 POP 与 MOV，CF 保持固件返回值不被破坏
 Real_Disk_Int:
     PUSHAD
     PUSH DS
@@ -506,6 +618,7 @@ Real_Disk_Int:
     CLI
     POP ES
     POP DS
+    MOV [Bios_Last_Ah], AH
     POPAD
     RET
 
@@ -531,6 +644,27 @@ Bios_Prot_Entry:
     MOV FS, AX
     MOV GS, AX
     MOV ESP, [Bios_Saved_Esp]
+%IFDEF STUB_STACK_PROBE
+    ; 探针：按操作码记下本次弹跳写坏的最低地址，取小累计；SCASD 走 ES:EDI，此刻 ES 已是平坦段
+    ; 写坏说明有人把它当栈用，深度即 0x7C00 到该地址的距离（含 Stub 自己的调用帧）
+    MOV ESI, [Bios_Op]
+    MOV EDI, GUARD_BOTTOM
+    MOV ECX, (REAL_STACK_TOP - GUARD_BOTTOM) / 4
+    MOV EAX, GUARD_PATTERN
+.Scan:
+    SCASD
+    JE .Untouched
+    LEA EDX, [EDI - 4]
+    MOV EBX, [_Bios_StackProbe_Min + ESI*4]
+    TEST EBX, EBX
+    JZ .Store
+    CMP EBX, EDX
+    JBE .Untouched
+.Store:
+    MOV [_Bios_StackProbe_Min + ESI*4], EDX
+.Untouched:
+    LOOP .Scan
+%ENDIF
     RET
 
 SECTION .data
@@ -563,7 +697,7 @@ ALIGNB 4
 Bios_Saved_Idtr:     RESB 6                      ; 弹跳前的 IDTR
 ALIGNB 4
 Bios_Ok:             RESB 1                      ; 本次操作是否成功
-Bios_Reset:          RESB 1                      ; 本次会话是否已发过设备复位
+Bios_Reset:          RESB 1                      ; 本次读盘调用是否已发过设备复位，进入调用时清零
 Bios_Tries:          RESB 1                      ; 当前批剩余重试次数
 ALIGNB 4
 Bios_Lba:            RESD 1                      ; 读盘的当前 LBA
@@ -575,15 +709,27 @@ Bios_Block_Dest:     RESD 1                      ; 本批目的地线性地址
 Bios_Sect:           RESD 1                      ; 每扇区字节数
 Bios_Orig_Lba:       RESD 1                      ; 调用方给出的原始 LBA，逐扇区回退从这里开始
 Bios_Orig_Dest:      RESD 1                      ; 调用方给出的原始目的地，逐扇区回退从这里开始
+Bios_Last_Ah:        RESB 1                      ; 最近一次 INT 13h 返回的 AH，供失败记录取用
+ALIGNB 4
+GLOBAL _Bios_Read_Failure
+_Bios_Read_Failure:  RESD 4                      ; 最后一次读盘失败的事实：LBA、块数、AH 与阶段，布局见 Contract.inc
 ALIGNB 4
 Bios_E820_Dest:      RESD 1                      ; E820 调用方缓冲指针，可为 0
 Bios_E820_Limit:     RESD 1                      ; E820 本次接受的条目数上限
 Bios_E820_Count:     RESD 1                      ; E820 已写入条数
 Bios_E820_Trunc:     RESD 1                      ; E820 是否截断
 Bios_E820_Retry:     RESD 1                      ; E820 瞬时失败重试计数
+Bios_Teletype_Cursor: RESD 1                     ; 电传输出串的当前游标，固件调用之间存内存
 ALIGNB 4
 Bios_Dap:            RESB 16                     ; EDD 的 DAP
 ALIGNB 4
 Bios_Param_Table:    RESB PARAM_TABLE_BYTES      ; AH=48 的设备参数表
 ALIGNB 4
 Bios_E820_Buf:       RESB E820_MAX * E820_ENTRY_BYTES   ; E820 条目的低地址缓冲
+%IFDEF STUB_STACK_PROBE
+ALIGNB 4
+GLOBAL _Bios_StackProbe_Min
+GLOBAL _Bios_StackProbe_Bounces
+_Bios_StackProbe_Min:     RESD 8   ; 探针结果：按操作码下标的保护区最低被写地址，0 表示没测到；下标与 OP_* 一致，留足空间
+_Bios_StackProbe_Bounces: RESD 1   ; 探针计数：累计弹跳次数
+%ENDIF

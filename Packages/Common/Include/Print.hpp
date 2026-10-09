@@ -70,4 +70,6 @@ namespace Print {
     void PutChar(char character);
     // 写入 32 位十六进制，格式为 "0x" 加 8 位大写数字
     void WriteHex(uint32_t value);
+    // 写入 64 位十六进制，格式为 "0x" 加 16 位大写数字；卷偏移、容量这类 64 位事实用它，避免截断
+    void WriteHex64(uint64_t value);
 }

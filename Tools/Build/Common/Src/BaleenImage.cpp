@@ -19,7 +19,7 @@ namespace hostbuild {
         constexpr uint8_t kCoreMagic[8] = { 'B', 'L', 'N', 'C', 'O', 'R', 'E', 0 };
         // 占位内容标识：MakePayloads 生成的开发占位载荷
         constexpr std::string_view kStubPlaceholder = "PLACEHOLDER-STUB";
-        constexpr std::string_view kCorePlaceholder = "PLACEHOLDER-CORE-IMAGE";
+        constexpr std::string_view kCorePlaceholder = "PLACEHOLDER-BALEENCORE-IMAGE";
 
         // 条件不成立即抛出异常
         void Require(bool condition, const std::string& message) {
@@ -72,7 +72,7 @@ namespace hostbuild {
     const char* ImageKindName(ImageKind kind) {
         switch (kind) {
             case ImageKind::Stub: return "Stub";
-            case ImageKind::Core: return "Core";
+            case ImageKind::Core: return "BaleenCore";
             case ImageKind::Unknown: break;
         }
         return "未知";

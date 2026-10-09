@@ -3,14 +3,29 @@
 #
 #    镜像装载在物理 0x7E00，整体必须留在低 64KiB（实模式弹跳按物理地址寻址）；
 #    未初始化区不落盘，由入口代码按链接脚本给出的边界清零；
-#    链接后由 Tools/Bin/PackImage 填头里的 BuildId 与 Digest，并校验头字段
+#    链接后由 Tools/Bin/PackImage 填头里的 BuildId 与 Digest，并校验头字段；
+#    STACK_PROBE=1 额外产出实模式栈探针版，供 CheckStub 的探针模式核对栈深
 
 # 产物根目录
 OUT_DIR   ?= Out
-# 对象目录
-OBJ_DIR   := $(OUT_DIR)/Obj
-# 产物目录
-BIN_DIR   := $(OUT_DIR)/Bin
+# 实模式栈探针：置 1 时把保护区测量编进 Stub，并在诊断里报告实测栈深，供回归与换固件时的观测
+# 探针的本地对象与产物落在 PROBE_OUT_DIR 下，不覆盖正式产物；上游对象路径不随之改变
+# 测量在 Src/Bios.asm，判定与打印在 Src/Stub.cpp
+PROBE_OUT_DIR ?= $(OUT_DIR)/Probe
+STACK_PROBE ?= 0
+ifeq ($(STACK_PROBE),1)
+LOCAL_OUT_DIR := $(PROBE_OUT_DIR)
+PROBE_DEFINES := -DSTUB_STACK_PROBE
+else
+LOCAL_OUT_DIR := $(OUT_DIR)
+PROBE_DEFINES :=
+endif
+# 上游对象的产物目录：各包共用 Out 约定，探针构建不改它
+UPSTREAM_OBJ_DIR := $(OUT_DIR)/Obj
+# 本包对象目录
+OBJ_DIR   := $(LOCAL_OUT_DIR)/Obj
+# 本包产物目录
+BIN_DIR   := $(LOCAL_OUT_DIR)/Bin
 # 源码与头文件目录
 SRC_DIR   := Src
 INC_DIR   := Include
@@ -26,7 +41,9 @@ LD        ?= ld
 OBJCOPY   ?= objcopy
 
 # 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
-CXXFLAGS  ?= -m32 -std=c++20 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
+# 优化级别取 -Os：Baleen 的 32 位阶段在低 64KiB 静态窗口里运行，代码体积优先于指令数；
+# 宿主工具与 64 位内核各自按 -O2 编译，不受这里影响
+CXXFLAGS  ?= -m32 -std=c++20 -Os -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
              -I$(INC_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include
 # 汇编选项：32 位保护模式；-I 让 Src 里的 %INCLUDE 找到本包与共享的 Include；警告视为错误
@@ -34,11 +51,11 @@ NASMFLAGS ?= -f elf32 -Werror -I$(INC_DIR)/ -I$(SHARE_DIR)/
 # 链接选项：无运行库并按 Stub.ld 的固定布局；build-id 是额外的落盘节，不要，链接器警告视为错误
 LDFLAGS   ?= -m elf_i386 -nostdlib -T Stub.ld --build-id=none --fatal-warnings
 
-# 本包目标文件：LoadCore.cpp 是 Core 装载机制，SelfCheck.cpp 是自身完整性自检，Stub_asm.o 与同名 C++ 源以 _asm 后缀区分
+# 本包目标文件：LoadCore.cpp 是 BaleenCore 装载机制，SelfCheck.cpp 是自身完整性自检，Stub_asm.o 与同名 C++ 源以 _asm 后缀区分
 LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Stub.o LoadCore.o SelfCheck.o Stub_asm.o Bios.o)
 # 上游目标文件
-COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o)
-BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(OBJ_DIR)/,PrintTarget.o VgaTextTarget.o Sha256.o ImageHeader.o)
+COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o)
+BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o ImageHeader.o BootMemory.o ReadFailure.o)
 
 # 链接产物与交付镜像
 STUB_ELF  := $(BIN_DIR)/BaleenStub.elf
@@ -77,16 +94,16 @@ $(PACK_IMAGE):
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(OBJ_DIR)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(PROBE_DEFINES) -c $< -o $@
 
 # 汇编产物与同名 C++ 源以 _asm 后缀区分，逐条列出
 $(OBJ_DIR)/Stub_asm.o: $(SRC_DIR)/Stub.asm $(INC_DIR)/Const.inc $(INC_DIR)/StubHeader.inc $(SHARE_DIR)/Contract.inc
 	@mkdir -p $(OBJ_DIR)
-	$(NASM) $(NASMFLAGS) $< -o $@
+	$(NASM) $(NASMFLAGS) $(PROBE_DEFINES) $< -o $@
 
 $(OBJ_DIR)/Bios.o: $(SRC_DIR)/Bios.asm
 	@mkdir -p $(OBJ_DIR)
-	$(NASM) $(NASMFLAGS) $< -o $@
+	$(NASM) $(NASMFLAGS) $(PROBE_DEFINES) $< -o $@
 
 # 校验镜像非空且不越过光盘入口的 0x8000 上限（同一文件用于两种入口）
 # 上限与窗口都用 shell 的算术展开写：POSIX 的 test 不认十六进制字面量
@@ -99,17 +116,18 @@ check: all
 	echo "check: $(STUB_BIN) 大小 $$bytes，落在 [$$window,0x10000) 窗口内"; \
 	$(PACK_IMAGE) --verify "$(STUB_BIN)"
 
-# 删除产物目录
+# 删除产物目录：探针产物与正式产物一起清
 clean:
 	@test -n "$(OUT_DIR)" || { echo "clean: OUT_DIR 为空，拒绝执行"; exit 1; }
-	@rm -rf -- "$(OUT_DIR)"
+	@rm -rf -- "$(OUT_DIR)" "$(PROBE_OUT_DIR)"
 
 # 打印用法
 help:
 	@printf '%s\n' 'Baleen Stub：低内存固定桩' \
 	  '  make [all]  构建 $(STUB_BIN)' \
 	  '  make check  校验镜像大小、完整性头字段与摘要' \
-	  '  make clean  删除 $(OUT_DIR)/' \
-	  '  变量：OUT_DIR / CXX / NASM / LD / OBJCOPY 与各 FLAGS 可覆盖'
+	  '  make STACK_PROBE=1  构建实模式栈探针版，产物在 $(PROBE_OUT_DIR)/Bin，诊断报告实测栈深' \
+	  '  make clean  删除 $(OUT_DIR)/ 与 $(PROBE_OUT_DIR)/' \
+	  '  变量：OUT_DIR / STACK_PROBE / CXX / NASM / LD / OBJCOPY 与各 FLAGS 可覆盖'
 
 -include $(LOCAL_OBJS:.o=.d)

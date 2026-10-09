@@ -1,9 +1,11 @@
 ; Read.inc
-;    EDD 读盘、有限 HDD CHS 回退、复位与有界重试、请求状态保护
+;    EDD 读盘、复位与有界重试、请求状态保护
 
 ; EAX=LBA、CX=块数、ES:BX=缓冲；只允许描述符或已限长的 Stub
 ; 一次 EDD 批量读取；失败则从原始 LBA/缓冲开始逐扇区重读
+; 块数为 0 不是合法请求：逐扇区回退把 CX 当循环计数，计数从 0 回绕会连读 65536 个扇区
 _Read_Sectors:
+    JCXZ .Zero
     MOV BP, CX
     CALL Read_Range
     JNC .Ok
@@ -22,6 +24,9 @@ _Read_Sectors:
 .Ok:
     CLC                         ; 最后一次 ADD BX 可能刚好回绕到 0
 .Fail:
+    RET
+.Zero:
+    STC
     RET
 
 ; 每个请求至多尝试三次，失败之间复位；所有 BIOS 调用恢复通用和段寄存器
@@ -45,6 +50,7 @@ Read_Range:
     RET
 
 ; 一次 EDD 批量读取（INT 13h/AH=42h）；CF 表示结果
+; 只重填包长、块数、缓冲段:偏移与 LBA 低 32 位；LBA 高 32 位恒为 0，由 Dap 的静态零字节给出
 Read_Edd:
     PUSHAD
     PUSH DS
@@ -55,7 +61,6 @@ Read_Edd:
     MOV [SI + 4], BX
     MOV [SI + 6], ES
     MOV [SI + 8], EAX
-    MOV DWORD [SI + 12], 0
     MOV AH, 0x42
     JMP Disk_Int
 
@@ -91,7 +96,8 @@ Disk_Int:
 %ELSE
     ALIGN 4
 %ENDIF
-; 16 字节 EDD 磁盘地址包（DAP）：地址按 DWORD 对齐，缓冲段:偏移与 LBA 由调用方填
+; 16 字节 EDD 磁盘地址包（DAP）：地址按 DWORD 对齐；包长、块数与 LBA 低 32 位每次请求重填，
+; LBA 高 32 位（偏移 12..15）由这里的 DQ 0 静态给出，运行期不再写
 Dap:
     DB 16, 0
     DW 1
