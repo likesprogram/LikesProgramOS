@@ -1,8 +1,11 @@
 # Makefile
-#    Packages/Common：Print 前端、平台原语与存储抽象的目标文件，供 Baleen 各阶段与内核共用
+#    Packages/Common：Print 前端、平台原语、存储抽象与引导状态记录的目标文件，供 Baleen 各阶段与内核共用
 #
 #    存储抽象（Storage/）是接口与无设备依赖的纯逻辑：块设备、偏移视图、统一路径与
 #    文件系统；两侧的块设备实现与卷解析各自持有，不在这里编译
+#    引导状态记录（BootState）是引导期写入方与运行期确认方共用的同一份读写协议：
+#    放在这里是为了让"同一后端、同一格式"成为一份实现，而不是两份约定
+#    吊销记录（Revocation）同理是两侧共用的字节表、签名规则与判定；验签实现由调用方链入
 
 # 产物根目录
 OUT_DIR   ?= Out
@@ -30,10 +33,12 @@ NASMFLAGS ?= -f elf32 -Werror
 CPP_OBJS  := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Descriptor.o KernelImage.o)
 # 存储抽象的产物：错误模型、统一路径、偏移视图与文件系统抽象
 STORAGE_OBJS := $(addprefix $(OBJ_DIR)/,Error.o Path.o SubDevice.o FileSystem.o)
+# 引导状态记录与吊销记录的产物：引导期选择器、运行期写入方（Updater / Init）与维护工具共用同一份协议
+BOOT_OBJS := $(addprefix $(OBJ_DIR)/,BootState.o Revocation.o)
 # 汇编源与产物；与同名 C++ 源以 _asm 后缀区分
 ASM_OBJS  := $(addprefix $(OBJ_DIR)/,Cpu_asm.o Descriptor_asm.o)
 # 全部产物
-OBJS      := $(CPP_OBJS) $(STORAGE_OBJS) $(ASM_OBJS)
+OBJS      := $(CPP_OBJS) $(STORAGE_OBJS) $(BOOT_OBJS) $(ASM_OBJS)
 
 vpath %.cpp $(SRC_DIR) $(SRC_DIR)/Platform $(SRC_DIR)/Storage
 
@@ -67,4 +72,4 @@ help:
 	  '  make clean  删除 $(OUT_DIR)/' \
 	  '  变量：OUT_DIR / CXX / NASM / CXXFLAGS / NASMFLAGS 可覆盖'
 
--include $(CPP_OBJS:.o=.d) $(STORAGE_OBJS:.o=.d)
+-include $(CPP_OBJS:.o=.d) $(STORAGE_OBJS:.o=.d) $(BOOT_OBJS:.o=.d)

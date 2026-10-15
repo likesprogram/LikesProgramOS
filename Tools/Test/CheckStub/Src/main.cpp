@@ -2,9 +2,10 @@
     CheckStub：Stub 阶段的宿主侧回归，手工执行，不构成默认构建依赖
 
     用真实的 IPL 与 Stub 产物加内嵌探针 BaleenCore 组装镜像，在 QEMU 里核对三类行为：
-    成功路径的完整步骤、摘要校验与交权块四个服务在 BaleenCore 运行期的可用性；
+    成功路径的完整步骤、摘要校验与交权块五个服务在 BaleenCore 运行期的可用性；
     Stub 自身自检、描述符区与 BaleenCore 段、BaleenCore 镜像头各字段的拒绝路径；读盘失败与装载区约束
     失败用例读 0xE9 调试口输出的 FATAL 原因文本，成功用例核对 isa-debug-exit 的退出码
+    写盘服务按介质性质核对：可写介质写花码后读回比对，只读介质（光盘）以服务返回 0 为通过
 */
 
 #include <Fixtures.h>
@@ -214,10 +215,15 @@ namespace {
     constexpr std::size_t kStubSegmentOffset = 0x22010;    // Stub 段：头部 16 字节之后
     constexpr std::size_t kCoreSegmentOffset = 0x22020;    // BaleenCore 段：紧随 Stub 段
     constexpr uint32_t kCoreLoad = 0x100000;               // BaleenCore 装入的物理地址
+    // 引导状态区域的字节偏移：布局描述的默认值，写盘探针只写这一块，不碰布局描述与系统卷
+    constexpr std::size_t kStateAreaOffset = 0x21000;
     // 探针 BaleenCore 的映像长度：跨过 64KiB，让 Stub 的高位装载分批与拷贝路径也被走到
     constexpr std::size_t kProbeImageBytes = 0x11000;
     // isa-debug-exit：写 0x10 时 QEMU 以 (0x10 << 1) | 1 退出
     constexpr int kExitOk = (0x10 << 1) | 1;
+    // 写盘探针的结论行：可写介质写后读回比对通过，只读介质按服务返回 0 通过
+    constexpr const char* kWriteVerified = "CHECKSTUB-BALEENCORE-OK write-sectors verified";
+    constexpr const char* kWriteReadOnly = "CHECKSTUB-BALEENCORE-OK write-sectors read-only";
     // 描述符区头部字段偏移
     constexpr std::size_t kHeadMagic = 0x00;
     constexpr std::size_t kHeadBytes = 0x06;
@@ -233,6 +239,14 @@ namespace {
     constexpr unsigned kCaseCount = 28;
     // 探针模式附加的用例数：三种介质各一例，核对实模式栈探针的判定行
     constexpr unsigned kStackProbeCaseCount = 3;
+    // 弹跳窗口探针模式附加的用例数：三种介质各一例，核对"找不到弹跳窗口"的失败路径
+    constexpr unsigned kWindowProbeCaseCount = 3;
+    // 窗口探针构建替换掉的基础用例：成功路径三例、装载区一例与摘要不符一例
+    // 注入的图让成功路径与装载区的前提不成立，摘要校验又在挑窗口之后，三组都走不到
+    constexpr unsigned kWindowProbeReplacedCount = 5;
+    // 找不到弹跳窗口的期望输出：稳定编号与原因文本都要出现
+    constexpr const char* kBounceWindowCode = "E-STUB-36";
+    constexpr const char* kBounceWindowText = "Find a bounce window below 1MiB";
 
     // 篡改目标：描述符区头部、两枚段、镜像里的 Stub 文件或 BaleenCore 文件
     enum class Target {
@@ -250,6 +264,7 @@ namespace {
         fs::path root;               // 项目根，用于定位 Tools/Bin；为空时取可执行文件同目录
         bool keep = false;           // 保留工作目录
         bool stackProbe = false;     // 栈探针模式：附加三例，核对实模式栈探针的判定行
+        bool windowProbe = false;    // 弹跳窗口探针模式：附加三例，核对找不到窗口的失败路径
     };
 
     // 解析命令行并检查必选参数
@@ -265,7 +280,7 @@ namespace {
                 std::cout <<
                     "CheckStub — Stub 阶段的宿主侧回归（QEMU）\n"
                     "\n"
-                    "用法：CheckStub --stub-dir <目录> --ipl-dir <目录> [--root <项目根>] [--keep] [--stack-probe]\n"
+                    "用法：CheckStub --stub-dir <目录> --ipl-dir <目录> [--root <项目根>] [--keep] [--stack-probe] [--window-probe]\n"
                     "\n"
                     "  --stub-dir  BaleenStub.bin 所在目录，通常是 Packages/Baleen/Stub/Out/Bin\n"
                     "  --ipl-dir   BaleenIPL.bin 与 BaleenIPLCd.bin 所在目录，通常是 Packages/Baleen/Ipl/Out/Bin\n"
@@ -273,6 +288,8 @@ namespace {
                     "  --keep      保留每例的日志与证据目录\n"
                     "  --stack-probe  附加三例核对实模式栈探针的判定行；--stub-dir 须指向探针构建，\n"
                     "                 先跑 make -C Packages/Baleen/Stub STACK_PROBE=1（产物在 Out/Probe/Bin）\n"
+                    "  --window-probe 附加三例核对找不到弹跳窗口的失败路径；--stub-dir 须指向探针构建，\n"
+                    "                 先跑 make -C Packages/Baleen/Stub WINDOW_PROBE=1（产物在 Out/WindowProbe/Bin）\n"
                     "\n"
                     "环境变量：NASM、QEMU、CHECKSTUB_TEST_TIMEOUT（每例秒数，1..300，默认 12）\n";
                 std::exit(0);
@@ -282,6 +299,7 @@ namespace {
             else if (arg == "--root") options.root = value("--root");
             else if (arg == "--keep") options.keep = true;
             else if (arg == "--stack-probe") options.stackProbe = true;
+            else if (arg == "--window-probe") options.windowProbe = true;
             else Fail("无法识别的参数：" + std::string(arg));
         }
         Require(!options.stubDir.empty() && !options.iplDir.empty(), "必须提供 --stub-dir 与 --ipl-dir");
@@ -309,18 +327,29 @@ namespace {
             m_cdBase = ReadBytes(Assemble(true, static_cast<uint32_t>(kProbeImageBytes)));
             m_4knBase = ReadBytes(Assemble(false, static_cast<uint32_t>(kProbeImageBytes), 4096));
 
-            // 成功路径：完整步骤、摘要校验与交权块四个服务
-            Case("hdd 完整引导/交权/四服务", m_hddBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services"});
-            Case("cd 完整引导/交权/四服务", m_cdBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services"}, 128, true);
-            // 4Kn：IPL 按 4096 逻辑扇区装载，Stub 的四项服务在同一会话单位下可用
-            Case("hdd 4Kn 完整引导/交权/四服务", m_4knBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services"}, 128, false, 4096);
+            // 成功路径：完整步骤、摘要校验与交权块五个服务（含写盘服务的往返比对）
+            // 窗口探针构建注入了内存图，这三例的前提（正常启动）不成立，由下面的窗口组替换
+            if (!m_options.windowProbe) {
+                Case("hdd 完整引导/交权/五服务", m_hddBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services", kWriteVerified});
+                Case("cd 完整引导/交权/五服务", m_cdBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services", kWriteReadOnly}, 128, true);
+                // 4Kn：IPL 按 4096 逻辑扇区装载，Stub 的五项服务在同一会话单位下可用
+                Case("hdd 4Kn 完整引导/交权/五服务", m_4knBase, kExitOk, {"The BaleenCore image is intact", "CHECKSTUB-BALEENCORE-OK services", kWriteVerified}, 128, false, 4096);
+            }
 
             // 实模式栈探针：STACK_PROBE 构建多出一行判定，三种介质各核对一次
             // 判定按 Stub 侧的门限给出，工具只看 Verdict=Ok 在不在，不重复一份深度策略
             if (m_options.stackProbe) {
-                Case("hdd 实模式栈探针", m_hddBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services"});
-                Case("cd 实模式栈探针", m_cdBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services"}, 128, true);
-                Case("hdd 4Kn 实模式栈探针", m_4knBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services"}, 128, false, 4096);
+                Case("hdd 实模式栈探针", m_hddBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services", kWriteVerified});
+                Case("cd 实模式栈探针", m_cdBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services", kWriteReadOnly}, 128, true);
+                Case("hdd 4Kn 实模式栈探针", m_4knBase, kExitOk, {"Probing the real-mode stack", "Verdict=Ok", "CHECKSTUB-BALEENCORE-OK services", kWriteVerified}, 128, false, 4096);
+            }
+
+            // 弹跳窗口探针：WINDOW_PROBE 构建在 E820 之后注入一张没有可用窗口的内存图，
+            // Stub 必须在装载前以 E-STUB-36 停机；三种介质各核对一次，核对编号与原因文本
+            if (m_options.windowProbe) {
+                Case("hdd 找不到弹跳窗口", m_hddBase, std::nullopt, {kBounceWindowCode, kBounceWindowText});
+                Case("cd 找不到弹跳窗口", m_cdBase, std::nullopt, {kBounceWindowCode, kBounceWindowText}, 128, true);
+                Case("hdd 4Kn 找不到弹跳窗口", m_4knBase, std::nullopt, {kBounceWindowCode, kBounceWindowText}, 128, false, 4096);
             }
 
             // Stub 自身自检：头字段、链接布局与摘要
@@ -358,7 +387,10 @@ namespace {
             Mutate(Target::CoreFile, "BaleenCore memory bytes", Head::kOffset + Head::kFieldMemoryBytes, 4, 0x400001, "The BaleenCore memory bytes are beyond the limit");
 
             // 摘要不符：只改代码字节，头与描述符保持一致
-            Mutate(Target::CoreFile, "BaleenCore digest mismatch", 0x100, 4, 0, "The image digest doesn't match");
+            // 摘要校验发生在挑到弹跳窗口之后，窗口探针构建走不到这一步，跳过
+            if (!m_options.windowProbe) {
+                Mutate(Target::CoreFile, "BaleenCore digest mismatch", 0x100, 4, 0, "The image digest doesn't match");
+            }
 
             // 读盘失败：BaleenCore 段的起止扇区一起指向介质之外，两者保持自洽
             // 除原因文本外还核对失败现场：失败请求的 LBA、块数、固件 AH 与失败阶段；AH 的具体值随固件
@@ -372,14 +404,22 @@ namespace {
             }
 
             // 装载区不可用：静态内存跨度到上限，虚拟机内存压到 4 MiB
-            Case("hdd 装载区不可用", ReadBytes(Assemble(false, 0x400000)), std::nullopt, {"The BaleenCore load area isn't usable memory"}, 4);
+            // 窗口探针构建注入的图把 1MiB 以上声明为可用，这一例的前提同样不成立，跳过
+            if (!m_options.windowProbe) {
+                Case("hdd 装载区不可用", ReadBytes(Assemble(false, 0x400000)), std::nullopt, {"The BaleenCore load area isn't usable memory"}, 4);
+            }
 
             Require(m_count == ExpectedCount(), "内部回归用例数量不符");
             std::cout << "CheckStub: " << m_count << " 项全部通过" << std::endl;
         }
     private:
         // 本次运行的用例总数：探针模式在基础用例之外附加三例
-        unsigned ExpectedCount() const { return kCaseCount + (m_options.stackProbe ? kStackProbeCaseCount : 0); }
+        // 本次运行的用例总数：栈探针附加三例；窗口探针替换成功路径三例与装载区一例、追加窗口三例
+        unsigned ExpectedCount() const {
+            unsigned count = kCaseCount + (m_options.stackProbe ? kStackProbeCaseCount : 0);
+            if (m_options.windowProbe) count += kWindowProbeCaseCount - kWindowProbeReplacedCount;
+            return count;
+        }
         // 用 NASM 汇编夹具源码，definitions 里的每项加一个 -D 定义
         void Assemble(std::string_view source, const fs::path& target, const std::vector<std::pair<std::string, uint64_t>>& definitions) {
             const auto file = m_work / "fixture.asm";
@@ -390,7 +430,8 @@ namespace {
             Run(command, m_work / "nasm.log");
         }
         // 组装探针 BaleenCore：入口前缀、保留区、完整性头与探针代码，补零后填身份与摘要
-        Bytes BuildProbe(uint32_t sectorBytes, uint32_t memoryBytes) {
+        // expectWrite 是本次介质上 writeSectors 应有的返回值：可写介质 1，只读介质 0
+        Bytes BuildProbe(uint32_t sectorBytes, uint32_t memoryBytes, uint32_t expectWrite) {
             const auto code = m_work / "probe-core-code.bin";
             Assemble(checkstub::kProbeCoreAsm, code, {
                 {"CORE_ENTRY", kCoreLoad + hostbuild::ImageHeaderLayout::kEntryOffset},
@@ -403,6 +444,11 @@ namespace {
                 {"HANDOFF_READ", Baleen::CoreHandoffLayout::kReadSectors},
                 {"HANDOFF_SECT", Baleen::CoreHandoffLayout::kSectorSize},
                 {"HANDOFF_QUERY", Baleen::CoreHandoffLayout::kMemoryMapQuery},
+                {"HANDOFF_WRITE_SECTORS", Baleen::CoreHandoffLayout::kWriteSectors},
+                {"WRITE_LBA", kStateAreaOffset / sectorBytes},
+                {"WRITE_COUNT", 1},
+                {"WRITE_BYTES", sectorBytes},
+                {"EXPECT_WRITE_SECTORS", expectWrite},
             });
             const Bytes body = ReadBytes(code);
             const std::size_t entryAt = hostbuild::ImageHeaderLayout::kEntryOffset;
@@ -432,7 +478,8 @@ namespace {
         fs::path Assemble(bool cd, uint32_t memoryBytes, uint32_t sectorBytes = 0) {
             if (sectorBytes == 0) sectorBytes = cd ? 2048 : 512;
             const auto probe = m_work / "probe-core.bin";
-            WriteBytes(probe, BuildProbe(sectorBytes, memoryBytes));
+            // 光盘只读：writeSectors 应返回 0；磁盘介质应写成功
+            WriteBytes(probe, BuildProbe(sectorBytes, memoryBytes, cd ? 0 : 1));
             const auto stub = m_work / "stub.bin";
             WriteBytes(stub, m_stub);
             const auto image = m_work / (cd ? "base.iso" : "base.hdd");

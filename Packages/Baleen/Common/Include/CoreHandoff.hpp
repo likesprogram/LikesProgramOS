@@ -19,8 +19,8 @@ namespace Baleen {
     // 与 Contract.inc 的 CORE_HANDOFF_* 是同一组取值，改了任一侧都会被下面的断言拦住
     struct CoreHandoffLayout {
         static constexpr uint32_t kMagic = 0x484E4C42;             // 'BLNH'
-        static constexpr uint32_t kVersion = 3;                    // 开发格式标记
-        static constexpr uint32_t kBytes = 80;                     // 结构长度
+        static constexpr uint32_t kVersion = 4;                    // 开发格式标记
+        static constexpr uint32_t kBytes = 84;                     // 结构长度
         static constexpr uint32_t kSectorBytes = 0x14;             // sectorBytes 字段
         static constexpr uint32_t kMemoryMap = 0x2C;               // memoryMap 指针
         static constexpr uint32_t kWrite = 0x30;                   // write 服务入口
@@ -31,9 +31,10 @@ namespace Baleen {
         static constexpr uint32_t kBootTscLow = 0x44;              // 进入 Stub 时的时间戳低 32 位
         static constexpr uint32_t kBootTscHigh = 0x48;             // 进入 Stub 时的时间戳高 32 位
         static constexpr uint32_t kTicksPerMs = 0x4C;              // 每毫秒的 TSC 计数；0 表示无计时
+        static constexpr uint32_t kWriteSectors = 0x50;            // writeSectors 服务入口
     };
 
-    // 交权块：Stub → BaleenCore 的全部事实与服务，长度固定 80 字节
+    // 交权块：Stub → BaleenCore 的全部事实与服务，长度固定 84 字节
     // 指针都是 32 位物理地址：交权时数据段是平坦段，分页关闭，虚拟地址等于物理地址
     struct CoreHandoff {
         uint32_t magic;                     // 格式标记，取值 CORE_HANDOFF_MAGIC，'BLNH'
@@ -60,12 +61,15 @@ namespace Baleen {
         uint32_t bootTscLow;                // 进入 Stub 时的时间戳低 32 位
         uint32_t bootTscHigh;               // 进入 Stub 时的时间戳高 32 位
         uint32_t ticksPerMs;                // 每毫秒的 TSC 计数
+        // 写盘：把整段字节写回启动介质上的扇区；源须 16 字节对齐并整段落低 1MiB，成功返回 1
+        // 只服务引导期的裸块写（引导状态区）；失败即返回 0，由调用方按降级路径处理
+        uint32_t (*writeSectors)(uint32_t lba, uint32_t count, const void* src, uint32_t sectBytes);
     };
 
     // 交权块是 ABI，长度与关键字段偏移在编译期固定；常量改动而这里没跟着改会直接编译失败
     // 只有 32 位的 Stub 与 BaleenCore 受这套布局约束，宿主工具的指针宽度不同，不参与偏移断言
 #if UINTPTR_MAX == 0xFFFFFFFFu
-    static_assert(sizeof(CoreHandoff) == CoreHandoffLayout::kBytes, "CoreHandoff 长度必须是 80 字节，见 Contract.inc 的 CORE_HANDOFF_BYTES");
+    static_assert(sizeof(CoreHandoff) == CoreHandoffLayout::kBytes, "CoreHandoff 长度必须是 84 字节，见 Contract.inc 的 CORE_HANDOFF_BYTES");
     static_assert(offsetof(CoreHandoff, sectorBytes) == CoreHandoffLayout::kSectorBytes, "CoreHandoff 字段偏移已变，须同步 Stub 与 BaleenCore 两侧");
     static_assert(offsetof(CoreHandoff, memoryMap) == CoreHandoffLayout::kMemoryMap, "CoreHandoff 字段偏移已变，须同步 Stub 与 BaleenCore 两侧");
     static_assert(offsetof(CoreHandoff, write) == CoreHandoffLayout::kWrite, "CoreHandoff 字段偏移已变，须同步 Stub 与 BaleenCore 两侧");
@@ -75,5 +79,6 @@ namespace Baleen {
     static_assert(offsetof(CoreHandoff, lastReadFailure) == CoreHandoffLayout::kLastReadFailure, "CoreHandoff 字段偏移已变，须同步 Stub 与 BaleenCore 两侧");
     static_assert(offsetof(CoreHandoff, bootTscLow) == CoreHandoffLayout::kBootTscLow, "CoreHandoff 字段偏移已变，须同步 Stub 与 BaleenCore 两侧");
     static_assert(offsetof(CoreHandoff, ticksPerMs) == CoreHandoffLayout::kTicksPerMs, "CoreHandoff 字段偏移已变，须同步 Stub 与 BaleenCore 两侧");
+    static_assert(offsetof(CoreHandoff, writeSectors) == CoreHandoffLayout::kWriteSectors, "CoreHandoff 字段偏移已变，须同步 Stub 与 BaleenCore 两侧");
 #endif
 }

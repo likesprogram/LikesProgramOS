@@ -48,9 +48,11 @@ DESC_DIR      ?= Packages/Baleen/Common/Out/Descs
 # 所有子包的 Makefile
 SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
 # 构建期宿主工具目录：默认构建与镜像组装依赖它们，缺失会直接失败
-TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage
+TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/MakeKeys Tools/Build/MakeManifest Tools/Build/SignManifest Tools/Build/MakeRevocation
 # 测试与回归工具目录：手工执行，不进入默认构建
-TEST_TOOL_DIRS := Tools/Test/CheckIpl Tools/Test/CheckStub Tools/Test/CheckStorage Tools/Test/CheckExt4 Tools/Test/RunBootCase
+TEST_TOOL_DIRS := Tools/Test/CheckIpl Tools/Test/CheckStub Tools/Test/CheckStorage Tools/Test/CheckExt4 Tools/Test/CheckCrypto Tools/Test/CheckSelect Tools/Test/CheckMemory Tools/Test/CheckRevocation Tools/Test/RunBootCase
+# 维护工具目录：面向介质与状态的运维动作，手工执行，不进入默认构建
+MAINTAIN_TOOL_DIRS := Tools/Maintain/FixBootState
 
 # —— 载荷：真实产物优先，缺失时退到占位件 ——
 # 一级引导产物目录
@@ -65,10 +67,14 @@ STUB          ?= $(firstword $(wildcard Packages/Baleen/Stub/Out/Bin/BaleenStub.
 CORE          ?= $(firstword $(wildcard Packages/Baleen/Core/Out/Bin/BaleenCore.bin) $(PAYLOAD_DIR)/BaleenCore.bin)
 # EFI 引导镜像
 EFI_IMAGE     ?= $(firstword $(wildcard Packages/Baleen/Uefi/Out/Bin/Efi.img) $(PAYLOAD_DIR)/Efi.img)
+# IA32（32 位 UEFI）侧的不支持提示件：只有它，没有它 ESP 里就没有 BOOTIA32.EFI
+UEFI_IA32     ?= Packages/Baleen/Uefi/Out/Bin/BOOTIA32.EFI
 # ESP 分区内容
 ESP_IMAGE     ?= $(EFI_IMAGE)
 # Ext4 系统卷镜像
 SYSTEM_VOLUME ?= $(firstword $(wildcard Packages/LikesProgramOS/Out/LikesProgram.img) $(PAYLOAD_DIR)/SystemVolume.img)
+# 内核路径文件：系统卷包构建时把当前内核集的卷内路径写在这里，组装器按它回填布局描述
+KERNEL_PATH_FILE := Packages/LikesProgramOS/Out/KernelPath
 # 布局描述模板：系统本体产出的正式布局描述（若存在）；缺省时组装器按默认内核路径生成并回填位置字段
 LAYOUT        ?= $(firstword $(wildcard Packages/LikesProgramOS/Out/BaleenLayout.bin))
 
@@ -197,27 +203,40 @@ tools:
 test-tools:
 	@for dir in $(TEST_TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
 
+# 构建 Tools/Maintain 下的维护工具：手工执行，不进入默认构建
+maintain-tools:
+	@for dir in $(MAINTAIN_TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
+
 # 生成 compile_commands.json：扫描子包与工具的编译命令，供 clangd 与编辑器取用
 compile-db:
 	@Tools/Build/MakeCompileDb.sh
 
 # 先建子包与工具，再补齐缺失的占位载荷
+# IA32 提示件：UEFI 包产出后放进载荷目录，MakePayloads 会把它装进 ESP 的 \EFI\BOOT\BOOTIA32.EFI；
+# 缺失时载荷目录里没有它，ESP 的回退路径与以前一致（只有 BOOTX64.EFI）
+# 载荷目录得先建：MakePayloads 自己会建，但拷贝发生在它之前，clean-all 之后这里还不存在
 payloads: packages tools
+	@mkdir -p "$(PAYLOAD_DIR)"
+	@if [ -f "$(UEFI_IA32)" ]; then cp "$(UEFI_IA32)" "$(PAYLOAD_DIR)/BOOTIA32.EFI"; fi
 	@Tools/Bin/MakePayloads "$(PAYLOAD_DIR)"
 
 # 组装通用镜像（MakeImage）：一份字节供刻录光盘、写入 U 盘 / 移动硬盘与虚拟机挂载
 $(ISO): payloads
 	@$(MAKE) --no-print-directory payload-report
+	@kernel_arg=; \
+	[ ! -f "$(KERNEL_PATH_FILE)" ] || kernel_arg="--kernel-path $$(cat $(KERNEL_PATH_FILE))"; \
 	Tools/Bin/MakeImage --out $@ --boot-image $(BOOT_IMAGE) --mbr $(MBR) \
 	    --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --efi $(EFI_IMAGE) --esp $(ESP_IMAGE) \
 	    --system-volume $(SYSTEM_VOLUME) --iso-name $(SYSTEM_VOLUME_ISO_NAME) \
-	    --volume-id $(VOLUME_ID) --sector-bytes $(DISK_SECTOR_BYTES) $(if $(LAYOUT),--layout $(LAYOUT),) \
+	    --volume-id $(VOLUME_ID) --sector-bytes $(DISK_SECTOR_BYTES) $(if $(LAYOUT),--layout $(LAYOUT),) $$kernel_arg \
 	    --manifest $(OUT_DIR)/LikesProgram.iso.json
 
 # 组装整盘镜像（TestInstaller，测试安装器）：供写入内置硬盘 / 移动硬盘 / U 盘
 $(HDD): payloads
 	@$(MAKE) --no-print-directory payload-report
-	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) $(if $(LAYOUT),--layout $(LAYOUT),) --manifest $(OUT_DIR)/LikesProgram.hdd.json
+	@kernel_arg=; \
+	[ ! -f "$(KERNEL_PATH_FILE)" ] || kernel_arg="--kernel-path $$(cat $(KERNEL_PATH_FILE))"; \
+	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) $(if $(LAYOUT),--layout $(LAYOUT),) $$kernel_arg --manifest $(OUT_DIR)/LikesProgram.hdd.json
 
 # 打印实际用到的是真实产物还是占位件
 payload-report:
@@ -332,7 +351,7 @@ clean:
 # 连同子包与两类工具的产物一起删除
 clean-all: clean
 	@for mk in $(SUBPACKAGE_MAKEFILES); do $(MAKE) -C "$$(dirname $$mk)" clean || exit 1; done
-	@for dir in $(TOOL_DIRS) $(TEST_TOOL_DIRS); do $(MAKE) -C "$$dir" clean || exit 1; done
+	@for dir in $(TOOL_DIRS) $(TEST_TOOL_DIRS) $(MAINTAIN_TOOL_DIRS); do $(MAKE) -C "$$dir" clean || exit 1; done
 
 # 打印用法
 help:

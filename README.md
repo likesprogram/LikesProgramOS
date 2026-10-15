@@ -10,7 +10,7 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | --- | --- | --- |
 | **Baleen**（引导器） | `Packages/Baleen` | 从不同硬件找到指定 Ext4 文件系统的指定路径，装载系统内核并完成交接 |
 | **LikesProgramOS**（系统本体） | `Packages/LikesProgramOS` | 操作系统本体：`LikesProgram.os` 内核 + 发行配置选择的 `.osm` 模块 |
-| 宿主侧工具 | `Tools/Build`、`Tools/Test` | 构建期工具（MakeImage、TestInstaller、MakePayloads、PackImage）与测试、回归工具（CheckIpl、CheckStub、CheckStorage、CheckExt4、RunBootCase），共享代码在 `Tools/Common` 与 `Tools/Build/Common`，可执行文件统一在 `Tools/Bin` |
+| 宿主侧工具 | `Tools/Build`、`Tools/Test`、`Tools/Maintain` | 构建期工具（MakeImage、TestInstaller、MakePayloads、PackImage、MakeKeys、MakeManifest、SignManifest、MakeRevocation）、测试与回归工具（CheckIpl、CheckStub、CheckStorage、CheckExt4、CheckCrypto、CheckSelect、CheckMemory、CheckRevocation、RunBootCase）与维护工具（FixBootState：引导状态区域的报告、受控恢复与人工接受），共享代码在 `Tools/Common` 与 `Tools/Build/Common`，可执行文件统一在 `Tools/Bin` |
 | 规格文档 | `Docs/Specs` | 各领域的正式定义；与本 README 不一致时以规格为准 |
 
 ## 设计取向
@@ -28,15 +28,16 @@ LikesProgramOS 是一个基于 ASM 与 C++20 实现的 x86_64 操作系统项目
 | 部分 | 状态 |
 | --- | --- |
 | Baleen 一级引导（`Packages/Baleen/Ipl`） | 已实现：硬盘 / USB-HDD 与 El Torito 光盘两种形态，NASM 汇编，构建含尺寸硬约束检查（NASM 3.01 下 `make check` 通过）；磁盘入口按 `AH=48` 接受 512 / 4096 逻辑扇区，软盘与 USB-FDD 明确拒绝；源码、产物与运行期契约见 [Ipl 说明](Packages/Baleen/Ipl/README.md) |
-| 宿主构建工具（`Tools/Build`） | 已实现：通用镜像制作器 `MakeImage` 产出可刻录、可写盘、可挂载的 `LikesProgram.iso`，测试安装器 `TestInstaller` 产出可写入内置硬盘 / 移动硬盘 / U 盘的整盘镜像，`MakePayloads` 生成开发占位载荷；构建不依赖测试目录；用法见[工具 README](Tools/Build/MakeImage/README.md) |
-| 宿主测试与回归工具（`Tools/Test`） | 已实现：`CheckIpl`（IPL 静态布局与 55 例启动回归）、`CheckStub`（Stub 阶段 28 例）、`CheckStorage`（S1 存储抽象与 32 位双编译）、`CheckExt4`（Ext4 只读实现与块设备适配器）与运行辅助工具 `RunBootCase`；全部手工执行，不进入默认构建，`make test-tools` 只负责编译 |
-| Baleen Stub（`Packages/Baleen/Stub`） | 阶段性实现：切保护模式、开 A20、建立运行期 GDT/IDT、异常诊断，BIOS 服务经实模式弹跳提供扇区探测、E820 内存图与低地址读盘；并按 [Stub 说明](Packages/Baleen/Stub/README.md)第二节的契约读取介质上的 `CoreDescriptor`、校验装载区、把 `BaleenCore` 装到 1MiB 并经交权块交给它（QEMU 已验证 HDD / ISO / USB 到 BaleenCore，Bochs 已验证 ATA HDD / ATAPI 光盘；两者均使用本机 SeaBIOS）；`CheckStub` 回归覆盖成功路径、交权块四个服务与失败注入 |
-| BaleenCore（`Packages/Baleen/Core`） | 阶段性实现：入口与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷挂载（Ext4 只读，含卷标识核对）、按路径定位内核镜像并读取校验[内核镜像数据](Docs/Specs/Baleen/内核镜像数据.md)与整幅摘要（含装载区落点检查）、装载到装载地址、构造 `BootInfo` 与恒等映射页表、切长模式进入内核（QEMU 已验证 HDD / CD / USB 512e / NVMe 4Kn 到内核阶段边界，Bochs 已验证 ATA HDD / ATAPI 光盘；见 [BaleenCore 说明](Packages/Baleen/Core/README.md)）；内核集选版与持久状态、签名验证与引导状态区域的写入路径尚未实现，当前直接启动布局描述指定的镜像 |
+| 宿主构建工具（`Tools/Build`） | 已实现：通用镜像制作器 `MakeImage` 产出可刻录、可写盘、可挂载的 `LikesProgram.iso`，测试安装器 `TestInstaller` 产出可写入内置硬盘 / 移动硬盘 / U 盘的整盘镜像，`MakePayloads` 生成开发占位载荷，以及签名链上的 `MakeKeys`（开发期 Ed25519 密钥与内嵌信任锚源）、`MakeManifest`（内核集清单）、`SignManifest`（清单签名）与 `MakeRevocation`（签名吊销记录）；构建不依赖测试目录；用法见[工具 README](Tools/Build/MakeImage/README.md) |
+| 宿主测试与回归工具（`Tools/Test`） | 已实现：`CheckIpl`（IPL 静态布局与 55 例启动回归）、`CheckStub`（Stub 阶段 28 例，含交权块五个服务与写盘往返；`--stack-probe` / `--window-probe` 两种探针模式）、`CheckStorage`（S1 存储抽象与 32 位双编译）、`CheckExt4`（Ext4 只读实现与块设备适配器）、`CheckCrypto`（SHA-512 与 Ed25519 的标准向量、两侧互验、信任锚轮换窗口与目标侧链接检查）、`CheckSelect`（选版与引导状态记录：四态决策、副本轮换、写入门槛、掉电演练与维护动作）、`CheckMemory`（内存图可用性判定与弹跳窗口搜索）、`CheckRevocation`（吊销记录的结构、签名、签名者自吊销、位图与并集、系统卷读取三态、真实清单验证的吊销与下限判定、单调性与版本兼容）与运行辅助工具 `RunBootCase`；全部手工执行，不进入默认构建，`make test-tools` 只负责编译 |
+| 宿主维护工具（`Tools/Maintain`） | 已实现：`FixBootState`（引导状态区域的报告、受控恢复、防回滚的人工接受，以及代执行两个运行期写入方 `--publish` / `--confirm`，见[引导状态记录](Docs/Specs/Baleen/引导状态记录.md)第四、八节）；手工执行，`make maintain-tools` 只负责编译 |
+| Baleen Stub（`Packages/Baleen/Stub`） | 阶段性实现：切保护模式、开 A20、建立运行期 GDT/IDT、异常诊断，BIOS 服务经实模式弹跳提供扇区探测、E820 内存图与低地址读盘；并按 [Stub 说明](Packages/Baleen/Stub/README.md)第二节的契约读取介质上的 `CoreDescriptor`、校验装载区、把 `BaleenCore` 装到 1MiB 并经交权块交给它（QEMU 已验证 HDD / ISO / USB 到 BaleenCore，Bochs 已验证 ATA HDD / ATAPI 光盘；两者均使用本机 SeaBIOS）；`CheckStub` 回归覆盖成功路径、交权块五个服务（含写盘服务的写后读回与只读介质返回 `0`）与失败注入 |
+| BaleenCore（`Packages/Baleen/Core`） | 阶段性实现：入口与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷挂载（Ext4 只读，含卷标识核对）、内核集选版（读引导状态记录、按状态机选目标集）与清单签名验证（Ed25519 与内嵌信任锚、`BuildId` 一致、防回滚比较、逐产物摘要）、按选中集的路径定位内核镜像并读取校验[内核镜像数据](Docs/Specs/Baleen/内核镜像数据.md)与整幅摘要（含装载区落点检查）、装载到装载地址、构造 `BootInfo` 与恒等映射页表、切长模式进入内核（QEMU 已验证 HDD / CD / USB 512e / NVMe 4Kn 到内核阶段边界，Bochs 已验证 ATA HDD / ATAPI 光盘；见 [BaleenCore 说明](Packages/Baleen/Core/README.md)）；引导状态区域的写入经 Stub 的写盘服务完成（版本 4 交权块），写缓存由 BaleenCore 经 AHCI 直接刷新（可刷新端口存在时下发 `FLUSH CACHE`，光盘 / USB / NVMe 按“无可用原语”通过），只读介质上写入失败并按降级路径直启，记录与清单的规格见 [引导状态记录](Docs/Specs/Baleen/引导状态记录.md) 与 [内核集清单与签名](Docs/Specs/内核集清单与签名.md) |
 | Baleen UEFI 侧（`Packages/Baleen/Uefi`） | 后期规划路径：按 [Baleen 引导器](Docs/Specs/Baleen/README.md) 3.1 的实现次序，排在 BIOS 路径收尾（成功进入内核）之后实施；当前目录为空，镜像里的 `BOOTX64.EFI` 是占位件，只验证固件侧的发现与加载 |
 | 内核侧 Core（`Packages/LikesProgramOS/Core`） | 阶段性实现：产出内核映像 `LikesProgram.os`——文件起点是内核镜像数据，`0x80` 起是长模式入口；入口、`BootInfo` 尺寸与版本核对、固件启动服务失效、CPU 事实、描述符表（GDT/TSS/IDT，异常桩与 IST）、引导页表与直映射、页帧分配器已可用（见 [内核侧 Core 说明](Packages/LikesProgramOS/Core/README.md)）；入口已由 BaleenCore 的交接路径接通，设备模型、模块装载、调度与 Init 尚未实现 |
 | 内核本体其余部分、驱动、用户空间、SDK | 尚未实现（`Packages/LikesProgramSDK` 等目录仍是空骨架）；Baleen 与内核共用的基础件已在 `Packages/Common`：Print 前端、平台原语、[存储抽象](Packages/Common/README.md)、`BootInfo` 与内核镜像数据契约 |
 
-顶层 `make` 现在就能产出可启动的 `Out/LikesProgram.iso` 与 `Out/LikesProgram.hdd`。Stub、BaleenCore 与内核侧 Core 已由各自包真实构建，系统卷由 `Packages/LikesProgramOS` 从 `Static/` 卷根用 `mke2fs -d` 生成，卷内目录树见[系统卷布局](Docs/Specs/Common/系统卷布局.md)，内核映像落在 `/LikesProgram/System/LikesProgram.os`；EFI 引导镜像尚未实现，构建时由 `Tools/Bin/MakePayloads` 生成的占位件顶上，只为把引导链跑通；布局描述由组装器按[布局描述](Docs/Specs/Baleen/布局描述.md)生成并回填（内核路径默认与卷内落点一致）；每个载荷的实际来源都在构建日志里逐项打印。BIOS 路径已经从受支持介质启动经 IPL → Stub → BaleenCore 进入内核：BaleenCore 读取并校验内核镜像后，把它装到装载地址、构造 `BootInfo` 与恒等映射页表，切长模式跳到内核入口。
+顶层 `make` 现在就能产出可启动的 `Out/LikesProgram.iso` 与 `Out/LikesProgram.hdd`。Stub、BaleenCore 与内核侧 Core 已由各自包真实构建，系统卷由 `Packages/LikesProgramOS` 从 `Static/` 卷根用 `mke2fs -d` 生成，卷内目录树见[系统卷布局](Docs/Specs/Common/系统卷布局.md)，内核集落在 `/LikesProgram/System/KernelSets/<BuildId>/`（`LikesProgram.os` 与签名清单 `Manifest.mft`，卷内路径写进 `Out/KernelPath`）；布局描述由组装器按[布局描述](Docs/Specs/Baleen/布局描述.md)生成并回填，内核路径取该文件给出的卷内落点；清单与签名由 `MakeManifest` / `SignManifest` 用仓库外的开发期密钥生成，验签用的信任锚由 `MakeKeys` 从同一密钥导出并编进 BaleenCore（密钥与签名流程见[内核集清单与签名](Docs/Specs/内核集清单与签名.md)）；EFI 引导镜像尚未实现，构建时由 `Tools/Bin/MakePayloads` 生成的占位件顶上，只为把引导链跑通；每个载荷的实际来源都在构建日志里逐项打印。BIOS 路径已经从受支持介质启动经 IPL → Stub → BaleenCore 进入内核：BaleenCore 按引导状态记录选版、验证所选集的清单签名与产物摘要，再读取并校验内核镜像，把它装到装载地址、构造 `BootInfo` 与恒等映射页表，切长模式跳到内核入口。
 
 ## 快速开始
 
@@ -53,9 +54,16 @@ make run iso qemu built uefi    # 例：光盘 + QEMU + UEFI
 make compile-db     # 扫描各包写出 compile_commands.json，供 clangd 与 C/C++ 扩展取用
 make test-tools     # 只构建测试与回归工具（Tools/Test），手工执行，不进入默认构建
 Tools/Bin/CheckIpl --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 IPL，不依赖 Test 目录
-Tools/Bin/CheckStub --stub-dir Packages/Baleen/Stub/Out/Bin --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 Stub 与交权块服务
+Tools/Bin/CheckStub --stub-dir Packages/Baleen/Stub/Out/Bin --ipl-dir Packages/Baleen/Ipl/Out/Bin # 手工验证 Stub 与交权块五个服务（含写盘）
 Tools/Bin/CheckStorage # 手工验证 S1 存储抽象：用例、32 位双编译与目标侧链接检查
 Tools/Bin/CheckExt4 # 手工验证 Ext4 只读实现与块设备适配器：真实卷夹具与故障注入
+Tools/Bin/CheckCrypto # 手工验证密码学与信任锚轮换窗口：标准向量、两侧互验与锚生成
+Tools/Bin/CheckSelect # 手工验证选版与引导状态记录：四态决策、副本轮换、写入门槛与维护动作
+Tools/Bin/CheckMemory # 手工验证内存图判定与弹跳窗口搜索：合并规则、边界与找不到窗口
+Tools/Bin/CheckRevocation # 手工验证签名吊销记录与引导状态区单调纪元：结构、验签、自吊销、并集与清单判定
+Tools/Bin/MakeRevocation --help # 生成并签名吊销记录（LPRV）；用法与约束见工具 README
+make maintain-tools # 只构建维护工具（Tools/Maintain）
+Tools/Bin/FixBootState --image Out/LikesProgram.hdd --report # 报告引导状态区域；另有 --repair、--clear、--accept-seen
 make -C Packages/LikesProgramOS check   # 复核内核映像与系统卷（内核镜像数据、摘要、入口）
 make help           # 全部目标与可用变量
 ```
@@ -75,6 +83,7 @@ BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP �
 | [Baleen 引导器](Docs/Specs/Baleen/README.md) | 引导器职责边界、引导模式支持梯队、硬件与介质范围、卷定位与内核路径、装载交接、引导选择器、产物清单 |
 | [布局描述](Docs/Specs/Baleen/布局描述.md) | `BaleenLayout.bin` 的字节表、写入位置与校验，引导状态区域，以及模板与组装器的回填职责 |
 | [内核镜像数据](Docs/Specs/Baleen/内核镜像数据.md) | 内核镜像文件起点那份数据的字节表、摘要覆盖、BaleenCore 与内核两侧的校验顺序，以及装载交接的当前边界 |
+| [引导状态记录](Docs/Specs/Baleen/引导状态记录.md) | 引导状态区域的记录字节表、双副本布局、写入顺序与掉电语义，每候选的尝试次数与防回滚记录 |
 | [系统卷布局](Docs/Specs/Common/系统卷布局.md) | 系统卷的目录树与职责边界：系统目录、程序目录与用户目录，命名与放置规则，以及 `Static/` 卷根的组装方式 |
 | [内核启动与固件边界](Docs/Specs/内核启动与固件边界.md) | 内核入口契约、固件服务的失效边界、第三方引导方式的接入条件 |
 | [内核架构与自举闭包](Docs/Specs/内核架构与自举闭包.md) | 内核组成、`LINK_MODE` 与源码边界、自举闭包与内置必备基线、外置能力归属、镜像体积口径 |
@@ -85,6 +94,7 @@ BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP �
 | [启动介质与文件系统](Docs/Specs/Common/启动介质与文件系统.md) | 启动介质与访问链、ISO 的三种投递方式、必备文件系统、阶段切换与写入启用 |
 | [文件系统抽象与 VFS](Docs/Specs/Common/文件系统抽象与VFS.md) | Baleen 与内核共用的块设备、偏移视图、统一路径索引与文件系统接口；共用边界与阶段划分 |
 | [内核集更新与回滚](Docs/Specs/内核集更新与回滚.md) | 内核集构成、试启动状态机、确认与失败处理、各类更新对象的生效边界 |
+| [内核集清单与签名](Docs/Specs/内核集清单与签名.md) | 内核集的卷内落点、清单字节表、签名与信任锚、密钥轮换与撤销、防回滚与试启动身份传递 |
 | [用户空间与常驻服务](Docs/Specs/用户空间与常驻服务.md) | 用户态程序与常驻服务清单、安装包与安装事务、构建期配套工具 |
 | [后缀设计](Docs/Specs/后缀设计.md) | 容器后缀的语义、总表与命名规则 |
 | [ABI 兼容与外部契约](Docs/Specs/Common/ABI兼容与外部契约.md) | 内核集内部与对外边界的兼容规则：引导交接契约、DriveSDK、AppSDK |
@@ -97,7 +107,8 @@ BIOS 磁盘入口接受 512 / 4096 字节逻辑扇区，软盘与 USB-FDD/ZIP �
 - [系统本体 LikesProgramOS](Packages/LikesProgramOS/README.md) ・ [内核侧 Core](Packages/LikesProgramOS/Core/README.md)
 - [MakeImage：通用镜像制作器](Tools/Build/MakeImage/README.md) 、[TestInstaller：测试安装器](Tools/Build/TestInstaller/README.md)
 - [Tools/Common：宿主工具的跨分类共享代码](Tools/Common/README.md) ・ [Tools/Build/Common：构建期工具共享代码](Tools/Build/Common/README.md)
-- [CheckIpl：IPL 回归工具](Tools/Test/CheckIpl/README.md) 、[CheckStub：Stub 回归工具](Tools/Test/CheckStub/README.md) 、[CheckStorage：S1 存储抽象检查工具](Tools/Test/CheckStorage/README.md) 、[CheckExt4：Ext4 只读实现检查工具](Tools/Test/CheckExt4/README.md) 、[RunBootCase：启动用例运行工具](Tools/Test/RunBootCase/README.md)
+- [CheckIpl：IPL 回归工具](Tools/Test/CheckIpl/README.md) 、[CheckStub：Stub 回归工具](Tools/Test/CheckStub/README.md) 、[CheckStorage：S1 存储抽象检查工具](Tools/Test/CheckStorage/README.md) 、[CheckExt4：Ext4 只读实现检查工具](Tools/Test/CheckExt4/README.md) 、[CheckCrypto：密码学与信任锚检查工具](Tools/Test/CheckCrypto/README.md) 、[CheckSelect：选版与引导状态记录检查工具](Tools/Test/CheckSelect/README.md) 、[CheckMemory：内存图与弹跳窗口检查工具](Tools/Test/CheckMemory/README.md) 、[CheckRevocation：吊销记录与单调纪元检查工具](Tools/Test/CheckRevocation/README.md) 、[RunBootCase：启动用例运行工具](Tools/Test/RunBootCase/README.md)
+- [FixBootState：引导状态维护工具](Tools/Maintain/FixBootState/README.md)
 
 ## 授权
 

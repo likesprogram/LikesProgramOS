@@ -7,7 +7,7 @@
 | 产物 | 来源 | 说明 |
 | --- | --- | --- |
 | `Core/Out/Bin/LikesProgram.os` | [Core](Core/README.md) | 内核映像：文件起点是内核镜像数据，`0x80` 起是长模式入口与内核侧第一阶段 |
-| `Static/LikesProgram/System/LikesProgram.os` | 本目录 Makefile 从 Core 的 `Out` 拷入 | 内核映像在卷内的落点，拷贝产物不进 Git |
+| `Static/LikesProgram/System/KernelSets/<BuildId>/` | 本目录 Makefile 从 Core 的 `Out` 拷入并生成签名清单 | 内核集的卷内落点（`LikesProgram.os` 与 `Manifest.mft`），随构建重建、不进 Git |
 | `Out/LikesProgram.img` | 本目录 Makefile | Ext4 系统卷，卷根来自 `Static/`；顶层组装器读它的卷标识与长度写进布局描述 |
 
 ## `Static/` 是系统卷根的源
@@ -36,6 +36,6 @@ make check           # 复核内核映像与卷内落点
 make clean-all       # 连同 Core 的产物一起清理
 ```
 
-系统卷由 `mke2fs -d` 从卷根副本就地写入，不挂载、不需要 root；卷大小、卷标识与内核路径都可按顶层模板覆盖（见 `make help`）。**内核路径必须与布局描述的默认值一致**：`/LikesProgram/System/LikesProgram.os`，覆盖 `KERNEL_PATH` 时布局模板要一起改。
+系统卷由 `mke2fs -d` 从卷根副本就地写入，不挂载、不需要 root；卷大小、卷标识与内核路径都可按顶层模板覆盖（见 `make help`）。内核集落在 `/LikesProgram/System/KernelSets/<BuildId>/`，当前集的卷内路径写进 `Out/KernelPath`，由顶层组装器传给 MakeImage / TestInstaller 回填布局描述；`KERNEL_PATH` 变量已不再使用，落点由 `BuildId` 决定。
 
-`LikesProgram.os` 现在是内核的原生引导镜像本体：内核镜像数据加第一阶段代码。`.os` 作为容器（`kind` 元数据、同集 `.osm` 与构建清单）的内部格式随[模块与驱动装载](../../Docs/Specs/模块与驱动装载.md)与[内核集更新与回滚](../../Docs/Specs/内核集更新与回滚.md)的阶段确定，届时本包按同一布局升级产物形态。
+`LikesProgram.os` 现在是内核的原生引导镜像本体：内核镜像数据加第一阶段代码。`.os` 作为容器（`kind` 元数据、同集 `.osm` 与构建清单）的内部格式随[模块与驱动装载](../../Docs/Specs/模块与驱动装载.md)与[内核集更新与回滚](../../Docs/Specs/内核集更新与回滚.md)的阶段确定（构建清单的字节表与签名已由[内核集清单与签名](../../Docs/Specs/内核集清单与签名.md)定义），届时本包按同一布局升级产物形态；卷内落点从扁平路径迁移到集目录形态同样随该阶段进行。

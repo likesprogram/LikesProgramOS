@@ -36,6 +36,15 @@ namespace Baleen {
             m_window = nullptr;
             m_windowBytes = 0;
             m_capacityBytes = 0;
+            m_write = nullptr;
+        }
+
+        void BiosBlockDevice::BindWrite(WriteSectorsFn write) {
+            m_write = write;
+        }
+
+        void BiosBlockDevice::BindFlush(FlushFn flush) {
+            m_flush = flush;
         }
 
         Storage::Error BiosBlockDevice::Read(uint64_t offset, void* buffer, uint32_t bytes) {
@@ -59,6 +68,39 @@ namespace Baleen {
                 position += chunk;
                 remaining -= chunk;
             }
+            return Storage::Error::Ok;
+        }
+
+        Storage::Error BiosBlockDevice::Write(uint64_t offset, const void* buffer, uint32_t bytes) {
+            if (m_write == nullptr || m_window == nullptr || m_blockBytes == 0 || m_windowBytes == 0) return Storage::Error::ReadOnly;
+            if (buffer == nullptr || bytes == 0) return Storage::Error::InvalidArgument;
+            if ((offset & (m_blockBytes - 1)) != 0) return Storage::Error::InvalidArgument;
+            if ((bytes & (m_blockBytes - 1)) != 0) return Storage::Error::InvalidArgument;
+            if (offset > m_capacityBytes || static_cast<uint64_t>(bytes) > m_capacityBytes - offset) return Storage::Error::InvalidArgument;
+            // 写服务只接受落低 1MiB 的源：数据先拷进中转窗口，再按窗口容量分段交出去
+            const uint32_t shift = SectorShift(m_blockBytes);
+            const uint8_t* source = static_cast<const uint8_t*>(buffer);
+            uint64_t position = offset;
+            uint32_t remaining = bytes;
+            while (remaining > 0) {
+                const uint32_t chunk = remaining < m_windowBytes ? remaining : m_windowBytes;
+                if ((position >> 32) != 0) return Storage::Error::InvalidArgument;
+                memcpy(m_window, source, chunk);
+                const uint32_t lba = static_cast<uint32_t>(position >> shift);
+                if (m_write(lba, chunk >> shift, m_window, m_blockBytes) == 0) return Storage::Error::Io;
+                source += chunk;
+                position += chunk;
+                remaining -= chunk;
+            }
+            return Storage::Error::Ok;
+        }
+
+        Storage::Error BiosBlockDevice::Flush() {
+            // 只读设备没有写缓存要刷；没有绑定刷新服务时同样按“无可用原语”通过
+            if (m_write == nullptr || m_flush == nullptr) return Storage::Error::Ok;
+            // 绑定方报“不支持”（光盘、USB、NVMe 上没有可刷新的端口）时通过，报失败时按写失败处理：
+            // 那表示这次写的持久化没有保证，调用方按写失败降级
+            if (m_flush() == FlushOutcome::Failed) return Storage::Error::Io;
             return Storage::Error::Ok;
         }
     }

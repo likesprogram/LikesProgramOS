@@ -34,9 +34,9 @@ NASMFLAGS ?= -f elf64 -Werror -I$(INC_DIR)/
 # 链接选项：无运行库并按 Core.ld 的固定布局；build-id 是额外的落盘节，不要，警告视为错误
 LDFLAGS   ?= -m elf_x86_64 -nostdlib -T Core.ld --build-id=none --fatal-warnings
 
-# 本包目标文件：Kernel.cpp 是主流程，Console 装配早期控制台，Tags 写诊断标签，
+# 本包目标文件：Core.cpp 是主流程，Console 装配早期控制台，Tags 写诊断标签，
 # Cpu/Tables/Paging/Memory 是平台初始化与内存层，Core_asm.o 与同名 C++ 源以 _asm 后缀区分
-LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Kernel.o Console.o Tags.o Cpu.o Tables.o Paging.o Memory.o Libc.o Core_asm.o)
+LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Core.o Console.o Tags.o Cpu.o Tables.o Paging.o Memory.o Libc.o Core_asm.o)
 # 共享目标文件：Print 前端、串口与调试口目标、描述符表机制、内核镜像数据校验
 COMMON_OBJS := $(addprefix $(OBJ_COMMON_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Descriptor.o Descriptor_asm.o KernelImage.o)
 

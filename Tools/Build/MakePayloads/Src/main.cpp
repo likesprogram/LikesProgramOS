@@ -357,7 +357,7 @@ _RelocSlot: DQ 0
     // 只接受本工具刚格式化的 FAT16；不提供通用文件系统编辑接口
     // ESP 用 FAT16 而不是 FAT32：分区表在 512e 与 4Kn 下从同一分区项读到相差 8 倍的位置，
     // 两份 ESP 必须都塞进 7 MiB 窗口，而 FAT32 的最小卷是 32 MiB
-    void InstallEfi(const fs::path& image, const Bytes& efi) {
+    void InstallEfi(const fs::path& image, const Bytes& efi, const Bytes& ia32) {
         Bytes fat = Read(image);
         // FAT16 特征：扇区 512、每簇 1 扇区、FATSz16 与根目录项数非 0（偏移 36 起是 EBPB，不能用它判定）
         Require(Get(fat, 510, 2) == 0xaa55 && Get(fat, 11, 2) == 512 && Get(fat, 13, 1) == 1 && Get(fat, 22, 2) != 0 && Get(fat, 17, 2) != 0, "mkfs.vfat 未生成预期 FAT16");
@@ -375,13 +375,18 @@ _RelocSlot: DQ 0
         const size_t clusters = (fat.size() - dataStart) / 512;
         const size_t fileClusters = (efi.size() + 511) / 512;
         const uint32_t firstFile = 5;
-        Require(clusters >= 4085 && firstFile + fileClusters < clusters + 2, "FAT16 空间不足");
+        // 32 位固件的提示件占位在紧随其后的簇：没有它时这段长度为零，布局与以前一致
+        const size_t ia32Clusters = (ia32.size() + 511) / 512;
+        const uint32_t firstIa32 = static_cast<uint32_t>(firstFile + fileClusters);
+        Require(clusters >= 4085 && firstIa32 + ia32Clusters < clusters + 2, "FAT16 空间不足");
         // 簇号到字节偏移
         auto offset = [&](uint32_t cluster) { return dataStart + size_t(cluster - 2) * 512; };
-        // FAT16 簇链：每项 2 字节，链尾 0xFFFF
-        for (uint32_t cluster = 3; cluster < firstFile + fileClusters; ++cluster) {
+        // FAT16 簇链：每项 2 字节，链尾 0xFFFF；两份文件各自成链
+        for (uint32_t cluster = 3; cluster < firstIa32 + static_cast<uint32_t>(ia32Clusters); ++cluster) {
             Require(Get(fat, fatStart + cluster * 2, 2) == 0, "FAT16 卷不是空白卷");
-            const uint16_t next = cluster >= firstFile && cluster + 1 < firstFile + fileClusters ? uint16_t(cluster + 1) : 0xffff;
+            uint16_t next = 0xffff;
+            if (cluster >= firstIa32 && cluster + 1 < firstIa32 + ia32Clusters) next = uint16_t(cluster + 1);
+            else if (cluster < firstIa32 && cluster >= firstFile && cluster + 1 < firstFile + fileClusters) next = uint16_t(cluster + 1);
             for (uint32_t copy = 0; copy < copies; ++copy) Put(fat, fatStart + copy * fatSize + cluster * 2, next, 2);
         }
         // 写一个 FAT 目录项到指定字节位置
@@ -410,6 +415,11 @@ _RelocSlot: DQ 0
         entry(offset(4) + 32, "..", 0x10, 3, 0);
         entry(offset(4) + 64, "BOOTX64 EFI", 0x20, firstFile, uint32_t(efi.size()));
         std::copy(efi.begin(), efi.end(), fat.begin() + offset(firstFile));
+        // 32 位固件的提示件：有就装进 \EFI\BOOT\BOOTIA32.EFI，没有就不放（回退路径与以前一致）
+        if (!ia32.empty()) {
+            entry(offset(4) + 96, "BOOTIA32EFI", 0x20, firstIa32, uint32_t(ia32.size()));
+            std::copy(ia32.begin(), ia32.end(), fat.begin() + offset(firstIa32));
+        }
         Write(image, fat);
     }
 
@@ -475,9 +485,12 @@ _RelocSlot: DQ 0
         Write(dir / "BaleenCore.bin", BuildCoreImage(Read(dir / "coreapp.bin")));
         Assemble(dir, "efiapp", EfiAssembly);
         const Bytes efi = EfiPe(Read(dir / "efiapp.bin"));
+        // 32 位固件的提示件是可选的输入：调用方把它放进输出目录就装进 ESP，没有就不放
+        const fs::path ia32Path = output / "BOOTIA32.EFI";
+        const Bytes ia32 = fs::exists(ia32Path) ? Read(ia32Path) : Bytes{};
         CreateEmpty(dir / "Efi.img", 4 * 1024 * 1024);
         Run({"mkfs.vfat", "-F", "16", "-s", "1", "-n", "ESP", "--invariant", (dir / "Efi.img").string()});
-        InstallEfi(dir / "Efi.img", efi);
+        InstallEfi(dir / "Efi.img", efi, ia32);
         CreateEmpty(dir / "SystemVolume.img", 16 * 1024 * 1024);
         Run({"mkfs.ext4", "-q", "-F", "-U", "11111111-2222-3333-4444-555555555555", "-E", "hash_seed=66666666-7777-8888-9999-aaaaaaaaaaaa,root_owner=0:0,lazy_itable_init=0,lazy_journal_init=0", (dir / "SystemVolume.img").string()});
         // 只补缺项。link 原子地拒绝已存在的目标，包括并行构建刚发布的文件；
@@ -495,6 +508,7 @@ int main(int argc, char** argv) {
         if (argc != 2 || std::string_view(argv[1]) == "--help") {
             std::cout << "用法：MakePayloads <输出目录>\n"
                          "仅生成带 PLACEHOLDER 标识的载荷；需要 nasm、mkfs.vfat、mkfs.ext4。\n"
+                         "输出目录里若已有 BOOTIA32.EFI，会把它装进 ESP 的 \\EFI\\BOOT\\BOOTIA32.EFI。\n"
                          "SOURCE_DATE_EPOCH 默认 1700000000。\n";
             return argc == 2 ? 0 : 2;
         }

@@ -187,6 +187,7 @@ namespace Baleen {
                 s_handoff.memoryMapTruncated = s_memoryMapTruncated;
                 s_handoff.write = _Stub_Write;
                 s_handoff.readSectors = _Bios_Read_Sectors;
+                s_handoff.writeSectors = _Bios_Write_Sectors;
                 s_handoff.sectorSize = _Bios_Sector_Size;
                 s_handoff.memoryMapQuery = _Bios_E820;
                 s_handoff.lastReadFailure = &_Bios_Read_Failure;
@@ -210,6 +211,18 @@ namespace Baleen {
             truncated = 0;
             s_memoryMapCount = _Bios_E820(s_memoryMap, kMemoryMapCapacity, &truncated);
             s_memoryMapTruncated = truncated;
+#ifdef STUB_WINDOW_PROBE
+            // 弹跳窗口探针：把查询结果换成一张注入的内存图，让 [kBounceBegin, kBounceEnd)
+            // 整段不可用，走"找不到弹跳窗口"的失败路径（E-STUB-36）；只服务回归，正式构建不编进这段
+            // 低 64KiB 与 1MiB 以上保持可用：装载区校验先于窗口搜索，先失败在别处就不是这条路径
+            s_memoryMap[0] = Boot::MemoryMapEntry{ 0x000000, 0x010000, 1, 1 };
+            s_memoryMap[1] = Boot::MemoryMapEntry{ kBounceBegin, kBounceEnd - kBounceBegin, 2, 1 };
+            s_memoryMap[2] = Boot::MemoryMapEntry{ kBounceEnd, 0x20000, 1, 1 };
+            s_memoryMap[3] = Boot::MemoryMapEntry{ 0x100000, 0x3F00000, 1, 1 };
+            s_memoryMapCount = 4;
+            s_memoryMapTruncated = 0;
+            truncated = 0;
+#endif
             return s_memoryMapCount;
         }
 

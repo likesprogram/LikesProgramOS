@@ -26,7 +26,7 @@ NASM      ?= nasm
 NASMFLAGS ?= -f bin -Werror -I$(INC_DIR)/
 
 # 源与产物
-CPP_OBJS  := $(addprefix $(OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o ImageHeader.o BootMemory.o ReadFailure.o)
+CPP_OBJS  := $(addprefix $(OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o Sha512.o Ed25519.o ImageHeader.o BootMemory.o ReadFailure.o)
 # 描述符段的产物：头部与各段分别输出，不合并；顺序即段表顺序，位置字段待写入程序回填
 DESC_DIR  := $(OUT_DIR)/Descs
 DESC_BINS := $(DESC_DIR)/Head.bin $(DESC_DIR)/BootDescriptor.bin $(DESC_DIR)/CoreDescriptor.bin

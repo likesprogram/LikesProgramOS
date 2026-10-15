@@ -17,7 +17,7 @@ Baleen 是 LikesProgramOS 的自家引导器子项目，与系统本体 `LikesPr
 | --- | --- | --- |
 | `Ipl` | 校验描述符区与 Stub 段结构、起止扇区，装入 Stub，按约定交权；失败诊断并停机 | 已有 HDD / CD 分路源码和构建；实际验证结果单独记录 |
 | `Stub` | 自身完整性头与摘要自检、A20、内存图、实模式磁盘会话、自身内存初始化、BaleenCore 镜像头与摘要校验、BaleenCore 装载 | 已有上述能力的实现和构建；读盘具备批量重试与逐扇区回退 |
-| `Core` | BIOS 侧的 `BaleenLayout.bin`、Ext4、内核镜像读取与校验、选版和持久状态、内核交接 | 入口、横幅与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、布局描述读取与校验、系统卷挂载（Ext4 只读）、按布局路径定位内核镜像、读取并校验[内核镜像数据](../../Docs/Specs/Baleen/内核镜像数据.md)与整幅摘要（含装载区落点检查）、装载到装载地址、构造 `BootInfo` 与恒等映射页表、切长模式进入内核已实现（见 [BaleenCore 职责与当前实现](Core/README.md)）；内核集选版与持久状态、签名验证与引导状态区域的写入路径尚未实现 |
+| `Core` | BIOS 侧的 `BaleenLayout.bin`、Ext4、内核镜像读取与校验、选版和持久状态、内核交接 | 入口、横幅与诊断、交权块与镜像事实核对、CPU 快照、运行期段表与中断表、布局描述读取与校验、系统卷挂载（Ext4 只读）、内核集选版（读引导状态记录并按状态机选目标集）与清单签名验证（Ed25519 与内嵌信任锚、`BuildId` 一致、防回滚比较、逐产物摘要）、按选中集的路径定位内核镜像、读取并校验[内核镜像数据](../../Docs/Specs/Baleen/内核镜像数据.md)与整幅摘要（含装载区落点检查）、装载到装载地址、构造 `BootInfo` 与恒等映射页表、切长模式进入内核已实现（见 [BaleenCore 职责与当前实现](Core/README.md)）；引导状态区域的写入经 Stub 的写盘服务完成（规格见[引导状态记录](../../Docs/Specs/Baleen/引导状态记录.md)与[内核集清单与签名](../../Docs/Specs/内核集清单与签名.md)） |
 | `Uefi` | UEFI 侧对应的布局、卷访问、内核集验证、选版与交接 | 后期规划路径：按 [Baleen 引导器](README.md) 3.1 的实现次序排在 BIOS 路径收尾（成功进入内核）之后实施；当前目录为空，介质上的 `BOOTX64.EFI` 是占位件，只验证固件侧的发现与加载；该路径绕过 BIOS IPL 与实模式 Stub |
 
 IPL 不解析 `BaleenLayout.bin`、Stub 头、描述符区的 BaleenCore 段或 Ext4，不负责 Stub BSS、A20、BuildId、摘要、签名和 BaleenCore 装载。后续阶段缺失或占位载荷停机，不构成 IPL 缺陷；IPL 仍须独立证明满足自己的契约。HDD / CD 入口分别包含 `Hdd.inc` / `Cd.inc`，由其组织 `Init`、`Body`、`Error`、`Read`，并通过 `Init` 引入 `Const`。
@@ -26,4 +26,4 @@ IPL 不解析 `BaleenLayout.bin`、Stub 头、描述符区的 BaleenCore 段或 
 
 构建中同名占位件只服务介质组装与入口验证，不代表正式 Stub/BaleenCore/UEFI；不得在 `Stub/Out/Bin/` 生成空壳或停机件，让“真实产物优先”误选它。正常构建只依赖正式 C++、ASM、Makefile、sh 源码与工具，不依赖不上传的 `Test`；尺寸和格式可由 NASM 汇编期断言及正式 C++ 工具检查，回归工具手工执行，不作为默认构建运行依赖。
 
-`Tools/Bin/CheckIpl` 覆盖 IPL 的产物检查、交权与失败注入，`Tools/Bin/CheckStub` 覆盖 Stub 的成功路径、交权块四个服务与失败注入，两者都按需手工执行、不构成默认构建依赖。UEFI 路径绕过 IPL。
+`Tools/Bin/CheckIpl` 覆盖 IPL 的产物检查、交权与失败注入，`Tools/Bin/CheckStub` 覆盖 Stub 的成功路径、交权块五个服务（含写盘服务的写后读回）与失败注入，两者都按需手工执行、不构成默认构建依赖。UEFI 路径绕过 IPL。

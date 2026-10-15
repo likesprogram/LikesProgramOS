@@ -8,6 +8,8 @@ SECTION .text
 
 GLOBAL _Cpu_Out8
 GLOBAL _Cpu_In8
+GLOBAL _Cpu_Out32
+GLOBAL _Cpu_In32
 GLOBAL _Cpu_Read32
 GLOBAL _Cpu_Write32
 GLOBAL _Cpu_ReadFlags
@@ -30,6 +32,19 @@ _Cpu_In8:
     MOV DX, [ESP + 4]       ; 端口
     IN AL, DX
     MOVZX EAX, AL
+    RET
+
+; 写 32 位 I/O 端口：Out32(port, value)
+_Cpu_Out32:
+    MOV DX, [ESP + 4]       ; 端口
+    MOV EAX, [ESP + 8]      ; 数据
+    OUT DX, EAX
+    RET
+
+; 读 32 位 I/O 端口：In32(port)
+_Cpu_In32:
+    MOV DX, [ESP + 4]       ; 端口
+    IN EAX, DX
     RET
 
 ; 读绝对地址处的 32 位值：Read32(address)

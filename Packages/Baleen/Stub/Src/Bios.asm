@@ -29,6 +29,7 @@ SECTION .text
 GLOBAL _Bios_Sector_Size
 GLOBAL _Bios_E820
 GLOBAL _Bios_Read_Sectors
+GLOBAL _Bios_Write_Sectors
 GLOBAL _Bios_Teletype
 EXTERN _Boot_Drive
 EXTERN _Boot_Media
@@ -50,6 +51,7 @@ EXTERN _Boot_Sector_Bytes
 %DEFINE OP_SECTOR_SIZE 1
 %DEFINE OP_E820 2
 %DEFINE OP_READ 3
+%DEFINE OP_WRITE 5
 %DEFINE OP_TELETYPE 4
 ; E820 条目字节数与低地址缓冲的条目数上限
 ; 上限与 Core.cpp 的内存图静态缓冲一致：这张图要随交权块一并交给 Core
@@ -241,6 +243,80 @@ _Bios_Read_Sectors:
     POP EBP
     RET
 
+; 写盘：cdecl 参数为 lba、count、src、sectBytes，成功返回 1，失败 0
+; src 须 16 字节对齐、整段落低 1MiB，且每批传输不跨 64KiB 窗口；失败即返回，不做逐扇区回退
+; 写是幂等的，同一批数据重复写在介质上没有副作用；是否成立由调用方的读回校验判断
+_Bios_Write_Sectors:
+    PUSH EBP
+    MOV EBP, ESP
+    PUSH EBX
+    PUSH ESI
+    PUSH EDI
+    XOR EAX, EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_LBA], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_COUNT], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_STATUS], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_PHASE], EAX
+    MOV EAX, [EBP + 8]
+    MOV [Bios_Lba], EAX
+    MOV EAX, [EBP + 12]
+    MOV [Bios_Count], EAX
+    MOV EAX, [EBP + 16]
+    MOV [Bios_Dest], EAX
+    MOV EAX, [EBP + 20]
+    MOV [Bios_Sect], EAX
+    MOV DWORD [Bios_Done], 0
+    MOV BYTE [Bios_Ok], 0
+    CMP DWORD [Bios_Count], 0
+    JE .Reject
+    MOV EAX, [Bios_Sect]
+    MOVZX ECX, WORD [_Boot_Sector_Bytes]
+    CMP EAX, ECX
+    JNE .Reject
+    CMP EAX, 512
+    JE .Check_range
+    CMP EAX, 2048
+    JE .Check_range
+    CMP EAX, 4096
+    JE .Check_range
+    JMP .Reject
+.Check_range:
+    MOV EAX, [Bios_Dest]
+    TEST EAX, 0xF
+    JNZ .Reject
+    MOV ECX, [Bios_Count]
+    IMUL ECX, [Bios_Sect]
+    JO .Reject
+    ADD ECX, EAX
+    JC .Reject
+    CMP ECX, REAL_CEIL
+    JA .Reject
+    MOV EAX, [Bios_Count]
+    DEC EAX
+    ADD EAX, [Bios_Lba]
+    JC .Reject
+    MOV DWORD [Bios_Op], OP_WRITE
+    CALL Enter_Real
+    MOVZX EAX, BYTE [Bios_Ok]
+    POP EDI
+    POP ESI
+    POP EBX
+    POP EBP
+    RET
+.Reject:
+    MOV EAX, [Bios_Count]
+    MOV [_Bios_Read_Failure + READ_FAIL_COUNT], EAX
+    MOV EAX, [Bios_Lba]
+    MOV [_Bios_Read_Failure + READ_FAIL_LBA], EAX
+    MOV DWORD [_Bios_Read_Failure + READ_FAIL_STATUS], 0
+    MOV DWORD [_Bios_Read_Failure + READ_FAIL_PHASE], WRITE_PHASE_REJECT
+    XOR EAX, EAX
+    POP EDI
+    POP ESI
+    POP EBX
+    POP EBP
+    RET
+
 ; 电传输出：cdecl 参数为以 0 结尾的字符串，成功返回 1，失败 0
 ; 只在显示设备不处于 80×25 文本模式时使用：逐字符走固件调用，比显存直写慢几个数量级
 _Bios_Teletype:
@@ -314,6 +390,8 @@ Real_Mode_Entry:
     JE Real_E820
     CMP EAX, OP_READ
     JE Real_Read
+    CMP EAX, OP_WRITE
+    JE Real_Write
     CMP EAX, OP_TELETYPE
     JE Real_Teletype
     MOV BYTE [Bios_Ok], 0
@@ -555,6 +633,62 @@ Real_Teletype:
     JMP .Loop
 .Done:
     MOV BYTE [Bios_Ok], 1
+    JMP Real_Leave
+
+; INT 13h AH=43：按与读同样的分批规则写回，失败即返回；写不做重试与回退
+Real_Write:
+    MOV DWORD [Bios_Done], 0
+.Loop:
+    MOV EAX, [Bios_Count]
+    SUB EAX, [Bios_Done]
+    JZ .Ok
+    CMP EAX, BLOCK_MAX
+    JBE .Batch
+    MOV EAX, BLOCK_MAX
+.Batch:
+    MOV [Bios_Blocks], EAX
+    MOV EAX, [Bios_Done]
+    IMUL EAX, DWORD [Bios_Sect]
+    ADD EAX, [Bios_Dest]
+    MOV [Bios_Block_Dest], EAX
+    MOV ECX, [Bios_Block_Dest]
+    AND ECX, 0xFFFF
+    MOV EDX, WINDOW_BYTES
+    SUB EDX, ECX
+    MOV EBX, [Bios_Sect]
+    MOV EAX, EDX
+    XOR EDX, EDX
+    DIV EBX
+    TEST EAX, EAX
+    JZ .Fail
+    CMP EAX, [Bios_Blocks]
+    JAE .Fill
+    MOV [Bios_Blocks], EAX
+.Fill:
+    CALL Real_Fill_Dap
+    MOV AH, 43h
+    MOV AL, 0
+    CALL Real_Disk_Int
+    JNC .Batch_Ok
+    MOV EDX, WRITE_PHASE_BATCH_EDD
+    MOV EAX, [Bios_Blocks]
+    CALL Real_Save_Read_Fail
+    MOV BYTE [Bios_Ok], 0
+    JMP Real_Leave
+.Batch_Ok:
+    MOV EAX, [Bios_Blocks]
+    ADD [Bios_Lba], EAX
+    ADD [Bios_Done], EAX
+    JMP .Loop
+.Ok:
+    MOV BYTE [Bios_Ok], 1
+    JMP Real_Leave
+.Fail:
+    MOV EDX, WRITE_PHASE_REJECT
+    MOV EAX, [Bios_Blocks]
+    CALL Real_Save_Read_Fail
+    MOV DWORD [_Bios_Read_Failure + READ_FAIL_STATUS], 0
+    MOV BYTE [Bios_Ok], 0
     JMP Real_Leave
 
 ; 按 Bios_Lba、Bios_Blocks、Bios_Block_Dest 填 EDD 的 DAP

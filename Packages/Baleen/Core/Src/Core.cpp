@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 
+#include <DiskFlush.hpp>
 #include <BiosBlockDevice.hpp>
 #include <BootClock.hpp>
 #include <BootInfo.hpp>
@@ -26,6 +27,7 @@
 #include <Print/SerialTarget.hpp>
 #include <PrintTarget.hpp>
 #include <ReadFailure.hpp>
+#include <SelectSet.hpp>
 #include <Storage/BlockDevice.hpp>
 #include <Storage/Error.hpp>
 #include <Storage/FileSystem.hpp>
@@ -43,6 +45,16 @@ extern "C" const uint8_t __image_end[];
 extern "C" const uint8_t __bss_end[];
 
 namespace {
+    // 写缓存刷新服务：把实际路径（AHCI 或传统 IDE）的结论转成块设备的刷新结果绑给介质
+    // 没有可刷新的端口（光盘、USB、NVMe）报 Unsupported，命令出错或超时报 Failed
+    Baleen::Core::FlushOutcome FlushMedium() {
+        switch (Baleen::Core::DiskFlush::Flush()) {
+            case Baleen::Core::DiskFlush::Result::Succeeded: return Baleen::Core::FlushOutcome::Flushed;
+            case Baleen::Core::DiskFlush::Result::Failed: return Baleen::Core::FlushOutcome::Failed;
+            default: return Baleen::Core::FlushOutcome::Unsupported;
+        }
+    }
+
     // 选择子：与 Stub 交权时的段表同号，BaleenCore 的运行期段表沿用这套编号
     constexpr uint16_t kSelectorCode32 = 0x08;   // 32 位代码段
     constexpr uint16_t kSelectorData32 = 0x10;   // 32 位数据段
@@ -97,8 +109,6 @@ namespace {
     // 引导时间预算：从 Stub 进入算起，内核入口之前的毫秒数；取值依据见一级引导契约第七节
     constexpr uint32_t kBootBudgetMs = 3000;
     constexpr Baleen::Diagnostic kWarnKernelMissing{"E-CORE-32", "The kernel image isn't in the system volume: the volume has no kernel yet"};
-    // 选版与签名：记录格式与信任锚由选版规格定义，当前直接启动布局描述指定的已确认镜像
-    constexpr Baleen::Diagnostic kWarnSelectSkip{"E-CORE-56", "The kernel set selection and signature check aren't implemented: starting the image the layout names"};
     // 没有内核镜像可交：停在可观测的边界上，不再往装载与交接走
     constexpr Baleen::Diagnostic kWarnNoKernel{"E-CORE-58", "The BaleenCore stage ends here: there is no kernel to hand over"};
 
@@ -116,6 +126,8 @@ namespace {
     Baleen::Core::Ext4FileSystem s_ext4;
     // 布局描述原字节
     uint8_t s_layoutBlock[kLayoutBlockBytes] = {};
+    // 选版结果：目标集路径、集目录与集身份
+    Baleen::Core::SelectedSet s_selected;
     // 交权块：固定字段校验通过后常驻，Fail 路径经它取读盘失败记录
     const Baleen::CoreHandoff* s_handoff = nullptr;
     // 交接状态：BootInfo、内存图副本与恒等映射页表，都在未初始化区
@@ -238,7 +250,7 @@ namespace {
     // 构造交给内核的 BootInfo：字段取自交权块，内存图复制到本阶段的静态存储
     // 固件状态填 None：BIOS 路径进入长模式后没有可调用的固件服务，内核按这个事实固定运行模式
     // 输出通道按事实给出：调试口无条件可用，串口以存在性探测为准；内核按这些位装配自己的控制台
-    void BuildBootInfo(const Baleen::CoreHandoff& handoff) {
+    void BuildBootInfo(const Baleen::CoreHandoff& handoff, const Baleen::Core::SelectedSet& selected) {
         uint32_t count = handoff.memoryMapCount;
         if (count > kMemoryMapEntries) count = kMemoryMapEntries;
         for (uint32_t i = 0; i < count; ++i) s_bootMemoryMap[i] = handoff.memoryMap[i];
@@ -256,6 +268,10 @@ namespace {
         s_bootInfo.reserved0 = 0;
         for (uint32_t i = 0; i < 4; ++i) s_bootInfo.reserved[i] = 0;
         s_bootInfo.memoryMap = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(s_bootMemoryMap));
+        // 内核集身份：选中的集标识与试启动身份；没有集身份时按“未提供”填零
+        if (selected.verified) memcpy(s_bootInfo.kernelSetBuildId, selected.buildId, Boot::InfoLayout::kKernelSetBuildIdBytes);
+        else for (uint32_t i = 0; i < Boot::InfoLayout::kKernelSetBuildIdBytes; ++i) s_bootInfo.kernelSetBuildId[i] = 0;
+        s_bootInfo.attemptId = selected.attemptId;
     }
 
     // 建恒等映射页表：PML4[0] 指向 PDPT，PDPT 的 4 项各指向一张页目录，2MiB 大页覆盖低 4GiB
@@ -372,6 +388,9 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     if (bounce == nullptr) Fail(kFailBounceWindow);
     // 介质块设备：读盘服务只接受低 1MiB 目的地，窗口在低地址里挑；容量按 LBA 的 32 位上限声明
     s_medium.Bind(handoff->readSectors, handoff->sectorBytes, bounce, Baleen::kBounceBytes, static_cast<uint64_t>(handoff->sectorBytes) << 32);
+    // 写能力：引导状态区的写入经 Stub 的写盘服务执行；介质不提供写服务时写入失败并按降级路径处理
+    s_medium.BindWrite(handoff->writeSectors);
+    s_medium.BindFlush(&FlushMedium);
     if (s_medium.BlockBytes() != handoff->sectorBytes || s_medium.BlockBytes() == 0) Fail(kFailBindDisk);
     if (const Storage::Error error = s_medium.Read(Baleen::LayoutDescriptor::kOffset, s_layoutBlock, sizeof(s_layoutBlock)); error != Storage::Error::Ok)
         Fail(kFailReadLayout, Storage::ErrorMessage(error));
@@ -380,6 +399,7 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     const uint64_t volumeOffset = Get64(s_layoutBlock + Baleen::LayoutDescriptor::kFieldVolumeOffset);
     const uint64_t volumeBytes = Get64(s_layoutBlock + Baleen::LayoutDescriptor::kFieldVolumeBytes);
     const uint64_t stateOffset = Get64(s_layoutBlock + Baleen::LayoutDescriptor::kFieldStateOffset);
+    const uint32_t stateBytes = Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldStateBytes);
     const uint32_t kernelPathBytes = Get16(s_layoutBlock + Baleen::LayoutDescriptor::kFieldKernelPathBytes);
     char kernelPath[Baleen::LayoutDescriptor::kKernelPathMaxBytes + 1] = {};
     memcpy(kernelPath, s_layoutBlock + Baleen::LayoutDescriptor::kFieldKernelPath, kernelPathBytes);
@@ -414,11 +434,49 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Print::WriteHex64(s_ext4.BlocksCount());
     Print::Write("\r\n");
 
-    // —— 内核镜像：按布局描述给的路径定位、读取并校验数据与整幅摘要 ——
+    // —— 写缓存刷新能力：交权块没有刷新原语，写缓存由本阶段直接刷新（AHCI 优先，传统 IDE 兜底）——
+    // 没有可刷新的端口是正常形态（光盘、USB、NVMe），不是失败；有端口时给出路径与结论
+    {
+        const Baleen::Core::DiskFlush::Path path = Baleen::Core::DiskFlush::Probe();
+        const bool flushable = path != Baleen::Core::DiskFlush::Path::None;
+        Baleen::PrintTargets::WriteLine(flushable ? Baleen::PrintTargets::Tag::Ok : Baleen::PrintTargets::Tag::Info,
+                                        flushable ? "The write cache can be flushed on this medium" : "No write cache flush primitive is available on this medium");
+        if (flushable) {
+            Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+            Print::Write("Flush=");
+            Print::Write(Baleen::Core::DiskFlush::PathText(path));
+            Print::Write("\r\n");
+        }
+    }
+
+    // —— 选版：读引导状态记录，选出目标集并验证清单与签名 ——
+    // 状态机与写入边界见 Docs/Specs/内核集更新与回滚.md 与 Baleen/引导状态记录.md；
+    // 清单与信任锚见 Docs/Specs/内核集清单与签名.md；只读介质与写失败按降级路径直启
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Selecting the kernel set");
+    if (const Baleen::Diagnostic reason = Baleen::Core::SelectKernelSet(s_ext4, s_medium, stateOffset, stateBytes, kernelPath, s_selected); reason.code != nullptr)
+        Fail(reason);
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, s_selected.verified ? "The kernel set is verified" : "No kernel set identity; starting the image the layout names");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Set=");
+    if (s_selected.verified) {
+        // 集标识按字节顺序的 64 位小写十六进制，与集目录名同一串字符
+        static const char kHexDigits[] = "0123456789abcdef";
+        for (uint32_t i = 0; i < 32; ++i) {
+            const char text[3] = { kHexDigits[s_selected.buildId[i] >> 4], kHexDigits[s_selected.buildId[i] & 0x0f], '\0' };
+            Print::Write(text);
+        }
+    } else {
+        Print::Write("none");
+    }
+    Print::Write(" Attempt=");
+    Print::WriteHex64(s_selected.attemptId);
+    Print::Write("\r\n");
+
+    // —— 内核镜像：按选中集的路径定位、读取并校验数据与整幅摘要 ——
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Locating and checking the kernel image");
     Baleen::Core::KernelFacts kernelFacts;
     bool kernelMissing = false;
-    const Baleen::Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, kernelPath, handoff->memoryMap, handoff->memoryMapCount, kernelFacts, kernelMissing);
+    const Baleen::Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, s_selected.kernelPath, handoff->memoryMap, handoff->memoryMapCount, kernelFacts, kernelMissing);
     if (kernelMissing) {
         Baleen::WriteDiagnostic(Baleen::PrintTargets::Tag::Warn, kWarnKernelMissing);
     } else if (kernelReason.code != nullptr) {
@@ -449,13 +507,10 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
         Stop();
     }
 
-    // 选版与签名：记录格式与信任锚由选版规格定义，当前直接启动布局描述指定的已确认镜像
-    Baleen::WriteDiagnostic(Baleen::PrintTargets::Tag::Warn, kWarnSelectSkip);
-
     // —— 装载：整幅读进装载地址，按静态内存跨度清零未落盘尾部 ——
     // 读盘按扇区上取整，末尾填充也被写进内存，清零覆盖文件末尾之后的所有字节
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Loading the kernel image");
-    if (const Baleen::Diagnostic reason = Baleen::Core::LoadKernelImage(s_ext4, kernelPath, kernelFacts.loadAddress, kernelFacts.imageBytes); reason.code != nullptr)
+    if (const Baleen::Diagnostic reason = Baleen::Core::LoadKernelImage(s_ext4, s_selected.kernelPath, kernelFacts.loadAddress, kernelFacts.imageBytes); reason.code != nullptr)
         Fail(reason);
     uint8_t* const kernelImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(kernelFacts.loadAddress));
     if (kernelFacts.memoryBytes > kernelFacts.imageBytes)
@@ -472,7 +527,7 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
 
     // —— 交接状态：BootInfo 与恒等映射页表，都在本阶段的静态存储里 ——
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Building the handover state");
-    BuildBootInfo(*handoff);
+    BuildBootInfo(*handoff, s_selected);
     BuildIdentityPageTables();
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The handover state is ready");
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);

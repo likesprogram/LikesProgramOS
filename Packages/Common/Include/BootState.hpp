@@ -1,0 +1,123 @@
+/* BootState.hpp
+    引导状态记录：内核集选版的持久状态，读写引导状态区域里的双副本记录
+
+    记录字节表、副本布局、写入顺序与掉电语义见 Docs/Specs/Baleen/引导状态记录.md；
+    读取选最新完整有效的一份，空区域与损坏分开处理；写入只落在非活动副本并读回校验
+    版本 2 起记录带撤销事实（纪元、最低允许安全版本、已吊销签名密钥位图）：写入方一律写版本 2，
+    读方仍接受版本 1 并把它的撤销字段按全零处理。运行期写入方（Updater / Init）必须读—改—写，
+    保留撤销字段——清掉它们等于把吊销退回到“依赖签名记录文件在场”
+*/
+
+#pragma once
+#include <stdint.h>
+
+#include <Revocation.hpp>
+#include <Storage/BlockDevice.hpp>
+
+namespace Baleen {
+    namespace Core {
+        namespace BootState {
+            // 区域固定 4096 字节，等分为两份副本
+            constexpr uint32_t kAreaBytes = 4096;
+            // 单份副本长度
+            constexpr uint32_t kCopyBytes = 0x800;
+            // 记录有效长度：版本 2 起为 0xF0
+            constexpr uint32_t kRecordBytes = 0xF0;
+            // 记录版本：写入方一律写当前版本
+            constexpr uint16_t kVersion = 2;
+            // 版本 1 的记录版本号与长度：没有撤销字段，读取兼容用
+            constexpr uint16_t kVersionV1 = 1;
+            constexpr uint32_t kRecordBytesV1 = 0xC0;
+            // 尝试次数上限
+            constexpr uint8_t kMaxTries = 15;
+            // 默认尝试次数（候选发布时的写入方取用）
+            constexpr uint8_t kDefaultTries = 3;
+
+            // 记录状态：与规格第四节一致
+            enum class State : uint8_t {
+                Confirmed = 1,   // 已知良好集已确认，无待试候选
+                Pending = 2,     // 候选已完整落盘，尚未试启动
+                Trying = 3,      // 已记录一次尝试，尚未成功确认
+                Failed = 4,      // 候选失败
+            };
+
+            // 记录内容：读取或写入的一份完整记录
+            struct Record {
+                uint64_t generation = 0;                // 代次，写入方按两份副本最大值加一
+                State state = State::Confirmed;         // 状态
+                uint8_t triesRemaining = 0;             // 本次记录之外还允许的尝试次数
+                uint64_t attemptId = 0;                 // 尝试身份；Trying 必须非零，其他状态必须为零
+                uint8_t confirmedBuildId[32] = {};      // 已知良好集标识
+                uint8_t confirmedManifestDigest[32] = {};   // 已知良好集清单摘要
+                uint8_t candidateBuildId[32] = {};      // 候选集标识
+                uint8_t candidateManifestDigest[32] = {};   // 候选集清单摘要
+                uint64_t seenSecurityVersion = 0;       // 本设备已见最高安全版本，只增不减
+                Revocation::Facts revocation{};         // 已应用的吊销事实，只增不减；运行期写入方必须保留
+            };
+
+            // 读取结果分类
+            enum class ReadResult : uint8_t {
+                Ok,           // 有有效记录
+                Empty,        // 区域为空：按“无记录”处理
+                Corrupt,      // 有写入痕迹但两份副本都不可用
+                Unavailable,  // 没有状态区域或读失败
+            };
+
+            // 单份副本的校验结论（维护与恢复用）
+            enum class CopyStatus : uint8_t {
+                NotWritten,   // 标记全零：该副本未写过
+                Valid,        // 结构、组合与校验和都通过
+                Invalid,      // 写过但不可用
+            };
+
+            // 单份副本的检查结论：状态与代次（不可用时代次为 0）
+            struct CopyFacts {
+                CopyStatus status = CopyStatus::NotWritten;   // 校验结论
+                uint64_t generation = 0;                      // 该副本记录的代次
+            };
+
+            // 副本级检查结果：维护工具据此报告"哪一份坏了"，选版只关心 Read 的分类
+            struct Inspection {
+                ReadResult result = ReadResult::Unavailable;  // 与 Read 相同的分类
+                CopyFacts copyA{};                            // 副本 A 的结论
+                CopyFacts copyB{};                            // 副本 B 的结论
+                Record record{};                              // 有效时选中的那份记录
+            };
+
+            // 读状态记录：两份副本都校验，取代次更大的有效副本
+            ReadResult Read(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, Record& record);
+
+            // 副本级检查：与 Read 读同一块区域，另外带回两份副本各自的结论
+            Inspection Inspect(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes);
+
+            // 写状态记录：落在非活动副本，代次取两份最大值加一，写后刷盘并读回校验
+            // writtenGeneration 带回实际写入的代次（Trying 的尝试身份取它）
+            // 记录不可写、写失败、刷盘失败或读回校验失败都返回 false
+            bool Write(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const Record& record, uint64_t& writtenGeneration);
+
+            // 受控恢复：把状态区域两份副本清零，回到出厂形态（选版按"无记录"直启缺省集）
+            // 只写状态区域，不碰系统卷；介质不可写或写后读回不是全零都返回 false
+            bool Clear(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes);
+
+            // 受控恢复：用一份有效副本修复另一份
+            // 没有可用记录（空区域、两份都不可用、或两份有效但代次相等）返回 false，不猜测目标集
+            bool Repair(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t& writtenGeneration);
+
+            // 人工接受：把已见最高安全版本下调到显式接受的值；这是防回滚的唯一例外
+            // acceptedVersion 必须低于当前值（抬高由选择器随清单更新自动完成），否则返回 false
+            // 没有记录、介质不可写或写不成立都返回 false；装置侧不存在隐式接受开关
+            bool AcceptSeenSecurityVersion(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t acceptedVersion, uint64_t& writtenGeneration);
+
+            // 发布候选：写 Pending 记录（候选标识、清单摘要与可用尝试次数）——运行期发布方（Updater）的写入步骤
+            // 候选集全部文件完整落盘、清单签名与摘要检查通过之后调用；区域为空时按首次写入处理
+            // 已有记录时保留已知良好集、已见最高版本与撤销事实，只换候选与剩余次数
+            // 剩余次数为 0 或超过上限、候选标识全零、记录损坏、介质不可写或写不成立都返回 false
+            bool PublishCandidate(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const uint8_t candidateBuildId[32], const uint8_t candidateManifestDigest[32], uint8_t triesRemaining, uint64_t& writtenGeneration);
+
+            // 提交确认：当前记录仍是 Trying 且 AttemptId 等于收到的值时才写 Confirmed
+            // 这是运行期确认方（Init）的写入步骤：候选字段一次写入转成已知良好集字段并清零候选，
+            // 已见最高版本与撤销事实原样保留。记录不是 Trying、AttemptId 不符、没有记录或写不成立都返回 false
+            bool ConfirmAttempt(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t attemptId, uint64_t& writtenGeneration);
+        }
+    }
+}

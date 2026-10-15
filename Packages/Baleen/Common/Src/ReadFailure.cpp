@@ -16,6 +16,8 @@ namespace Baleen {
             case ReadFailPhase::SingleEdd: return "SingleEdd";
             case ReadFailPhase::SingleChs: return "SingleChs";
             case ReadFailPhase::Window: return "Window";
+            case ReadFailPhase::WriteReject: return "WriteReject";
+            case ReadFailPhase::WriteBatchEdd: return "WriteBatchEdd";
         }
         return "Unknown";
     }

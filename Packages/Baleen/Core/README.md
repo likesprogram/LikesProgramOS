@@ -2,9 +2,9 @@
 
 `BaleenCore` 是 BIOS 路径中继 IPL 与 Stub 之后的第二阶段。Stub 校验 `CoreDescriptor` 与镜像头、比对整幅摘要后，把 `BaleenCore.bin` 装到物理 1MiB，按 `CORE_LOAD + 头里的 EntryOffset` 跳入；入口时 `ESI` 指向交权块（定义见 [Stub 说明](../Stub/README.md)第二节）。BaleenCore 从交权块取得介质身份、内存图与固件服务入口，自己装配输出，此后不再依赖 Stub 的行为。
 
-源码分工沿用 Stub 的约定：`Src/Core.cpp` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都在这一段里；`Src/Console.cpp` 只做 BaleenCore 控制台的装配（VGA 文本、`0xE9` 与 COM1 三路组合，是独立于 Stub 的实例），不打印也不停机；`Src/Ext4.cpp` 是 Ext4 只读最小实现，`Src/BiosBlockDevice.cpp` 把交权块的读盘服务包成块设备（低 1MiB 中转窗口在此完成），`Src/LoadKernel.cpp` 定位、校验并装载内核镜像（读首块核对内核镜像数据、流式比对整幅摘要、核对装载区、整幅读进装载地址），`Src/Libc.cpp` 提供无运行库环境引用的最小 C 运行库函数；`Src/Core.asm` 是入口、异常桩、交接入口与自己的栈，不做诊断排版；`Include/CoreHeader.inc` 与 `Include/Const.inc` 是汇编侧常量。
+源码分工沿用 Stub 的约定：`Src/Core.cpp` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都在这一段里；`Src/Console.cpp` 只做 BaleenCore 控制台的装配（VGA 文本、`0xE9` 与 COM1 三路组合，是独立于 Stub 的实例），不打印也不停机；`Src/Ext4.cpp` 是 Ext4 只读最小实现，`Src/BiosBlockDevice.cpp` 把交权块的读盘服务包成块设备（低 1MiB 中转窗口在此完成），`Src/LoadKernel.cpp` 定位、校验并装载内核镜像（读首块核对内核镜像数据、流式比对整幅摘要、核对装载区、整幅读进装载地址），`Src/SelectSet.cpp` 做选版（集目录推导、状态决策与状态写回），状态记录的读写来自共用包的 `Packages/Common/Src/BootState.cpp`（引导期选择器与运行期写入方同一份实现），`Src/ManifestVerify.cpp` 验证集清单与全部产物，`Src/TrustAnchor.cpp` 按 `KeyId` 查内嵌信任锚（表由构建期生成的 `Out/TrustAnchors.cpp` 提供，生成输入见下），`Src/Libc.cpp` 提供无运行库环境引用的最小 C 运行库函数；`Src/Core.asm` 是入口、异常桩、交接入口与自己的栈，不做诊断排版；`Include/CoreHeader.inc` 与 `Include/Const.inc` 是汇编侧常量。
 
-**当前实现到内核交接为止**：横幅、交权块校验、镜像事实交叉核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷偏移视图与 Ext4 只读挂载（含卷标识核对）、按布局描述给的路径定位内核镜像、读取并校验内核镜像数据与整幅摘要（含装载区落点检查）、装载到装载地址并清零未落盘尾部、构造 BootInfo 与恒等映射页表、切长模式进入内核都已可用；内核集选版与持久状态、签名验证、引导状态区域的写入路径尚未实现（第三节）。内核镜像数据的字节表见[内核镜像数据](../../../Docs/Specs/Baleen/内核镜像数据.md)，内核侧入口见[内核侧 Core 说明](../../LikesProgramOS/Core/README.md)。Ext4 只读实现的边界与验证见 [CheckExt4](../../../Tools/Test/CheckExt4/README.md)。构建：`make -C Packages/Baleen/Core` 产出 `Out/Bin/BaleenCore.bin`，`make check` 复核长度上限、头字段与摘要，顶层组装按真实产物优先取用。
+**当前实现到内核交接为止**：横幅、交权块校验、镜像事实交叉核对、CPU 快照、运行期段表与中断表、环境事实播报、布局描述读取与校验、系统卷偏移视图与 Ext4 只读挂载（含卷标识核对）、内核集选版与清单签名验证（含防回滚比较，见[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md)与[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)）、按选中集的路径定位内核镜像、读取并校验内核镜像数据与整幅摘要（含装载区落点检查）、装载到装载地址并清零未落盘尾部、构造 BootInfo 与恒等映射页表、切长模式进入内核都已可用；引导状态区域的实际写入经 Stub 的写盘服务完成（`Src/BiosBlockDevice.cpp` 负责低地址窗口与分段，见[Stub 说明](../Stub/README.md)第二节），介质可写时选版的状态转换逐次落盘并读回校验（写盘服务本身的可用性与写后读回由 [CheckStub](../../../Tools/Test/CheckStub/README.md) 的探针在 QEMU 里覆盖，选版与状态记录由 [CheckSelect](../../../Tools/Test/CheckSelect/README.md) 覆盖）。内核镜像数据的字节表见[内核镜像数据](../../../Docs/Specs/Baleen/内核镜像数据.md)，内核侧入口见[内核侧 Core 说明](../../LikesProgramOS/Core/README.md)。Ext4 只读实现的边界与验证见 [CheckExt4](../../../Tools/Test/CheckExt4/README.md)。构建：`make -C Packages/Baleen/Core` 产出 `Out/Bin/BaleenCore.bin`，`make check` 复核长度上限、头字段与摘要，顶层组装按真实产物优先取用；信任锚表由 `Out/TrustAnchors.cpp` 提供——当前密钥从仓库外的 `.cache/Keys` 派生，轮换窗口里的旧公钥取进版本库的 `Anchors/Retained.txt`，两者由 `Tools/Bin/MakeKeys --anchors` 合并（[MakeKeys 说明](../../../Tools/Build/MakeKeys/README.md)）；内嵌的最低允许 `SecurityVersion` 由构建参数 `SECURITY_FLOOR` 写进生成头（默认 `0`，抬高即吊销更低世代，`make SECURITY_FLOOR=<n>` 后重建），值随镜像一起发布。
 
 ## 一、入口与镜像
 
@@ -33,7 +33,7 @@
 7. 读布局描述并校验：从固定字节偏移 `0x20000` 读一个 4096 字节块，核对固定字段、保留字段、内核路径长度与校验和（字节表见[布局描述](../../../Docs/Specs/Baleen/布局描述.md)）；续行给出 `Volume=`、`Bytes=`、`State=` 与 `Kernel=`
 8. 挂载系统卷：按布局描述给的偏移与长度在介质设备上开偏移视图，挂 Ext4（只读，特性清单取 `Storage/Ext4Features.hpp`；解析前提位缺失、卷未干净卸载、64 位卷的高位块数或描述符大小非法都在这一步拒绝），并把 superblock 的卷标识与布局描述逐字节比较；不一致即停机，不猜测
 9. 定位并校验内核镜像：按布局描述给的路径打开；路径不存在时以 `WARN` 说明内核尚未放入系统卷。校验分三步：读首块核对[内核镜像数据](../../../Docs/Specs/Baleen/内核镜像数据.md)的固定字段与内核事实，核对 `BootInfoVersion` 是本侧能构造的版本，核对镜像与静态内存的较大者整段落在交权块内存图的可用区间内（相邻可用条目按同一段连续内存合并，判定与 Stub 共用 `Baleen::SpanUsable`），再从文件起点流式重读整幅计算 SHA-256（`Digest` 字段按 32 个零代入）与数据里的摘要比对；任一不符即以 `FATAL` 原因停机
-10. 选版与签名：记录格式与信任锚由选版规格定义，当前以 `WARN` 行说明跳过，直接启动布局描述指定的镜像；系统卷里没有内核镜像时同样以 `WARN` 说明并停在边界上
+10. 选版与签名：先读系统卷里的签名吊销记录（`/LikesProgram/System/Revocation.rvk`），缺失按“没有记录”处理、不可用报 `WARN`（`E-CORE-75`）后继续，合法记录与状态记录里的持久事实取并集得到有效吊销事实（[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md) 5.1、5.2）；读布局描述给出的状态区域（`StateOffset` / `StateBytes`），按[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md)的双副本规则取最新完整有效的一份——空区域与没有状态区域按“无记录”处理、直启布局描述指定的集，有写入痕迹但两份都不可验证时不猜测目标集、以 `FATAL` 停机（`E-CORE-69`）；按记录选出的集在装载前验证清单结构与保留字段、Ed25519 签名与信任锚、`BuildId` 一致性、防回滚的 `SecurityVersion` 比较与逐产物 SHA-256（`E-CORE-61`..`E-CORE-68`），其中签名密钥在有效吊销位图里时以 `E-CORE-74` 拒绝，规则见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)；候选验证失败（`E-CORE-72`）或可用尝试次数为零（`E-CORE-73`）时写 `Failed` 并改选已知良好集，状态写入不成立时不做状态转换、报 `WARN`（`E-CORE-70`）后按降级路径继续；回退到缺省集时把设备已见最高 `SecurityVersion` 一并交给清单验证（没有记录时取 `0`），缺省集因此同样受防回滚比较约束，低于已见的缺省集以 `E-CORE-66` 拒绝；吊销事实前进时随同状态写回持久化（只增不减），状态写入按**写 → 刷介质缓存 → 读回校验**的次序执行，刷新失败按写失败处理（写缓存经 AHCI 的 `FLUSH CACHE` 刷新，没有可刷新端口时按“无可用原语”通过，边界见[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md)第五节）；续行给出 `Set=`（集标识的 64 位小写十六进制，无集身份时为 `none`）与 `Attempt=`（试启动身份，非试启动为 0）
 11. 装载：整幅读进内核镜像数据里的 `LoadAddress`，按 `MemoryBytes` 清零未落盘尾部（覆盖最后一个扇区的填充）；续行给出 `Load=`、`Bytes=`、`Span=`
 12. 交接状态：构造 `BootInfo`（尺寸、版本、固件状态、介质、扇区大小、输出通道与内存图；内存图复制到本阶段的静态存储），建恒等映射页表（4 级表、2MiB 大页覆盖低 4GiB）；续行给出 `BootInfo=`、`Mmap=`、`Channels=`
 13. 引导耗时：用交权块里 Stub 的时间戳与校准值报出 `BootMs=`（从 Stub 进入起）、`StageMs=`（本阶段）与 `BudgetMs=`，预算 3000 ms，`Verdict=` 给出 `Ok` / `Over` / `NoClock`；超出预算以 `WARN` 与 `E-CORE-55` 报出，不阻断启动。报在装载与交接状态之后、进入内核之前，装载读盘计入预算
@@ -47,8 +47,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 内核集选版与持久状态 | 选版状态机与引导状态区域的记录格式，见[内核集更新与回滚](../../../Docs/Specs/内核集更新与回滚.md)；当前直接启动布局描述指定的镜像，不读写状态区域 |
-| 签名验证 | 内核集签名、密钥与撤销规则；当前的内核镜像摘要是自检，不是认证 |
-| 写入路径 | 引导状态区域的写回与持久化；只读介质上不启用试启动 |
+| 更新与确认的写入方 | 引导侧（选择、`Trying`/`Failed` 写入、已见版本抬升与回退）已实现。两个**运行期写入方本体**也已实现并落在共用层：`BootState::PublishCandidate`（写 `Pending`）与 `BootState::ConfirmAttempt`（按 `AttemptId` 比较再写 `Confirmed`），见[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md)第四节。缺的是**发起方**：`Pending` 的发布方 Updater 与 `Confirmed` 的提交方 Init 都是运行期组件（[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md)第四节），内核当前停在核心阶段边界、用户态尚未实现，因此两侧都还没有自动调用者。代执行入口是维护工具 `Tools/Bin/FixBootState --publish / --confirm`，调用的是同一份实现；选版决策、副本轮换、写入门槛与这两个写入方都由 [CheckSelect](../../../Tools/Test/CheckSelect/README.md) 覆盖 |
+| 只读介质与写失败 | 介质不提供写服务、写盘失败或刷盘失败时，按降级路径处理：本次不做状态转换、报 `WARN E-CORE-70`，选已知良好集、没有则启动缺省集；写缓存由本阶段直接刷新（`Src/DiskFlush.cpp`：AHCI 优先，传统 IDE 兜底，对在用 ATA 盘下发 `FLUSH CACHE`；命令出错或超时时 `Flush` 返回 `Io` 并按写失败处理），光盘、USB、NVMe 等两条路径都够不到的介质按“无可用原语”通过，持久化保证止于写成功加读回校验（规格见[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md)第五节） |
 
 本文只描述当前已实现的边界；后续阶段各自补各自的章节，不在这里提前承诺。

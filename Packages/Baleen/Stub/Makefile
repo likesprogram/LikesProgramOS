@@ -4,7 +4,8 @@
 #    镜像装载在物理 0x7E00，整体必须留在低 64KiB（实模式弹跳按物理地址寻址）；
 #    未初始化区不落盘，由入口代码按链接脚本给出的边界清零；
 #    链接后由 Tools/Bin/PackImage 填头里的 BuildId 与 Digest，并校验头字段；
-#    STACK_PROBE=1 额外产出实模式栈探针版，供 CheckStub 的探针模式核对栈深
+#    STACK_PROBE=1 额外产出实模式栈探针版，供 CheckStub 的探针模式核对栈深；
+#    WINDOW_PROBE=1 额外产出弹跳窗口探针版，用注入的内存图走"找不到窗口"的失败路径
 
 # 产物根目录
 OUT_DIR   ?= Out
@@ -13,9 +14,17 @@ OUT_DIR   ?= Out
 # 测量在 Src/Bios.asm，判定与打印在 Src/Stub.cpp
 PROBE_OUT_DIR ?= $(OUT_DIR)/Probe
 STACK_PROBE ?= 0
+# 弹跳窗口探针：置 1 时在 E820 之后用一张注入的内存图替换查询结果，
+# 让 [kBounceBegin, kBounceEnd) 整段不可用，走 E-STUB-36 的失败路径；
+# 注入点在 Src/LoadCore.cpp，只用回归，不参与正式启动决策
+WINDOW_PROBE_OUT_DIR ?= $(OUT_DIR)/WindowProbe
+WINDOW_PROBE ?= 0
 ifeq ($(STACK_PROBE),1)
 LOCAL_OUT_DIR := $(PROBE_OUT_DIR)
 PROBE_DEFINES := -DSTUB_STACK_PROBE
+else ifeq ($(WINDOW_PROBE),1)
+LOCAL_OUT_DIR := $(WINDOW_PROBE_OUT_DIR)
+PROBE_DEFINES := -DSTUB_WINDOW_PROBE
 else
 LOCAL_OUT_DIR := $(OUT_DIR)
 PROBE_DEFINES :=
@@ -119,7 +128,7 @@ check: all
 # 删除产物目录：探针产物与正式产物一起清
 clean:
 	@test -n "$(OUT_DIR)" || { echo "clean: OUT_DIR 为空，拒绝执行"; exit 1; }
-	@rm -rf -- "$(OUT_DIR)" "$(PROBE_OUT_DIR)"
+	@rm -rf -- "$(OUT_DIR)" "$(PROBE_OUT_DIR)" "$(WINDOW_PROBE_OUT_DIR)"
 
 # 打印用法
 help:
@@ -127,7 +136,8 @@ help:
 	  '  make [all]  构建 $(STUB_BIN)' \
 	  '  make check  校验镜像大小、完整性头字段与摘要' \
 	  '  make STACK_PROBE=1  构建实模式栈探针版，产物在 $(PROBE_OUT_DIR)/Bin，诊断报告实测栈深' \
-	  '  make clean  删除 $(OUT_DIR)/ 与 $(PROBE_OUT_DIR)/' \
+	  '  make WINDOW_PROBE=1 构建弹跳窗口探针版，产物在 $(WINDOW_PROBE_OUT_DIR)/Bin，用注入内存图走 E-STUB-36' \
+	  '  make clean  删除 $(OUT_DIR)/ 与两个探针产物目录' \
 	  '  变量：OUT_DIR / STACK_PROBE / CXX / NASM / LD / OBJCOPY 与各 FLAGS 可覆盖'
 
 -include $(LOCAL_OBJS:.o=.d)

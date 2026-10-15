@@ -2,7 +2,7 @@
 
 `Packages/LikesProgramOS/Core` 是内核侧的第一阶段，产出内核映像 `Out/Bin/LikesProgram.os`。它对应[内核架构与自举闭包](../../../Docs/Specs/内核架构与自举闭包.md)第二节里“平台初始化”“物理内存与虚拟内存”“输出与诊断”三块的自举部分：入口、`BootInfo` 核对、固件启动服务失效、描述符表、引导页表与直映射、页帧分配器。**当前停在阶段边界上**：设备模型、模块装载、调度、IRQ 与 Init 都还没有实现（第五节）。移交路径已接通：BaleenCore 把映像装到 `LoadAddress`、构造 `BootInfo` 并切长模式跳入本入口，内核从自己的阶段边界继续。
 
-按与 BaleenCore 相同的分工：`Src/Kernel.cpp` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都集中在这一段里；`Src/Console.cpp` 只按 `BootInfo` 声明的通道装配早期控制台，`Src/Tags.cpp` 写诊断标签，`Src/Cpu.cpp`、`Src/Tables.cpp`、`Src/Paging.cpp`、`Src/Memory.cpp` 各自只提供机制，都不打印也不停机；`Src/Core.asm` 是内核镜像数据、入口、异常桩与自己的栈；`Src/Libc.cpp` 提供 64 位无运行库环境引用的最小 C 运行库函数。共享件按内核的编译选项重编一份：`Packages/Common` 的 Print 前端、串口与调试口目标、描述符表机制与[内核镜像数据](../../../Docs/Specs/Baleen/内核镜像数据.md)校验。
+按与 BaleenCore 相同的分工：`Src/Core.cpp` 承担全部启动流程与全部诊断输出——步骤顺序、进度行、失败原因与停机都集中在这一段里；`Src/Console.cpp` 只按 `BootInfo` 声明的通道装配早期控制台，`Src/Tags.cpp` 写诊断标签，`Src/Cpu.cpp`、`Src/Tables.cpp`、`Src/Paging.cpp`、`Src/Memory.cpp` 各自只提供机制，都不打印也不停机；`Src/Core.asm` 是内核镜像数据、入口、异常桩与自己的栈；`Src/Libc.cpp` 提供 64 位无运行库环境引用的最小 C 运行库函数。共享件按内核的编译选项重编一份：`Packages/Common` 的 Print 前端、串口与调试口目标、描述符表机制与[内核镜像数据](../../../Docs/Specs/Baleen/内核镜像数据.md)校验。
 
 ## 一、入口与镜像
 

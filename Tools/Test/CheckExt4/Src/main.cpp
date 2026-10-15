@@ -43,7 +43,7 @@ namespace {
     namespace fs = std::filesystem;
     using Bytes = std::vector<uint8_t>;
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 19;
+    constexpr unsigned kCaseCount = 20;
     // 已跑用例数
     unsigned g_ran = 0;
     // 夹具卷的固定参数：16 MiB、4096 字节块，卷标识与 mkfs 参数一致
@@ -252,6 +252,19 @@ namespace {
         Require(MountedRef() != nullptr, "读盘服务未绑定介质");
         return MountedRef()->medium.Read(lba, count, dest, sectorBytes);
     }
+
+    // 写盘服务替身：只用来让块设备成为可写设备，内容不进介质
+    uint32_t AcceptWrite(uint32_t lba, uint32_t count, const void* src, uint32_t sectorBytes) {
+        (void)lba;
+        (void)count;
+        (void)src;
+        (void)sectorBytes;
+        return 1;
+    }
+
+    // 刷新服务替身：返回当前设定的结论
+    Baleen::Core::FlushOutcome g_flushOutcome = Baleen::Core::FlushOutcome::Unsupported;
+    Baleen::Core::FlushOutcome FlushStub() { return g_flushOutcome; }
 
     // 把基准卷装进介质影像、绑定块设备并挂载：返回挂载结果
     Storage::Error MountFixture(Mounted& mounted, const Bytes& volume) {
@@ -544,6 +557,28 @@ namespace {
         Require(device.BlockBytes() == 0, "解绑后应回到未绑定");
     }
 
+    // 用例：写缓存刷新的返回值映射——只有绑定方报失败时才按写失败处理
+    void CaseFlushMapping() {
+        Baleen::Core::BiosBlockDevice device;
+        uint8_t window[1024] = {};
+        device.Bind(&ForwardRead, 512, window, 1024, 1u << 20);
+        device.BindWrite(&AcceptWrite);
+        // 没有绑定刷新服务：按“无可用原语”通过
+        Require(device.Flush() == Storage::Error::Ok, "未绑定刷新服务时应通过");
+        device.BindFlush(&FlushStub);
+        g_flushOutcome = Baleen::Core::FlushOutcome::Unsupported;
+        Require(device.Flush() == Storage::Error::Ok, "无可用原语时应通过");
+        g_flushOutcome = Baleen::Core::FlushOutcome::Flushed;
+        Require(device.Flush() == Storage::Error::Ok, "刷新成立时应通过");
+        g_flushOutcome = Baleen::Core::FlushOutcome::Failed;
+        Require(device.Flush() == Storage::Error::Io, "刷新失败时按写失败返回 Io");
+        // 只读设备没有写缓存要刷：即使绑了刷新服务也不调用
+        Baleen::Core::BiosBlockDevice readOnly;
+        readOnly.Bind(&ForwardRead, 512, window, 1024, 1u << 20);
+        readOnly.BindFlush(&FlushStub);
+        Require(readOnly.Flush() == Storage::Error::Ok, "只读设备的刷新应通过");
+    }
+
     // 跑全部用例并核对数量
     void RunCases() {
         Case("挂载与卷事实", CaseMountFacts);
@@ -565,6 +600,7 @@ namespace {
         Case("块设备窗口中转", CaseDeviceWindow);
         Case("读盘失败传播", CaseReadFailure);
         Case("未绑定块设备", CaseUnboundDevice);
+        Case("写缓存刷新的返回值映射", CaseFlushMapping);
         Require(g_ran == kCaseCount, "用例数量与登记不符");
         std::cout << "CheckExt4: " << g_ran << " 项用例全部通过" << std::endl;
     }

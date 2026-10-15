@@ -11,9 +11,10 @@ Out/
 *.bin.json
 
 # 系统卷源目录里由各模块 Out 拷入的构建产物：随构建刷新，不进 Git；目录骨架与内容进 Git
-Packages/LikesProgramOS/Static/LikesProgram/System/*.os
 Packages/LikesProgramOS/Static/LikesProgram/System/Modules/*.osm
 Packages/LikesProgramOS/Static/LikesProgram/System/Drivers/*.drv
+# 内核集目录：集名是 BuildId，由系统卷包按构建产物重建，不进 Git
+Packages/LikesProgramOS/Static/LikesProgram/System/KernelSets/
 
 # SDK 安装目录：用户安装的 SDK 目录，包含宿主工具、头文件、库文件等，便于直接使用，不忽略
 !Install/

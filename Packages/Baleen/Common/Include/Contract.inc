@@ -22,8 +22,9 @@ MEDIA_CDROM      EQU 4           ; 交权时 DH 的介质编号：光盘
 CORE_LOAD        EQU 0x100000    ; BaleenCore 映像装入的物理地址，即镜像基址；交权入口 = 它 + 头里的 EntryOffset
 CORE_MAX_BYTES   EQU 0x400000    ; BaleenCore 文件字节数上限
 CORE_HANDOFF_MAGIC EQU 0x484E4C42 ; 'BLNH'，Stub 交给 BaleenCore 的交权块格式标记
-CORE_HANDOFF_VER EQU 3           ; 交权块的开发格式标记
-CORE_HANDOFF_BYTES EQU 80        ; 交权块长度，BaleenCore 侧据此核对
+CORE_HANDOFF_VER EQU 4           ; 交权块的开发格式标记
+CORE_HANDOFF_BYTES EQU 84        ; 交权块长度，BaleenCore 侧据此核对
+CORE_HANDOFF_WRITE_SECTORS EQU 0x50 ; 写盘服务入口，字段偏移
 
 ; —— Stub 读盘服务的失败记录：Bios.asm 在失败路径写入，Stub 与 BaleenCore 的诊断行按同一布局读取 ——
 ; 记录块常驻 Stub 映像，地址随交权块交付；长度与字段偏移是两侧 ABI，改动必须两边同时改
@@ -38,3 +39,6 @@ READ_PHASE_BATCH_EDD  EQU 2      ; 批量 EDD 请求失败
 READ_PHASE_SINGLE_EDD EQU 3      ; 逐扇区重读的 EDD 请求失败
 READ_PHASE_SINGLE_CHS EQU 4      ; 逐扇区重读的 CHS 回退失败
 READ_PHASE_WINDOW     EQU 5      ; 请求放不进 64KiB 窗口，未走固件
+; 写盘失败也记在同一块记录里，阶段码接着读的排：
+WRITE_PHASE_REJECT    EQU 6      ; 写参数非法，未走固件
+WRITE_PHASE_BATCH_EDD EQU 7      ; 批量写请求失败
