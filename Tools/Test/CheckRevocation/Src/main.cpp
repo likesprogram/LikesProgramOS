@@ -11,7 +11,7 @@
       5. 系统卷读取：缺文件、长度不符、篡改、合法
       6. 真实清单验证：被吊销的签名密钥拒绝（E-CORE-74）、记录下限抬升拒绝（E-CORE-66）
       7. 单调性：记录文件缺失不解除持久事实、回滚成旧纪元同样不解除
-      8. 引导状态记录：版本 2 往返一致、版本 1 仍可读且撤销字段按全零
+      8. 引导状态记录：只有版本 1，往返一致；版本不是 1 的记录按损坏处理
     手工执行，不进入默认构建；结论行不写“全部通过”以外的措辞
 */
 
@@ -541,44 +541,37 @@ namespace {
         Require(readBack.revocation.epoch == 6 && RV::IsKeyRevoked(readBack.revocation.revokedKeyMask, kSignerKeyId), "读回的吊销事实应与写入一致");
     }
 
-    // 用例：版本 2 往返与版本 1 读取兼容
+    // 用例：记录只有一个版本 1——往返一致；不是版本 1 的记录按损坏处理
     void CaseRecordVersions() {
-        Require(Baleen::Core::BootState::kVersion == 2 && Baleen::Core::BootState::kRecordBytes == 0xF0, "当前记录版本应是 2、长度 0xF0");
+        Require(Baleen::Core::BootState::kVersion == 1 && Baleen::Core::BootState::kRecordBytes == 0xF0, "当前记录版本应是 1、长度 0xF0");
 
-        // 版本 2：（在 CaseMonotonicFacts 已覆盖内容往返）这里核对保留区非零被拒
+        // 版本 1 往返：（内容往返在 CaseMonotonicFacts 已覆盖）这里核对落盘与读回一致
         MemoryMedium medium(true);
         Baleen::Core::BootState::Record record;
         record.state = Baleen::Core::BootState::State::Confirmed;
         std::memset(record.confirmedBuildId, 0x33, sizeof(record.confirmedBuildId));
+        record.triesDone = 5;   // 已试次数只增，往返要原样带回
         uint64_t generation = 0;
-        Require(Baleen::Core::BootState::Write(medium, kStateOffset, kStateBytes, record, generation), "版本 2 记录应能落盘");
+        Require(Baleen::Core::BootState::Write(medium, kStateOffset, kStateBytes, record, generation), "版本 1 记录应能落盘");
+        Baleen::Core::BootState::Record readBack;
+        Require(Baleen::Core::BootState::Read(medium, kStateOffset, kStateBytes, readBack) == Baleen::Core::BootState::ReadResult::Ok, "版本 1 记录应能读回");
+        Require(readBack.generation == generation && readBack.triesDone == 5, "读回的代次与已试次数应与写入一致");
 
-        // 手写一份版本 1 记录（0xC0、校验和在 0xBC），读方必须接受且撤销字段按全零
-        Bytes legacy(0xC0, 0);
-        Put32(legacy, 0x000, 0x54534C42u);
-        Put16(legacy, 0x004, 1);
-        Put16(legacy, 0x006, 0xC0);
-        Put64(legacy, 0x008, 7);
-        legacy[0x010] = 1;   // Confirmed
-        legacy[0x011] = 0;
-        std::memset(legacy.data() + 0x020, 0x44, 32);
-        std::memset(legacy.data() + 0x040, 0x45, 32);
-        Put32(legacy, 0x0BC, Crc32(legacy.data(), 0x0BC));
-        MemoryMedium legacyMedium(true);
-        legacyMedium.RawWrite(kStateOffset, legacy.data(), static_cast<uint32_t>(legacy.size()));
-        Baleen::Core::BootState::Record legacyRead;
-        Require(Baleen::Core::BootState::Read(legacyMedium, kStateOffset, kStateBytes, legacyRead) == Baleen::Core::BootState::ReadResult::Ok, "版本 1 的记录应仍可读");
-        Require(legacyRead.generation == 7, "版本 1 记录的代次应读出 7");
-        Require(legacyRead.revocation.epoch == 0 && legacyRead.revocation.minimumSecurityVersion == 0, "版本 1 记录的撤销字段应按全零");
-        Require(!RV::IsKeyRevoked(legacyRead.revocation.revokedKeyMask, kSignerKeyId), "版本 1 记录不应带任何吊销位");
-
-        // 未知版本：不猜测字段表
-        Bytes unknown = legacy;
-        Put16(unknown, 0x004, 9);
-        MemoryMedium unknownMedium(true);
-        unknownMedium.RawWrite(kStateOffset, unknown.data(), static_cast<uint32_t>(unknown.size()));
+        // 结构合法但版本不是 1：不猜测字段表，按损坏处理
+        Bytes other = Bytes(Baleen::Core::BootState::kRecordBytes, 0);
+        Put32(other, 0x000, 0x54534C42u);
+        Put16(other, 0x004, 2);
+        Put16(other, 0x006, Baleen::Core::BootState::kRecordBytes);
+        Put64(other, 0x008, 7);
+        other[0x010] = 1;   // Confirmed
+        other[0x011] = 0;
+        std::memset(other.data() + 0x020, 0x44, 32);
+        std::memset(other.data() + 0x040, 0x45, 32);
+        Put32(other, 0x0EC, Crc32(other.data(), 0x0EC));
+        MemoryMedium otherMedium(true);
+        otherMedium.RawWrite(kStateOffset, other.data(), static_cast<uint32_t>(other.size()));
         Baleen::Core::BootState::Record ignored;
-        Require(Baleen::Core::BootState::Read(unknownMedium, kStateOffset, kStateBytes, ignored) == Baleen::Core::BootState::ReadResult::Corrupt, "未知版本的记录应按损坏处理");
+        Require(Baleen::Core::BootState::Read(otherMedium, kStateOffset, kStateBytes, ignored) == Baleen::Core::BootState::ReadResult::Corrupt, "不是版本 1 的记录应按损坏处理");
     }
 
     // 跑一个用例
@@ -624,7 +617,7 @@ int main() {
     Case("系统卷读取三态", CaseLoadResults);
     Case("真实清单验证：吊销与下限", CaseManifestVerification);
     Case("单调性：文件缺失与回滚不解除", CaseMonotonicFacts);
-    Case("记录版本：版本 2 往返与版本 1 兼容", CaseRecordVersions);
+    Case("记录版本：只有版本 1 且拒绝其它版本", CaseRecordVersions);
     if (g_failures != 0) {
         std::cerr << "CheckRevocation: " << g_failures << " 项断言失败\n";
         return 1;

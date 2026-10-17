@@ -56,6 +56,7 @@ TestInstaller --out LikesProgram.hdd \
 | `--kernel-path PATH` | 覆盖内核路径（卷内绝对路径），优先于模板 |
 | `--raw 宿主路径[@偏移]` | 原始载荷，可重复；偏移须 4096 对齐且不与已安排区重叠 |
 | `--sector-bytes N` | Ext4 分区项（`0x83`）的 LBA 单位：`512`（默认）或 `4096`；0xEF 项固定按 512 单位写（双 ESP 布局需要），载荷一律 4096 对齐 |
+| `--degrade-without-record` | 布局描述里置“记录损坏时退到缺省集”的策略位（默认不置位）：不置位时记录损坏就停机等人工（`E-CORE-69`），置位时按缺省集启动并报 `E-CORE-56`，代价见[布局描述](../../../Docs/Specs/Baleen/布局描述.md) |
 | `--pad-to N` | 镜像总长向上对齐的粒度，默认 `0x100000`（1 MiB） |
 | `--stub-unchecked` | 免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用 |
 | `--manifest PATH` | 输出构建清单（JSON） |

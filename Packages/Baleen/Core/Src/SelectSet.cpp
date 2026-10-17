@@ -11,6 +11,7 @@
 #include <BootState.hpp>
 #include <Diagnostics.hpp>
 #include <Ed25519.hpp>
+#include <LayoutDescriptor.hpp>
 #include <Libc.hpp>
 #include <ManifestVerify.hpp>
 #include <PrintTarget.hpp>
@@ -21,11 +22,18 @@ namespace Baleen {
     namespace Core {
         namespace {
             // —— 本阶段失败与警告的编号：编号是稳定标识，文本可以润色 ——
-            constexpr Diagnostic kFailStateCorrupt{"E-CORE-69", "The boot state records are written but unusable"};
-            constexpr Diagnostic kWarnStateWrite{"E-CORE-70", "The boot state record wasn't written; continuing without a state transition"};
-            constexpr Diagnostic kWarnCandidate{"E-CORE-72", "The candidate kernel set didn't verify; using the confirmed set"};
-            constexpr Diagnostic kWarnCandidateTries{"E-CORE-73", "The candidate kernel set has no boot attempts left; using the confirmed set"};
-            constexpr Diagnostic kWarnRevocation{"E-CORE-75", "The revocation record is unusable; continuing with the persisted revocation facts"};
+            constexpr Diagnostic kFailStateCorrupt{BALEEN_STAGE_CODE("69"), "The boot state records are written but unusable: repair them with FixBootState --repair, or drop them with --clear"};
+            constexpr Diagnostic kWarnStateWrite{BALEEN_STAGE_CODE("70"), "The boot state record wasn't written; continuing without a state transition"};
+            // 回退目标可能是已知良好集，也可能是布局描述指定的缺省集（从来没有集被确认过时），
+            // 所以这两条只说"回退"，具体用了哪个集由随后的 Set= 与 E-CORE-59 给出
+            constexpr Diagnostic kWarnCandidate{BALEEN_STAGE_CODE("72"), "The candidate kernel set didn't verify; falling back"};
+            constexpr Diagnostic kWarnCandidateTries{BALEEN_STAGE_CODE("73"), "The candidate kernel set has no boot attempts left; falling back"};
+            constexpr Diagnostic kWarnRevocation{BALEEN_STAGE_CODE("75"), "The revocation record is unusable; continuing with the persisted revocation facts"};
+            constexpr Diagnostic kWarnNoConfirmedSet{BALEEN_STAGE_CODE("59"), "No confirmed set is recorded; starting the set the layout names"};
+            // 记录损坏时按介质策略退到缺省集：这条 WARN 要让人看出来"降级启动"而不是正常收场
+            constexpr Diagnostic kWarnDegradeWithoutRecord{BALEEN_STAGE_CODE("56"), "The boot state records are unusable; the medium allows starting the set the layout names"};
+            // 介质没有刷新原语：这次提交只有设备缓存的保证，掉电可能让它回退
+            constexpr Diagnostic kWarnNoFlushPrimitive{BALEEN_STAGE_CODE("71"), "The medium has no flush primitive; a power loss may roll back this boot's state transition"};
 
             // 吊销记录在系统卷里的固定落点：缺文件是正常形态，不是错误
             constexpr const char* kRevocationPath = "/LikesProgram/System/Revocation.rvk";
@@ -91,6 +99,15 @@ namespace Baleen {
                 if (c >= '0' && c <= '9') return c - '0';
                 if (c >= 'a' && c <= 'f') return c - 'a' + 10;
                 return -1;
+            }
+
+            // 提交状态记录：所有状态转换的唯一写入口
+            // 写成功后若介质没有覆盖本次写入的刷新原语，报一条持久化边界——
+            // 那次提交可能只落在设备缓存里，掉电会让它回退（回退一次转换，不损坏记录）
+            bool CommitState(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const BootState::Record& record, uint64_t& generation) {
+                if (!BootState::Write(medium, stateOffset, stateBytes, record, generation)) return false;
+                if (!medium.HasFlushPrimitive()) WriteDiagnostic(PrintTargets::Tag::Warn, kWarnNoFlushPrimitive);
+                return true;
             }
 
             // 把路径最后一段按 64 位十六进制解析成 BuildId；失败返回 false
@@ -169,7 +186,7 @@ namespace Baleen {
                 }
                 if (write) {
                     uint64_t generation = 0;
-                    if (!BootState::Write(medium, stateOffset, stateBytes, next, generation))
+                    if (!CommitState(medium, stateOffset, stateBytes, next, generation))
                         WriteDiagnostic(PrintTargets::Tag::Warn, kWarnStateWrite);
                 }
                 return Diagnostic{};
@@ -198,11 +215,13 @@ namespace Baleen {
                 BootState::Record next = record;
                 next.state = BootState::State::Trying;
                 next.triesRemaining = static_cast<uint8_t>(record.triesRemaining - 1);
+                // 已试次数只增：断电丢掉一次提交时它不会倒退，排障时能看出“这一版试过几次”
+                next.triesDone = record.triesDone == 255 ? 255 : static_cast<uint8_t>(record.triesDone + 1);
                 next.attemptId = 0;   // 由写入代次填出
                 next.revocation = revocation;   // 状态转换时一并固化吊销事实
                 if (facts.securityVersion > record.seenSecurityVersion) next.seenSecurityVersion = facts.securityVersion;
                 uint64_t generation = 0;
-                if (!BootState::Write(medium, stateOffset, stateBytes, next, generation)) {
+                if (!CommitState(medium, stateOffset, stateBytes, next, generation)) {
                     WriteDiagnostic(PrintTargets::Tag::Warn, kWarnStateWrite);
                     return SelectFallback(fs, medium, stateOffset, stateBytes, setRoot, layoutKernelPath, revocation, record, selected, false);
                 }
@@ -213,6 +232,20 @@ namespace Baleen {
                 selected.verified = true;
                 selected.attemptId = generation;
                 return Diagnostic{};
+            }
+
+            // 已知良好集：有良好集就验证并选它，没有（全零）就启动布局描述指定的缺省集
+            // 这条规则只有一个判定：候选失败回退与 Failed 稳态都要走它——出厂介质上第一次更新就失败时
+            // 记录里从来没有良好集，若此时按“良好集”去开 /KernelSets/000…/ 会把整台机器锁死
+            Diagnostic SelectGoodSet(Storage::FileSystem& fs, Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const char* setRoot, const char* layoutKernelPath, const Revocation::Facts& revocation, const BootState::Record& record, SelectedSet& selected) {
+                uint8_t any = 0;
+                for (uint32_t i = 0; i < 32; ++i) any |= record.confirmedBuildId[i];
+                // 没有已知良好集时启动缺省集：把设备已见最高版本一起传下去，缺省集也受防回滚比较约束
+                if (any == 0) {
+                    WriteDiagnostic(PrintTargets::Tag::Warn, kWarnNoConfirmedSet);
+                    return SelectDefault(fs, record.seenSecurityVersion, layoutKernelPath, revocation, selected);
+                }
+                return SelectConfirmed(fs, medium, stateOffset, stateBytes, setRoot, revocation, record, selected);
             }
 
             // 回退已知良好集：写 Failed（可选）后验证并选择良好集；没有良好集时启动缺省集
@@ -227,18 +260,14 @@ namespace Baleen {
                     next.triesRemaining = 0;
                     next.revocation = revocation;
                     uint64_t generation = 0;
-                    if (BootState::Write(medium, stateOffset, stateBytes, next, generation)) current = next;
+                    if (CommitState(medium, stateOffset, stateBytes, next, generation)) current = next;
                     else WriteDiagnostic(PrintTargets::Tag::Warn, kWarnStateWrite);
                 }
-                uint8_t any = 0;
-                for (uint32_t i = 0; i < 32; ++i) any |= record.confirmedBuildId[i];
-                // 没有已知良好集时启动缺省集：把设备已见最高版本一起传下去，缺省集也受防回滚比较约束
-                if (any == 0) return SelectDefault(fs, current.seenSecurityVersion, layoutKernelPath, revocation, selected);
-                return SelectConfirmed(fs, medium, stateOffset, stateBytes, setRoot, revocation, current, selected);
+                return SelectGoodSet(fs, medium, stateOffset, stateBytes, setRoot, layoutKernelPath, revocation, current, selected);
             }
         }
 
-        Diagnostic SelectKernelSet(Storage::FileSystem& fs, Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const char* layoutKernelPath, SelectedSet& selected) {
+        Diagnostic SelectKernelSet(Storage::FileSystem& fs, Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const char* layoutKernelPath, uint32_t layoutFlags, SelectedSet& selected) {
             selected = SelectedSet{};
 
             // 吊销记录：系统卷里的签名记录。缺文件是正常形态；不可用只报 WARN 后继续，
@@ -252,10 +281,18 @@ namespace Baleen {
             char setRoot[kSetPathBytes] = {};
             if (!DeriveSetRoot(layoutKernelPath, setRoot)) return SelectDefault(fs, 0, layoutKernelPath, fromRecord, selected);
 
-            // 状态记录：损坏不猜测目标集；空区域或没有状态区按缺省集直启
+            // 状态记录：损坏默认不猜测目标集；空区域或没有状态区按缺省集直启
             BootState::Record record;
             const BootState::ReadResult read = BootState::Read(medium, stateOffset, stateBytes, record);
-            if (read == BootState::ReadResult::Corrupt) return kFailStateCorrupt;
+            if (read == BootState::ReadResult::Corrupt) {
+                // 介质可以在布局描述里声明"记录坏了也退到缺省集"（kFlagDegradeWithoutRecord）。
+                // 那条路要付出两样东西：设备已见最高安全版本与记录里的吊销并集都随记录一起丢了，
+                // 因此防回滚只剩内嵌下限与系统卷里的签名吊销记录；所以默认不这么做，
+                // 只有介质侧显式声明时才降级，并且必须留下一条 WARN 让降级可见
+                if ((layoutFlags & LayoutDescriptor::kFlagDegradeWithoutRecord) == 0) return kFailStateCorrupt;
+                WriteDiagnostic(PrintTargets::Tag::Warn, kWarnDegradeWithoutRecord);
+                return SelectDefault(fs, 0, layoutKernelPath, fromRecord, selected);
+            }
             if (read != BootState::ReadResult::Ok) return SelectDefault(fs, 0, layoutKernelPath, fromRecord, selected);
 
             // 持久事实并入签名记录：记录被删除、损坏或回滚成旧纪元都不解除已经落地的吊销
@@ -265,7 +302,9 @@ namespace Baleen {
             switch (record.state) {
                 case BootState::State::Confirmed:
                 case BootState::State::Failed:
-                    return SelectConfirmed(fs, medium, stateOffset, stateBytes, setRoot, revocation, record, selected);
+                    // 两种稳态都走同一条“有良好集就选它、没有就启动缺省集”的规则：
+                    // Failed 是没有待试候选的正常收场，出厂介质上可能从来没有良好集
+                    return SelectGoodSet(fs, medium, stateOffset, stateBytes, setRoot, layoutKernelPath, revocation, record, selected);
                 case BootState::State::Pending:
                 case BootState::State::Trying:
                     return SelectCandidate(fs, medium, stateOffset, stateBytes, setRoot, layoutKernelPath, revocation, record, selected);

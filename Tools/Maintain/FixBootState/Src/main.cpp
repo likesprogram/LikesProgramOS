@@ -96,7 +96,7 @@ namespace {
         uint64_t offset = kDefaultStateOffset;   // 状态区域偏移
         uint32_t bytes = kDefaultStateBytes;     // 状态区域长度
         bool report = false;        // 只报告
-        bool clear = false;         // 清零两份副本
+        bool clear = false;         // 清零全部槽位
         bool repair = false;        // 按有效副本修复
         bool acceptSeen = false;    // 人工下调已见最高安全版本
         uint64_t acceptedVersion = 0;   // 接受的安全版本
@@ -118,8 +118,8 @@ namespace {
             "  --image   镜像或整盘设备路径（不可写时只允许 --report）\n"
             "  --offset  状态区域偏移，默认 0x21000\n"
             "  --bytes   状态区域长度，默认 4096\n"
-            "  --report  只报告：两份副本各自的结论、选中记录与全部字段\n"
-            "  --clear   受控恢复：清零两份副本，回到出厂形态（选版按无记录直启缺省集）\n"
+            "  --report  只报告：每个槽位各自的结论、选中记录与全部字段\n"
+            "  --clear   受控恢复：清零全部槽位，回到出厂形态（选版按无记录直启缺省集）\n"
             "  --repair  受控恢复：用一份有效副本重建损坏副本，代次加一\n"
             "  --accept-seen <版本>  人工接受：把已见最高安全版本下调到该值（防回滚的唯一例外）\n"
             "  --publish --build-id <64 位十六进制> --digest <64 位十六进制>\n"
@@ -262,22 +262,27 @@ namespace {
         return text.empty() ? "none" : text;
     }
 
-    // 报告：两份副本的结论、选中记录与全部字段
+    // 报告：每个槽位的结论、选中记录与全部字段
+    // 槽位名按 A..H 打印：区域切成 8 个 512 字节槽位，提交一次写其中一个
     void Report(const BootState::Inspection& inspection) {
-        std::cout << "  副本 A：" << StatusName(inspection.copyA.status);
-        if (inspection.copyA.status == CopyStatus::Valid) std::cout << " 代次=" << inspection.copyA.generation;
-        std::cout << "\n  副本 B：" << StatusName(inspection.copyB.status);
-        if (inspection.copyB.status == CopyStatus::Valid) std::cout << " 代次=" << inspection.copyB.generation;
+        std::cout << "  槽位：";
+        for (uint32_t slot = 0; slot < BootState::kSlots; ++slot) {
+            std::cout << static_cast<char>('A' + slot) << "=" << StatusName(inspection.slots[slot].status);
+            if (inspection.slots[slot].status == CopyStatus::Valid) std::cout << "(" << inspection.slots[slot].generation << ")";
+            if (slot + 1 != BootState::kSlots) std::cout << " ";
+        }
         std::cout << "\n  区域结论：" << ResultName(inspection.result) << "\n";
         if (inspection.result != ReadResult::Ok) {
-            if (inspection.result == ReadResult::Corrupt) std::cout << "  两份副本都不可用：不猜目标集，可用 --repair 修复或 --clear 清零\n";
+            if (inspection.result == ReadResult::Corrupt) std::cout << "  没有可用记录：不猜目标集，可用 --repair 修复或 --clear 清零\n";
             return;
         }
         const auto& record = inspection.record;
         std::cout << "  状态=" << StateName(record.state) << " 代次=" << record.generation
                   << " 已见安全版本=" << record.seenSecurityVersion
                   << " 尝试身份=" << record.attemptId
-                  << " 剩余尝试=" << static_cast<unsigned>(record.triesRemaining) << "\n";
+                  << " 剩余尝试=" << static_cast<unsigned>(record.triesRemaining)
+                  // 已试次数只增：它是对账用的——断电丢过一次提交时，这个数会露出来
+                  << " 已试次数=" << static_cast<unsigned>(record.triesDone) << "\n";
         std::cout << "  已知良好集=" << HexBytes(record.confirmedBuildId, 32) << "\n";
         std::cout << "  候选集=" << HexBytes(record.candidateBuildId, 32) << "\n";
         std::cout << "  吊销事实：纪元=" << record.revocation.epoch

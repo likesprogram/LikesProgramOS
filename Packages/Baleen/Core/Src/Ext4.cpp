@@ -1,5 +1,5 @@
 /* Ext4.cpp
-    BaleenCore 的 Ext4 只读最小实现：superblock、块组描述符、inode、extent 树与线性目录
+    BaleenCore 的 Ext4 只读最小实现：superblock、块组描述符、inode、extent 树、线性目录查找与遍历
 
     结构字段依据 Ext4 Disk Layout（见 Docs/Specs/Common/文件系统抽象与VFS.md 第八节）
     只做读取：不写卷、不回放日志、不分配内存；拒绝清单见 Storage/Ext4Features.hpp
@@ -90,12 +90,18 @@ namespace Baleen {
             uint32_t ShiftOf(uint32_t value) {
                 return static_cast<uint32_t>(__builtin_ctz(value));
             }
+
+            // 是不是 "." 与 ".." 这两个自指项：统一路径的分量不含它们，目录遍历不把它们当目录项交出
+            bool IsSelfEntry(const char* name, uint32_t nameBytes) {
+                if (nameBytes == 1 && name[0] == '.') return true;
+                return nameBytes == 2 && name[0] == '.' && name[1] == '.';
+            }
         }
 
         Storage::FileSystemCaps Ext4FileSystem::Caps() const {
             Storage::FileSystemCaps caps;
             caps.writable = false;
-            caps.directoryListing = false;
+            caps.directoryListing = true;
             caps.symlinks = false;
             caps.nameCase = Storage::NameCase::Sensitive;
             return caps;
@@ -437,6 +443,54 @@ namespace Baleen {
             if (type == kModeDirectory) return Storage::Error::IsDirectory;
             if (type != kModeRegular) return Storage::Error::NotSupported;
             return ReadInodeBytes(inode, offset, buffer, bytes, read);
+        }
+
+        Storage::Error Ext4FileSystem::ReadDirectory(const Storage::FileId& id, uint64_t& start, char* name, uint32_t nameBytes, uint32_t& nameLength, Storage::FileInfo& info) {
+            nameLength = 0;
+            if (!m_mounted) return Storage::Error::InvalidArgument;
+            if (name == nullptr || nameBytes == 0) return Storage::Error::InvalidArgument;
+            Inode dirInode;
+            if (const Storage::Error error = ReadInode(id.value, dirInode); error != Storage::Error::Ok) return error;
+            if ((dirInode.mode & kModeTypeMask) != kModeDirectory) return Storage::Error::NotDirectory;
+            if ((dirInode.flags & kInodeFlagIndex) != 0) return Storage::Error::NotSupported;   // htree 索引目录不在最小范围内
+            // 游标是目录数据的字节偏移：每次从它所在的那一块起，交出一个合格目录项
+            while (start < dirInode.bytes) {
+                // 块大小是 2 的幂：用位与取块基址，不牵入 64 位除法（32 位目标没有 libgcc）
+                const uint64_t blockBase = start & ~static_cast<uint64_t>(m_blockBytes - 1);
+                uint32_t got = 0;
+                if (const Storage::Error error = ReadInodeBytes(dirInode, blockBase, m_blockBuffer, m_blockBytes, got); error != Storage::Error::Ok) return error;
+                if (got < kDirEntryBytes) return Storage::Error::NotFound;   // 连定长部分都读不出：遍历到此为止
+                const uint32_t limit = got;
+                uint32_t cursor = static_cast<uint32_t>(start - blockBase);
+                while (cursor + kDirEntryBytes <= limit) {
+                    const uint32_t ino = Get32(m_blockBuffer + cursor);
+                    const uint32_t recLen = Get16(m_blockBuffer + cursor + 4);
+                    const uint32_t nameLen = m_blockBuffer[cursor + 6];
+                    // 与查找同一条判据：长度按 4 对齐、落在本块内，名字放得进本项
+                    if (recLen < kDirEntryBytes || (recLen & 3) != 0 || cursor + recLen > limit) return Storage::Error::Corrupt;
+                    const bool usable = ino != 0 && nameLen != 0 && nameLen <= recLen - kDirEntryBytes;
+                    if (usable) {
+                        const char* const entryName = reinterpret_cast<const char*>(m_blockBuffer + cursor + kDirEntryBytes);
+                        if (!IsSelfEntry(entryName, nameLen)) {
+                            // 名字先拷出来再取子项事实：取事实会复用实例内的块缓冲
+                            if (nameLen + 1 > nameBytes) return Storage::Error::NameTooLong;   // 不推进游标，换大缓冲可以重试
+                            for (uint32_t i = 0; i < nameLen; ++i) name[i] = entryName[i];
+                            name[nameLen] = '\0';
+                            Storage::FileInfo child{};
+                            if (const Storage::Error error = StatId(Storage::FileId{ino}, child); error != Storage::Error::Ok) return error;
+                            nameLength = nameLen;
+                            info = child;
+                            start = blockBase + cursor + recLen;
+                            return Storage::Error::Ok;
+                        }
+                    }
+                    cursor += recLen;
+                }
+                // 本块剩下的一整段里没有合格目录项：推进到本块之后继续
+                start = blockBase + limit;
+                if (got < m_blockBytes) break;   // 目录数据到此为止
+            }
+            return Storage::Error::NotFound;
         }
     }
 }

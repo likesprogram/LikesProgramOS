@@ -1,9 +1,9 @@
 /* Ext4.hpp
-    BaleenCore 的 Ext4 只读最小实现：识别并挂载卷、按路径查找、按 extent 读常规文件
+    BaleenCore 的 Ext4 只读最小实现：识别并挂载卷、按路径查找、按 extent 读常规文件、按游标列目录
 
     能力边界见 Docs/Specs/Baleen/README.md 第五节：识别 superblock 与特性标志、读块组描述符
-    与 inode、走 extent 树、解析线性目录项、读常规文件；不支持的特性、htree 索引目录、
-    符号链接与内联数据都明确拒绝，不做兼容性猜测
+    与 inode、走 extent 树、解析线性目录项、读常规文件、列线性目录；不支持的特性、
+    htree 索引目录、符号链接与内联数据都明确拒绝，不做兼容性猜测
     卷格式的接受与拒绝清单取 Packages/Common/Include/Storage/Ext4Features.hpp，与内核实现同源
     无运行库、不动态分配：缓冲都是实例内的固定数组，实例由调用方就地构造
 */
@@ -31,10 +31,16 @@ namespace Baleen {
             void Unmount() override;
             // 格式名，诊断用
             const char* Format() const override { return "ext4"; }
-            // 能力：只读，不做目录遍历、不跟随符号链接，名字逐字节比较
+            // 能力：只读、支持线性目录遍历，不跟随符号链接，名字逐字节比较
             Storage::FileSystemCaps Caps() const override;
             // 读常规文件：按 extent 映射逐块读取，跨越文件尾时按实际长度回报
             Storage::Error Read(const Storage::FileId& id, uint64_t offset, void* buffer, uint32_t bytes, uint32_t& read) override;
+            // 目录遍历：从 start 起交出一个目录项，名字写入 name，游标推进到下一项
+            // 游标是目录数据的字节偏移：调用方从 0 开始，把上一次的 start 原样传回，遍历结束返回 NotFound
+            // "." 与 ".." 不作为目录项交出——统一路径的分量不含它们，目录项本身也不带来新信息
+            // name 要放得下名字与结尾的空字符，放不下返回 NameTooLong 且不推进游标
+            // 符号链接与非常规、非目录项返回 NotSupported，不静默跳过；htree 索引目录返回 NotSupported
+            Storage::Error ReadDirectory(const Storage::FileId& id, uint64_t& start, char* name, uint32_t nameBytes, uint32_t& nameLength, Storage::FileInfo& info) override;
             // 卷标识（superblock 的 s_uuid，16 字节）；未挂载返回空
             const uint8_t* Uuid() const { return m_mounted ? m_uuid : nullptr; }
             // 卷内逻辑块大小；未挂载返回 0

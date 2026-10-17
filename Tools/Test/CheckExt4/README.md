@@ -12,11 +12,12 @@ Tools/Bin/CheckExt4 --work /tmp/checkext4 --keep
 
 ## 检查内容
 
-**真实卷夹具（19 项用例）**：用 `mke2fs` 生成 32 MiB、4096 字节块的 Ext4 卷，根目录内容由工具写出的文件树填充：
+**真实卷夹具（25 项用例）**：用 `mke2fs` 生成 32 MiB、4096 字节块的 Ext4 卷，根目录内容由工具写出的文件树填充：
 
 - 挂载与卷事实：块大小、inode 与块计数、卷标识（与 `mkfs` 指定的 UUID 逐字节一致）、能力位、根目录
 - 按路径读取并与原文件逐字节比对：32 KiB 常规文件、`/System/Module.osm` 的 12345 字节奇数长度、空文件、4 MiB 大文件（跨多个窗口读盘）
 - 路径错误映射：不存在的路径 `NotFound`、中间项不是目录 `NotDirectory`、非绝对路径 `InvalidArgument`、`Stat` 传播解析错误
+- 目录遍历：内核集目录与根目录的目录项集合、类型与长度（`.` 与 `..` 不作为目录项交出）、游标推进与遍历结束、名字缓冲过小返回 `NameTooLong` 且不推进游标、对常规文件返回 `NotDirectory`、空缓冲与越界标识的错误映射
 - 故障注入：坏 superblock 魔数（`Corrupt`）、未知 `INCOMPAT` 位与明确拒绝的特性（`NotSupported`，含 `INLINE_DATA` 与 `BIGALLOC`）、缺失解析前提位（`FILETYPE` 与 `EXTENTS`，`NotSupported`）、64 位卷的高位块数非零（`NotSupported`）与描述符大小非 64（`Corrupt`）、非干净卷状态位（`NotSupported`）、块号越界（`Corrupt`）、错误卷偏移（`Corrupt`）、读盘失败（`Io`）
 - 块设备适配器：窗口中转（256 KiB 读拆成多次窗口读盘）、未对齐偏移与长度、空指针、越过容量、未绑定行为、非法绑定参数（非 2 的幂扇区大小、未对齐窗口）
 - 偏移视图：未对齐起点、零长度、越过容量、合法区间

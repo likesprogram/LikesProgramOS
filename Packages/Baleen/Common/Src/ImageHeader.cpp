@@ -73,13 +73,32 @@ namespace Baleen {
             {"E-CORE-51", kDigestMismatchText},
         };
 
+        // UEFI 阶段的编号：序号与前两个阶段一致（同号异前缀）
+        constexpr Diagnostic kUefiReasons[] = {
+            {"E-UEFI-40", kMagicText},
+            {"E-UEFI-41", kVersionText},
+            {"E-UEFI-42", kFlagsText},
+            {"E-UEFI-43", kDigestAlgorithmText},
+            {"E-UEFI-44", kBuildIdText},
+            {"E-UEFI-45", kReservedText},
+            {"E-UEFI-46", kEntryPointText},
+            {"E-UEFI-47", kMemoryText},
+            {"E-UEFI-48", kEntryRangeText},
+            {"E-UEFI-49", kEntryPrefixText},
+            {"E-UEFI-50", kDigestCoverageText},
+            {"E-UEFI-51", kDigestMismatchText},
+        };
+
         static_assert(sizeof(kStubReasons) / sizeof(kStubReasons[0]) == static_cast<uint32_t>(Reason::Count), "Stub 阶段的原因表与原因下标数量不符");
         static_assert(sizeof(kCoreReasons) / sizeof(kCoreReasons[0]) == static_cast<uint32_t>(Reason::Count), "BaleenCore 阶段的原因表与原因下标数量不符");
+        static_assert(sizeof(kUefiReasons) / sizeof(kUefiReasons[0]) == static_cast<uint32_t>(Reason::Count), "UEFI 阶段的原因表与原因下标数量不符");
 
         // 按阶段取编号条目
         Diagnostic Entry(ImageDiagStage stage, Reason reason) {
             const uint32_t index = static_cast<uint32_t>(reason);
-            return stage == ImageDiagStage::Stub ? kStubReasons[index] : kCoreReasons[index];
+            if (stage == ImageDiagStage::Stub) return kStubReasons[index];
+            if (stage == ImageDiagStage::Core) return kCoreReasons[index];
+            return kUefiReasons[index];
         }
 
         // 两段字节是否完全相同

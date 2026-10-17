@@ -14,6 +14,7 @@
 */
 
 #include <BootState.hpp>
+#include <LayoutDescriptor.hpp>
 #include <ManifestVerify.hpp>
 #include <SelectSet.hpp>
 
@@ -48,7 +49,7 @@ namespace {
     // 选版启用前的扁平落点：没有 KernelSets/ 标记，按缺省集直启
     constexpr const char* kFlatKernelPath = "/LikesProgram/System/LikesProgram.os";
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 40;
+    constexpr unsigned kCaseCount = 48;
     // 已跑用例数
     unsigned g_ran = 0;
 
@@ -132,6 +133,8 @@ namespace {
         Storage::Error Write(uint64_t offset, const void* buffer, uint32_t bytes) override {
             m_events.push_back('W');
             ++m_writes;
+            m_lastWriteBytes = bytes;
+            m_lastWriteOffset = offset;
             if (!m_writable) return Storage::Error::ReadOnly;
             if (!InRange(offset, bytes)) return Storage::Error::InvalidArgument;
             if (m_failWrite) return Storage::Error::Io;
@@ -146,6 +149,9 @@ namespace {
             if (m_failFlush) return Storage::Error::Io;
             return Storage::Error::Ok;
         }
+        // 设置是否有刷新原语：默认 true（内存介质提交即持久），false 模拟 BIOS 侧 USB / NVMe
+        void SetFlushPrimitive(bool value) { m_flushPrimitive = value; }
+        bool HasFlushPrimitive() const override { return m_flushPrimitive; }
         // 注入读失败
         void FailRead(bool value) { m_failRead = value; }
         // 注入写失败
@@ -158,6 +164,9 @@ namespace {
         unsigned Reads() const { return m_reads; }
         // 写尝试次数：包含返回失败的尝试
         unsigned Writes() const { return m_writes; }
+        // 最近一次写的长度与落点：用于核对"一次提交只写一个扇区、且按扇区对齐"
+        uint32_t LastWriteBytes() const { return m_lastWriteBytes; }
+        uint64_t LastWriteOffset() const { return m_lastWriteOffset; }
         // 刷新调用次数：包含返回失败的调用
         unsigned Flushes() const { return m_flushes; }
         // 操作序列：'W' 写、'F' 刷新、'R' 读，用于核对写入顺序
@@ -181,8 +190,11 @@ namespace {
         bool m_failWrite = false;   // 写失败注入
         bool m_failFlush = false;   // 刷盘失败注入
         bool m_dropWrite = false;   // “写成功但不落盘”注入
+        bool m_flushPrimitive = true;   // 是否有刷新原语
         unsigned m_reads = 0;       // 读调用次数
         unsigned m_writes = 0;      // 写尝试次数
+        uint32_t m_lastWriteBytes = 0;    // 最近一次写的长度
+        uint64_t m_lastWriteOffset = 0;   // 最近一次写的落点
         unsigned m_flushes = 0;     // 刷新调用次数
         std::vector<char> m_events; // 操作序列
     };
@@ -292,9 +304,9 @@ namespace {
         const std::vector<DiagLine>& Diagnostics() const { return m_diagnostics; }
         // 清单验证的调用记录
         const std::vector<VerifyCall>& Calls() const { return m_calls; }
-        // 跑一次选版
-        Baleen::Diagnostic Select(const char* layoutKernelPath, Baleen::Core::SelectedSet& selected, uint64_t stateOffset = kStateOffset, uint32_t stateBytes = kStateBytes) {
-            return Baleen::Core::SelectKernelSet(m_fileSystem, m_medium, stateOffset, stateBytes, layoutKernelPath, selected);
+        // 跑一次选版：layoutFlags 默认 0（缺省不降级），要测介质策略位时显式传位
+        Baleen::Diagnostic Select(const char* layoutKernelPath, Baleen::Core::SelectedSet& selected, uint32_t layoutFlags = 0, uint64_t stateOffset = kStateOffset, uint32_t stateBytes = kStateBytes) {
+            return Baleen::Core::SelectKernelSet(m_fileSystem, m_medium, stateOffset, stateBytes, layoutKernelPath, layoutFlags, selected);
         }
         // 按生产写入方的同一套接口写一份记录：开发期对 Updater / Init 的替身
         bool WriteRecord(const Record& record, uint64_t& generation) {
@@ -304,9 +316,9 @@ namespace {
         BootState::ReadResult ReadRecord(Record& record) {
             return BootState::Read(m_medium, kStateOffset, kStateBytes, record);
         }
-        // 副本级检查：两份副本各自的结论与选中记录
+        // 槽位级检查：每个槽位各自的结论与选中记录
         BootState::Inspection InspectRecords() { return BootState::Inspect(m_medium, kStateOffset, kStateBytes); }
-        // 受控恢复：清零两份副本
+        // 受控恢复：清零全部槽位
         bool ClearArea() { return BootState::Clear(m_medium, kStateOffset, kStateBytes); }
         // 受控恢复：按有效副本修复
         bool RepairArea(uint64_t& generation) { return BootState::Repair(m_medium, kStateOffset, kStateBytes, generation); }
@@ -349,7 +361,7 @@ namespace {
 
     // 夹具侧的副本构造：按规格第二节的字节表拼接 2048 字节副本，校验和用夹具自己的 CRC-32
     // 生产代码不会产生字段违规的记录，构造这类副本是为了核对读取方的逐项校验
-    Bytes RawCopy(const Record& record, uint8_t stateValue, uint16_t flags, uint32_t reserved, bool checksumCorrect) {
+    Bytes RawCopy(const Record& record, uint8_t stateValue, uint8_t flags, uint32_t reserved, bool checksumCorrect) {
         Bytes copy(BootState::kCopyBytes, 0);
         Put32(copy, 0x000, 0x54534C42u);                    // Magic "BLST"
         Put16(copy, 0x004, BootState::kVersion);            // Version
@@ -357,7 +369,8 @@ namespace {
         Put64(copy, 0x008, record.generation);              // Generation
         copy[0x010] = stateValue;                           // State
         copy[0x011] = record.triesRemaining;                // TriesRemaining
-        Put16(copy, 0x012, flags);                          // Flags
+        copy[0x012] = record.triesDone;                     // TriesDone（版本 3 起）
+        copy[0x013] = flags;                                // Flags（版本 3 起是 8 位）
         Put32(copy, 0x014, reserved);                       // Reserved
         Put64(copy, 0x018, record.attemptId);               // AttemptId
         std::memcpy(copy.data() + 0x020, record.confirmedBuildId, 32);
@@ -449,7 +462,7 @@ namespace {
         Require(fixture.Medium().Writes() == 0, "读失败不该写盘");
     }
 
-    // 首次写入落副本 A、代次为 1，写入前区域必须是空的
+    // 首次写入落槽位 A（第一个未写过的槽位）、代次为 1，写入前区域必须是空的
     void CaseFirstWriteLandsInCopyA() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -458,13 +471,13 @@ namespace {
         Require(fixture.WriteRecord(record, generation), "空区域首次写入必须成立");
         Require(generation == 1, "空区域首次写入的代次必须是 1，实际 " + std::to_string(generation));
         Require(fixture.Medium().Writes() == 1, "首次写入只允许一次写调用");
-        const Bytes copyA = fixture.Medium().Slice(kStateOffset, 4);
-        const Bytes copyB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes, 4);
-        Require(std::memcmp(copyA.data(), "BLST", 4) == 0, "首次写入必须落在副本 A");
-        Require(std::memcmp(copyB.data(), "\0\0\0\0", 4) == 0, "首次写入不该碰副本 B");
+        const Bytes slotA = fixture.Medium().Slice(kStateOffset, 4);
+        const Bytes slotB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes, 4);
+        Require(std::memcmp(slotA.data(), "BLST", 4) == 0, "首次写入必须落在槽位 A");
+        Require(std::memcmp(slotB.data(), "\0\0\0\0", 4) == 0, "首次写入不该碰槽位 B");
     }
 
-    // 第二次写入落非活动副本 B、代次为 2；两份有效时读取取代次更大的一份
+    // 第二次写入落槽位 B（下一个未写过的槽位）、代次为 2；读取取代次最高的槽位
     void CaseSecondWriteRotatesToCopyB() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -474,37 +487,36 @@ namespace {
         Require(fixture.WriteRecord(pending, generation), "第二份记录写入失败");
         Require(generation == 2, "第二份记录的代次必须是 2，实际 " + std::to_string(generation));
         Record read;
-        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "两份副本里必须能读出记录");
-        Require(read.generation == 2 && read.state == State::Pending, "读取必须取代次更大的副本");
-        const Bytes copyB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes, 4);
-        Require(std::memcmp(copyB.data(), "BLST", 4) == 0, "第二次写入必须落在副本 B");
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "槽位里必须能读出记录");
+        Require(read.generation == 2 && read.state == State::Pending, "读取必须取代次最高的槽位");
+        const Bytes slotB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes, 4);
+        Require(std::memcmp(slotB.data(), "BLST", 4) == 0, "第二次写入必须落在槽位 B");
     }
 
-    // 第三次写入落回代次较小的副本 A、代次为 3：写入永不覆盖当前有效副本
-    void CaseThirdWriteRotatesBackToCopyA() {
+    // 槽位环形推进：未写过的槽位优先，全部写满之后回到代次最低的那个（最旧的）
+    // 这条是掉电安全的依据：任何一次提交都不覆盖当前最新的那一份
+    void CaseWriteRotatesThroughSlots() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
         uint64_t generation = 0;
-        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "第一份记录写入失败");
-        Require(fixture.WriteRecord(CandidateRecord(State::Pending, Id(0x22).data(), confirmed.data(), BootState::kDefaultTries), generation), "第二份记录写入失败");
-        Record failed = CandidateRecord(State::Failed, Id(0x22).data(), confirmed.data(), 0);
-        Require(fixture.WriteRecord(failed, generation), "第三份记录写入失败");
-        Require(generation == 3, "第三份记录的代次必须是 3，实际 " + std::to_string(generation));
-        Record read;
-        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "两份副本里必须能读出记录");
-        Require(read.generation == 3 && read.state == State::Failed, "读取必须取代次最大的副本");
-        // 两份副本的代次分别是 1 / 2：第三份只能写代次较小的那份
-        const Bytes headA = fixture.Medium().Slice(kStateOffset + 0x008, 8);
-        const Bytes headB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes + 0x008, 8);
-        uint64_t generationA = 0, generationB = 0;
-        for (unsigned i = 0; i < 8; ++i) {
-            generationA |= static_cast<uint64_t>(headA[i]) << (8 * i);
-            generationB |= static_cast<uint64_t>(headB[i]) << (8 * i);
+        for (uint32_t i = 0; i < BootState::kSlots; ++i) {
+            Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "填槽写入失败");
+            Require(generation == i + 1, "第 " + std::to_string(i + 1) + " 次写入的代次必须是 " + std::to_string(i + 1));
         }
-        Require(generationA == 3 && generationB == 2, "第三份必须写代次较小的副本 A（A=" + std::to_string(generationA) + "，B=" + std::to_string(generationB) + "）");
+        // 第 9 次：所有槽位都有效，必须覆盖代次最低的那个（槽位 A）
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "第九次写入失败");
+        Require(generation == BootState::kSlots + 1, "第九次写入的代次必须是 " + std::to_string(BootState::kSlots + 1));
+        const auto readGeneration = [&fixture](uint32_t slot) {
+            const Bytes head = fixture.Medium().Slice(kStateOffset + slot * BootState::kCopyBytes + 0x008, 8);
+            uint64_t value = 0;
+            for (unsigned i = 0; i < 8; ++i) value |= static_cast<uint64_t>(head[i]) << (8 * i);
+            return value;
+        };
+        Require(readGeneration(0) == BootState::kSlots + 1, "第九次必须覆盖最旧的槽位 A");
+        Require(readGeneration(BootState::kSlots - 1) == BootState::kSlots, "写入永不覆盖代次最高的槽位");
     }
 
-    // 一份副本写坏：回落到另一份完整有效的副本（掉电语义：正在写的一份可能不完整）
+    // 一个槽位写坏：回落到其它完整有效的槽位（掉电语义：正在写的那一个可能不完整）
     void CaseOneCopyCorrupt() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -512,41 +524,151 @@ namespace {
         uint64_t generation = 0;
         Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "第一份记录写入失败");
         Require(fixture.WriteRecord(CandidateRecord(State::Pending, candidate.data(), confirmed.data(), BootState::kDefaultTries), generation), "第二份记录写入失败");
-        // 第二份落在副本 B：把它改坏，读取必须回落到副本 A 的 Confirmed 记录
-        Bytes copyB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes, BootState::kCopyBytes);
-        copyB[0x060] ^= 0xFF;
-        fixture.Medium().Patch(kStateOffset + BootState::kCopyBytes, copyB.data(), static_cast<uint32_t>(copyB.size()));
+        // 第二份落在槽位 B：把它改坏，读取必须回落到槽位 A 的 Confirmed 记录
+        Bytes slotB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes, BootState::kCopyBytes);
+        slotB[0x060] ^= 0xFF;
+        fixture.Medium().Patch(kStateOffset + BootState::kCopyBytes, slotB.data(), static_cast<uint32_t>(slotB.size()));
         Record read;
-        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "一份写坏时必须取另一份");
-        Require(read.generation == 1 && read.state == State::Confirmed, "回落到的记录必须是被写坏那份之外的另一份");
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "一个槽位写坏时必须取另一个");
+        Require(read.generation == 1 && read.state == State::Confirmed, "回落到的记录必须是被写坏那个槽位之外的另一份");
     }
 
-    // 两份副本都写坏：按记录损坏处理，不猜测目标集
+    // 只剩一个槽位有效仍能读出记录：这是把副本从 2 扩到 8 的收益——连续多次断电各毁一个也要毁到第 8 个
+    void CaseSevenSlotsCorrupt() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        uint64_t generation = 0;
+        for (uint32_t i = 0; i < BootState::kSlots; ++i) Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "填槽写入失败");
+        // 留下最后一个槽位，其余每一个都写成"有痕迹但没有可用记录"
+        for (uint32_t slot = 0; slot + 1 < BootState::kSlots; ++slot) {
+            Bytes damaged(BootState::kCopyBytes, 0);
+            damaged[0] = 0x42;
+            fixture.Medium().Patch(kStateOffset + slot * BootState::kCopyBytes, damaged.data(), static_cast<uint32_t>(damaged.size()));
+        }
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "只剩一个槽位有效时仍必须读出记录");
+        Require(read.generation == BootState::kSlots, "读出的必须是那个唯一有效槽位的记录");
+    }
+
+    // 全部槽位都写坏：按记录损坏处理，不猜测目标集
     void CaseBothCopiesCorrupt() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
         uint64_t generation = 0;
         Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "记录写入失败");
-        Bytes copyA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
-        copyA[0x030] ^= 0xFF;
-        fixture.Medium().Patch(kStateOffset, copyA.data(), static_cast<uint32_t>(copyA.size()));
-        Bytes copyB(BootState::kCopyBytes, 0);
-        copyB[0] = 0x42;           // 只有写入痕迹，没有可用记录
-        fixture.Medium().Patch(kStateOffset + BootState::kCopyBytes, copyB.data(), static_cast<uint32_t>(copyB.size()));
+        Bytes slotA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
+        slotA[0x030] ^= 0xFF;
+        fixture.Medium().Patch(kStateOffset, slotA.data(), static_cast<uint32_t>(slotA.size()));
+        for (uint32_t slot = 1; slot < BootState::kSlots; ++slot) {
+            Bytes damaged(BootState::kCopyBytes, 0);
+            damaged[0] = 0x42;           // 只有写入痕迹，没有可用记录
+            fixture.Medium().Patch(kStateOffset + slot * BootState::kCopyBytes, damaged.data(), static_cast<uint32_t>(damaged.size()));
+        }
         Record read;
-        Require(fixture.ReadRecord(read) == BootState::ReadResult::Corrupt, "两份都不可用必须判为损坏");
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Corrupt, "全部槽位都不可用必须判为损坏");
     }
 
-    // 两份有效但代次相等：视为写方违规，两份都不采用
+    // 最高代次出现两次：视为写方违规，哪一份都不采用
     void CaseEqualGenerations() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
         uint64_t generation = 0;
         Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "记录写入失败");
-        const Bytes copyA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
-        fixture.Medium().Patch(kStateOffset + BootState::kCopyBytes, copyA.data(), static_cast<uint32_t>(copyA.size()));
+        // 把槽位 A 的记录原样复制到槽位 B：两份代次相同且都有效
+        const Bytes slotA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
+        fixture.Medium().Patch(kStateOffset + BootState::kCopyBytes, slotA.data(), static_cast<uint32_t>(slotA.size()));
         Record read;
-        Require(fixture.ReadRecord(read) == BootState::ReadResult::Corrupt, "代次相等必须判为损坏");
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Corrupt, "最高代次出现两次必须判为损坏");
+    }
+
+    // 写中途断电：只落了头部的槽位一律不得被选中——哪怕它声称的代次最高
+    // 构造方式是"新一代记录的前 N 字节覆盖上去、尾部与校验和仍是旧内容"，
+    // 校验和因此对不上；这正是新记录的头落盘、其余没落的现场
+    void CaseTornCommitNeverChosen() {
+        // 边界取到 0xEB：记录有效长度 0xF0、校验和在 0xEC，越过它就不是撕裂而是完整写入
+        const uint32_t boundaries[] = {0, 1, 2, 4, 8, 16, 32, 64, 128, 192, 235};
+        for (const uint32_t torn : boundaries) {
+            Fixture fixture;
+            const auto confirmed = Id(0x11);
+            uint64_t generation = 0;
+            Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "干净记录写入失败");
+            // 新一代记录：代次 2、状态 Pending，校验和按完整记录算好（头部含代次字段）
+            Record newer = CandidateRecord(State::Pending, Id(0x22).data(), confirmed.data(), BootState::kDefaultTries);
+            newer.generation = 2;
+            const Bytes full = RawCopy(newer, static_cast<uint8_t>(State::Pending), 0, 0, true);
+            Bytes tornBytes(BootState::kCopyBytes, 0);
+            for (uint32_t i = 0; i < torn; ++i) tornBytes[i] = full[i];
+            fixture.Medium().Patch(kStateOffset + BootState::kCopyBytes, tornBytes.data(), static_cast<uint32_t>(tornBytes.size()));
+
+            Record read;
+            const auto result = fixture.ReadRecord(read);
+            Require(result == BootState::ReadResult::Ok, "撕裂长度 " + std::to_string(torn) + "：必须仍能读出干净的那一份");
+            Require(read.generation == 1 && read.state == State::Confirmed, "撕裂长度 " + std::to_string(torn) + "：绝不能按撕裂槽位声称的代次选中它");
+            const auto inspection = fixture.InspectRecords();
+            Require(inspection.slots[1].status != BootState::CopyStatus::Valid, "撕裂长度 " + std::to_string(torn) + "：撕裂槽位不得报有效");
+        }
+        // 反面边界：写满整条记录（含校验和）就不是撕裂，必须按完整记录接受
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "干净记录写入失败");
+        Record newer = CandidateRecord(State::Pending, Id(0x22).data(), confirmed.data(), BootState::kDefaultTries);
+        newer.generation = 2;
+        const Bytes full = RawCopy(newer, static_cast<uint8_t>(State::Pending), 0, 0, true);
+        fixture.Medium().Patch(kStateOffset + BootState::kCopyBytes, full.data(), static_cast<uint32_t>(full.size()));
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "写满整条记录时必须可读");
+        Require(read.generation == 2 && read.state == State::Pending, "写满整条记录时必须按新一代记录接受");
+    }
+
+    // 只有最后一个槽位完好、其余七个都只落了半条记录：仍要从那一个读出记录
+    void CaseTornHeadsElsewhereStillReads() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        uint64_t generation = 0;
+        for (uint32_t i = 0; i < BootState::kSlots; ++i) Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "填槽写入失败");
+        const Bytes last = fixture.Medium().Slice(kStateOffset + (BootState::kSlots - 1) * BootState::kCopyBytes, BootState::kCopyBytes);
+        for (uint32_t slot = 0; slot + 1 < BootState::kSlots; ++slot) {
+            Bytes torn(BootState::kCopyBytes, 0);
+            for (uint32_t i = 0; i < 32; ++i) torn[i] = last[i];          // 头 32 字节落盘，尾部与校验和是旧的
+            fixture.Medium().Patch(kStateOffset + slot * BootState::kCopyBytes, torn.data(), static_cast<uint32_t>(torn.size()));
+        }
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "七个槽位半条记录时仍必须读出记录");
+        Require(read.generation == BootState::kSlots, "读出的必须是唯一完好那个槽位的记录");
+    }
+
+    // 介质没有刷新原语时，持久化边界必须报到现场：提交可能只落在设备缓存里，掉电会回退那次转换
+    // 有原语的介质上不得报这条——否则每台机器每次启动都在喊狼来了
+    void CaseNoFlushPrimitiveReported() {
+        {
+            Fixture fixture;
+            fixture.Medium().SetFlushPrimitive(false);
+            const auto confirmed = Id(0x11);
+            const auto candidate = Id(0x22);
+            fixture.AddSet(confirmed.data(), 0);
+            fixture.AddSet(candidate.data(), 4);
+            uint64_t generation = 0;
+            Require(fixture.WriteRecord(CandidateRecord(State::Pending, candidate.data(), nullptr, BootState::kDefaultTries), generation), "Pending 写入失败");
+            Baleen::Core::SelectedSet selected;
+            Require(fixture.Select(KernelPath(candidate.data()).c_str(), selected).code == nullptr, "无原语介质上选版仍必须成立");
+            RequireDiagnostic(fixture, "E-CORE-71");
+            // 写入照常落盘：这条 WARN 说的是持久化边界，不是写失败
+            Record read;
+            Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Trying, "无原语介质上状态转换照常写盘");
+        }
+        {
+            Fixture fixture;   // 默认有刷新原语
+            const auto confirmed = Id(0x11);
+            const auto candidate = Id(0x22);
+            fixture.AddSet(confirmed.data(), 0);
+            fixture.AddSet(candidate.data(), 4);
+            uint64_t generation = 0;
+            Require(fixture.WriteRecord(CandidateRecord(State::Pending, candidate.data(), nullptr, BootState::kDefaultTries), generation), "Pending 写入失败");
+            Baleen::Core::SelectedSet selected;
+            Require(fixture.Select(KernelPath(candidate.data()).c_str(), selected).code == nullptr, "选版必须成立");
+            for (const auto& line : fixture.Diagnostics()) Require(std::string(line.code) != "E-CORE-71", "有原语的介质不该报持久化边界");
+        }
     }
 
     // 夹具按字节表构造的记录被生产读取方接受：两份 CRC-32 与字段偏移互验
@@ -578,7 +700,7 @@ namespace {
         };
         const auto makeBadChecksum = +[](Bytes& copy) { copy[0x0EC] ^= 0xFF; };
         const auto makeStateUnknown = +[](Bytes& copy) { copy[0x010] = 9; FixChecksum(copy); };
-        const auto makeFlags = +[](Bytes& copy) { Put16(copy, 0x012, 1); FixChecksum(copy); };
+        const auto makeFlags = +[](Bytes& copy) { copy[0x013] = 1; FixChecksum(copy); };
         const auto makeReserved = +[](Bytes& copy) { Put32(copy, 0x014, 1); FixChecksum(copy); };
         const auto makeReservedTail = +[](Bytes& copy) { copy[0x0D8] = 1; FixChecksum(copy); };
         const auto makeGenerationZero = +[](Bytes& copy) { Put64(copy, 0x008, 0); FixChecksum(copy); };
@@ -683,7 +805,7 @@ namespace {
         Require(!fixture.WriteRecord(CandidateRecord(State::Pending, Id(0x22).data(), confirmed.data(), BootState::kDefaultTries), generation), "读回不符必须返回不成立");
     }
 
-    // 副本级检查：报告两份副本各自的结论与选中记录，能指出坏的是哪一份
+    // 槽位级检查：报告每个槽位各自的结论与选中记录，能指出坏的是哪一个
     void CaseInspectCopies() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -691,20 +813,20 @@ namespace {
         Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data(), 5), generation), "记录写入失败");
         auto inspection = fixture.InspectRecords();
         Require(inspection.result == BootState::ReadResult::Ok, "一份有效时区域结论必须有效");
-        Require(inspection.copyA.status == BootState::CopyStatus::Valid && inspection.copyA.generation == 1, "副本 A 必须报告有效与代次 1");
-        Require(inspection.copyB.status == BootState::CopyStatus::NotWritten && inspection.copyB.generation == 0, "副本 B 必须报告未写过");
-        // 再写一份到副本 B，然后把副本 A 改坏：报告要指出坏的是哪一份
+        Require(inspection.slots[0].status == BootState::CopyStatus::Valid && inspection.slots[0].generation == 1, "槽位 A 必须报告有效与代次 1");
+        Require(inspection.slots[1].status == BootState::CopyStatus::NotWritten && inspection.slots[1].generation == 0, "槽位 B 必须报告未写过");
+        // 再写一份到槽位 B，然后把槽位 A 改坏：报告要指出坏的是哪一个槽位
         Require(fixture.WriteRecord(CandidateRecord(State::Pending, Id(0x22).data(), confirmed.data(), BootState::kDefaultTries), generation), "第二份记录写入失败");
-        Bytes copyA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
-        copyA[0x030] ^= 0xFF;
-        fixture.Medium().Patch(kStateOffset, copyA.data(), static_cast<uint32_t>(copyA.size()));
+        Bytes slotA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
+        slotA[0x030] ^= 0xFF;
+        fixture.Medium().Patch(kStateOffset, slotA.data(), static_cast<uint32_t>(slotA.size()));
         inspection = fixture.InspectRecords();
-        Require(inspection.copyA.status == BootState::CopyStatus::Invalid, "写坏的一份必须报告不可用");
-        Require(inspection.copyB.status == BootState::CopyStatus::Valid && inspection.copyB.generation == 2, "另一份必须报告有效与自身代次");
+        Require(inspection.slots[0].status == BootState::CopyStatus::Invalid, "写坏的那个槽位必须报告不可用");
+        Require(inspection.slots[1].status == BootState::CopyStatus::Valid && inspection.slots[1].generation == 2, "另一个槽位必须报告有效与自身代次");
         Require(inspection.result == BootState::ReadResult::Ok && inspection.record.generation == 2, "区域结论必须取有效的那一份");
     }
 
-    // 受控清零：两份副本清零、区域回到出厂形态；只读介质上拒绝
+    // 受控清零：全部槽位清零、区域回到出厂形态；只读介质上拒绝
     void CaseClearArea() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -714,12 +836,14 @@ namespace {
         Record read;
         Require(fixture.ReadRecord(read) == BootState::ReadResult::Empty, "清零后区域必须按空处理");
         const auto inspection = fixture.InspectRecords();
-        Require(inspection.copyA.status == BootState::CopyStatus::NotWritten && inspection.copyB.status == BootState::CopyStatus::NotWritten, "清零后两份副本都必须未写过");
+        bool allClear = true;
+        for (uint32_t slot = 0; slot < BootState::kSlots; ++slot) allClear = allClear && inspection.slots[slot].status == BootState::CopyStatus::NotWritten;
+        Require(allClear, "清零后全部槽位都必须未写过");
         Fixture readOnly(false);
         Require(!readOnly.ClearArea(), "只读介质上的清零必须失败");
     }
 
-    // 按有效副本修复：代次加一、两份都有效、记录内容不变；没有可用记录时拒绝
+    // 按有效记录修复：把每个不可用槽位都重建一遍，内容不变；没有可用记录时拒绝
     void CaseRepairCopies() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -731,15 +855,22 @@ namespace {
         Require(fixture.WriteRecord(pending, generation), "第二份记录写入失败");
         Record before;
         Require(fixture.ReadRecord(before) == BootState::ReadResult::Ok, "修复前必须能读出记录");
-        // 写坏代次较小的那份（副本 A，代次 1）：另一份（副本 B，代次 2）完好
-        Bytes copyA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
-        copyA[0x008] ^= 0xFF;
-        fixture.Medium().Patch(kStateOffset, copyA.data(), static_cast<uint32_t>(copyA.size()));
-        Require(fixture.InspectRecords().copyA.status == BootState::CopyStatus::Invalid, "夹具必须先把副本 A 写坏");
-        Require(fixture.RepairArea(generation), "有有效副本时必须能修复");
-        Require(generation == 3, "修复写入的代次必须是 3（两份最大值加一）");
+        // 写坏代次较小的那份（槽位 A，代次 1）：槽位 B 完好，其余槽位未写过
+        Bytes slotA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
+        slotA[0x008] ^= 0xFF;
+        fixture.Medium().Patch(kStateOffset, slotA.data(), static_cast<uint32_t>(slotA.size()));
+        Require(fixture.InspectRecords().slots[0].status == BootState::CopyStatus::Invalid, "夹具必须先把槽位 A 写坏");
+        Require(fixture.RepairArea(generation), "有有效记录时必须能修复");
         const auto inspection = fixture.InspectRecords();
-        Require(inspection.copyA.status == BootState::CopyStatus::Valid && inspection.copyB.status == BootState::CopyStatus::Valid, "修复后两份都必须有效");
+        bool allValid = true;
+        for (uint32_t slot = 0; slot < BootState::kSlots; ++slot) allValid = allValid && inspection.slots[slot].status == BootState::CopyStatus::Valid;
+        Require(allValid, "修复后全部槽位都必须有效（冗余恢复到满）");
+        // 修完的槽位代次互不相同：每次写抬一代，不会与源槽位撞代次（撞了就会判为损坏）
+        bool distinct = true;
+        for (uint32_t a = 0; a < BootState::kSlots; ++a) {
+            for (uint32_t b = a + 1; b < BootState::kSlots; ++b) distinct = distinct && inspection.slots[a].generation != inspection.slots[b].generation;
+        }
+        Require(distinct, "修复后各槽位代次必须互不相同");
         Require(inspection.record.state == before.state && inspection.record.seenSecurityVersion == before.seenSecurityVersion, "修复不得改变状态与已见版本");
         Require(inspection.record.triesRemaining == before.triesRemaining, "修复不得改变剩余尝试次数");
         Require(std::memcmp(inspection.record.candidateBuildId, candidate.data(), 32) == 0, "修复必须保留候选集");
@@ -747,11 +878,12 @@ namespace {
         Fixture empty;
         Require(!empty.RepairArea(ignored), "空区域不得修复");
         Fixture broken;
-        Bytes garbage(BootState::kCopyBytes, 0);
-        garbage[0] = 0x42;
-        broken.Medium().Patch(kStateOffset, garbage.data(), static_cast<uint32_t>(garbage.size()));
-        broken.Medium().Patch(kStateOffset + BootState::kCopyBytes, garbage.data(), static_cast<uint32_t>(garbage.size()));
-        Require(!broken.RepairArea(ignored), "两份都不可用时不得修复");
+        for (uint32_t slot = 0; slot < BootState::kSlots; ++slot) {
+            Bytes garbage(BootState::kCopyBytes, 0);
+            garbage[0] = 0x42;
+            broken.Medium().Patch(kStateOffset + slot * BootState::kCopyBytes, garbage.data(), static_cast<uint32_t>(garbage.size()));
+        }
+        Require(!broken.RepairArea(ignored), "全部槽位都不可用时不得修复");
     }
 
     // 人工接受：下调已见最高安全版本；抬高、相等或没有记录都拒绝
@@ -775,7 +907,7 @@ namespace {
     // 逐字节截断两个方向的写入，核对"任何时刻至少有一份完整有效副本"这条不变量；
     // 截断到记录有效长度（0xF0，含校验和）时新副本自身已完整，读取取代次更大的那一份
     void CasePowerLossDrill() {
-        // 方向一：副本 A 已有效（代次 1），向副本 B 写代次 2 的副本，逐字节截断
+        // 方向一：槽位 A 已有效（代次 1），向槽位 B 写代次 2 的槽位，逐字节截断
         {
             Fixture fixture;
             const auto confirmed = Id(0x11);
@@ -1125,6 +1257,90 @@ namespace {
         Require(fixture.Calls().size() == 1 && fixture.Calls().front().directory == SetDirectory(confirmed.data()), "Failed 只应验证已知良好集");
     }
 
+    // Failed 记录且没有已知良好集：不能去开 /KernelSets/000…/，必须回退到布局描述指定的缺省集
+    // 出厂介质上第一次更新就失败三次时会落到这个组合：那时从来没有集被确认过，
+    // 若按“已知良好集”去选，整台机器会永久起不来（真实介质上复现过，见 CheckAll 的失败注入与状态机多轮）
+    void CaseFailedWithoutConfirmed() {
+        Fixture fixture;
+        const auto candidate = Id(0x22);
+        const auto defaultId = Id(0x0D);
+        fixture.AddSet(candidate.data(), 4);
+        fixture.AddSet(defaultId.data(), 0);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(CandidateRecord(State::Failed, candidate.data(), nullptr, 0), generation), "Failed 记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected);
+        Require(reason.code == nullptr, "Failed 且无良好集时应回退缺省集：" + Text(reason));
+        RequireSelected(selected, defaultId.data(), 0);
+        RequireDiagnostic(fixture, "E-CORE-59");
+    }
+
+    // 一次提交只写一份副本，而一份副本就是一个 512 字节扇区：多扇区写被打断时不会波及另一份
+    void CaseCommitIsSingleSector() {
+        static_assert(BootState::kCopyBytes == 512, "一份副本必须是一个 512 字节扇区");
+        static_assert(BootState::kRecordBytes <= BootState::kCopyBytes, "记录必须落在一份副本内");
+        Fixture fixture;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(Id(0x11).data()), generation), "写入失败");
+        Require(fixture.Medium().Writes() == 1, "一次提交只允许一次写调用");
+        Require(fixture.Medium().LastWriteBytes() == BootState::kCopyBytes, "写的长度必须正好是一份副本");
+        Require(fixture.Medium().LastWriteOffset() % BootState::kCopyBytes == 0, "副本落点必须按副本长度对齐");
+    }
+
+    // 已试次数只增：每次试启动前进一次，次数用尽转 Failed 时保留；候选换新时清零
+    void CaseTriesDoneAdvances() {
+        Fixture fixture;
+        const auto candidate = Id(0x22);
+        fixture.AddSet(candidate.data(), 4);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(CandidateRecord(State::Pending, candidate.data(), nullptr, BootState::kDefaultTries), generation), "Pending 写入失败");
+        for (uint8_t expected = 1; expected <= BootState::kDefaultTries; ++expected) {
+            Baleen::Core::SelectedSet selected;
+            Require(fixture.Select(KernelPath(candidate.data()).c_str(), selected).code == nullptr, "试启动选版应成功");
+            Record read;
+            Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "记录应可读");
+            Require(read.triesDone == expected, "已试次数应随每次试启动前进");
+            Require(read.state == State::Trying, "未确认前应停在 Trying");
+        }
+        // 次数用尽：转 Failed 并保留已试次数
+        Baleen::Core::SelectedSet selected;
+        Require(fixture.Select(KernelPath(candidate.data()).c_str(), selected).code == nullptr, "次数用尽后应回退");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "记录应可读");
+        Require(read.state == State::Failed && read.triesDone == BootState::kDefaultTries, "Failed 应保留已试次数");
+    }
+
+    // 记录损坏时的两种收场：默认停机不猜目标集；介质在布局描述里声明了策略位才退到缺省集
+    void CaseDegradeWithoutRecordPolicy() {
+        const auto defaultId = Id(0x0D);
+        // 造一份"没有一个槽位可用"的区域：先写一份有效记录，再把整片区域写成不可验证的字节
+        const auto damage = [](Fixture& fixture) {
+            uint64_t generation = 0;
+            Require(fixture.WriteRecord(ConfirmedRecord(Id(0x11).data()), generation), "铺底记录写入失败");
+            Bytes area = fixture.Medium().Slice(kStateOffset, BootState::kAreaBytes);
+            for (auto& byte : area) byte = 0xFF;
+            fixture.Medium().Patch(kStateOffset, area.data(), static_cast<uint32_t>(area.size()));
+        };
+        {
+            Fixture fixture;
+            fixture.AddSet(defaultId.data(), 0);
+            damage(fixture);
+            Baleen::Core::SelectedSet selected;
+            const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected);
+            Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-69", "默认必须停机且不猜目标集");
+        }
+        {
+            Fixture fixture;
+            fixture.AddSet(defaultId.data(), 0);
+            damage(fixture);
+            Baleen::Core::SelectedSet selected;
+            const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected, Baleen::LayoutDescriptor::kFlagDegradeWithoutRecord);
+            Require(reason.code == nullptr, "声明策略位后应退到布局描述的缺省集：" + Text(reason));
+            RequireSelected(selected, defaultId.data(), 0);
+            RequireDiagnostic(fixture, "E-CORE-56");
+        }
+    }
+
     // 选版启用前的扁平缺省落点：直启、不读状态区域、不验证清单
     void CaseFlatDefaultPath() {
         Fixture fixture;
@@ -1171,25 +1387,26 @@ namespace {
         Case("空区域按无记录处理", CaseEmptyArea);
         Case("没有状态区域按无记录处理", CaseNoStateArea);
         Case("读状态区域失败按无记录处理", CaseStateReadFailure);
-        Case("首次写入落副本 A", CaseFirstWriteLandsInCopyA);
-        Case("第二次写入落副本 B", CaseSecondWriteRotatesToCopyB);
-        Case("第三次写入落回副本 A", CaseThirdWriteRotatesBackToCopyA);
-        Case("一份副本写坏仍取另一份", CaseOneCopyCorrupt);
-        Case("两份都写坏判为损坏", CaseBothCopiesCorrupt);
-        Case("两份有效但代次相等判为损坏", CaseEqualGenerations);
+        Case("首次写入落槽位 A", CaseFirstWriteLandsInCopyA);
+        Case("第二次写入落槽位 B", CaseSecondWriteRotatesToCopyB);
+        Case("槽位环形推进与最旧槽位复用", CaseWriteRotatesThroughSlots);
+        Case("一个槽位写坏仍取其它槽位", CaseOneCopyCorrupt);
+        Case("只剩一个槽位有效仍可读", CaseSevenSlotsCorrupt);
+        Case("全部槽位都写坏判为损坏", CaseBothCopiesCorrupt);
+        Case("最高代次出现两次判为损坏", CaseEqualGenerations);
         Case("夹具按字节表构造的记录被接受", CaseRawCopyAccepted);
         Case("字段违规的副本一律拒绝", CaseMalformedCopiesRejected);
         Case("代次全 FF 拒绝写入", CaseGenerationOverflow);
         Case("只读介质不进入候选", CaseReadOnlyMedium);
         Case("写失败不改动当前有效副本", CaseWriteFailureKeepsOtherCopy);
         Case("读回不符按写失败处理", CaseReadBackMismatch);
-        Case("副本级检查报告两份结论", CaseInspectCopies);
+        Case("槽位级检查逐个报告结论", CaseInspectCopies);
         Case("受控清零回到出厂形态", CaseClearArea);
-        Case("按有效副本修复且不改变内容", CaseRepairCopies);
+        Case("按有效记录修复全部坏槽位", CaseRepairCopies);
         Case("人工接受只允许下调已见版本", CaseAcceptSeenVersion);
         Case("发布候选：首次写入与保留既有状态", CasePublishCandidate);
         Case("提交确认：比较再提交", CaseConfirmAttempt);
-        Case("掉电演练：部分写入不破坏另一份副本", CasePowerLossDrill);
+        Case("掉电演练：逐字节截断不破坏有效记录", CasePowerLossDrill);
         Case("写入顺序为写-刷盘-读回", CaseWriteFlushReadOrder);
         Case("刷盘失败按写失败降级", CaseFlushFailure);
         Case("Confirmed 选已知良好集", CaseConfirmedSelects);
@@ -1206,6 +1423,13 @@ namespace {
         Case("无记录时缺省集只做下限检查", CaseDefaultSetWithoutRecord);
         Case("写不成立不进入候选", CaseCandidateWriteFailure);
         Case("Failed 直接选已知良好集", CaseFailedSelectsConfirmed);
+        Case("Failed 且无良好集回退缺省集", CaseFailedWithoutConfirmed);
+        Case("提交是单扇区写", CaseCommitIsSingleSector);
+        Case("无刷新原语时报告持久化边界", CaseNoFlushPrimitiveReported);
+        Case("写中途断电：撕裂槽位永不选中", CaseTornCommitNeverChosen);
+        Case("七个槽位半条记录仍可读", CaseTornHeadsElsewhereStillReads);
+        Case("已试次数只增", CaseTriesDoneAdvances);
+        Case("记录损坏的收场与介质策略位", CaseDegradeWithoutRecordPolicy);
         Case("扁平缺省落点直启", CaseFlatDefaultPath);
         Case("缺省路径过长停机", CaseDefaultPathTooLong);
         Require(g_ran == kCaseCount, "内部回归用例数量不符");

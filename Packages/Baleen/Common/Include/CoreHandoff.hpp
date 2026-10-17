@@ -19,7 +19,7 @@ namespace Baleen {
     // 与 Contract.inc 的 CORE_HANDOFF_* 是同一组取值，改了任一侧都会被下面的断言拦住
     struct CoreHandoffLayout {
         static constexpr uint32_t kMagic = 0x484E4C42;             // 'BLNH'
-        static constexpr uint32_t kVersion = 4;                    // 开发格式标记
+        static constexpr uint32_t kVersion = 1;                    // 未发布的开发格式标记
         static constexpr uint32_t kBytes = 84;                     // 结构长度
         static constexpr uint32_t kSectorBytes = 0x14;             // sectorBytes 字段
         static constexpr uint32_t kMemoryMap = 0x2C;               // memoryMap 指针

@@ -1,5 +1,8 @@
 /* main.cpp
-    MakePayloads：生成带 PLACEHOLDER 标识的开发占位载荷，不实现 Baleen Stub/BaleenCore/UEFI 加载器或系统卷装配
+    MakePayloads：生成带 PLACEHOLDER 标识的开发占位载荷，不实现 Baleen Stub/BaleenCore 或系统卷装配
+
+    另有一种 --esp-image 模式：只把调用方给的真实 EFI 引导器组装成一份 ESP 镜像（4 MiB FAT16），
+    供需要把产品件放进 ESP 的包调用（Packages/Baleen/Uefi）——ESP 的文件系统格式只有本工具一份实现
 */
 
 #include <algorithm>
@@ -502,13 +505,52 @@ _RelocSlot: DQ 0
     }
 }
 
-// 入口：参数是输出目录，--help 打印用法
+// 只组装一份 ESP 镜像：把调用方给的真实引导器装进 ESP 的 EFI/BOOT 目录
+// 先写临时文件再改名：构建中途失败不会在目标路径留下半份镜像，make 重跑即可
+void AssembleEsp(const fs::path& output, const fs::path& bootx64, const fs::path& bootia32) {
+    Require(fs::is_regular_file(bootx64), "找不到 BOOTX64.EFI：" + bootx64.string());
+    const Bytes efi = Read(bootx64);
+    Require(!efi.empty(), "BOOTX64.EFI 为空：" + bootx64.string());
+    // 32 位固件的提示件是可选的：给了就装，没给就不放（回退路径与以前一致）
+    const Bytes ia32 = fs::is_regular_file(bootia32) ? Read(bootia32) : Bytes{};
+    fs::create_directories(output.parent_path());
+    const fs::path temporary = output.string() + ".tmp";
+    CreateEmpty(temporary, 4 * 1024 * 1024);
+    Run({"mkfs.vfat", "-F", "16", "-s", "1", "-n", "ESP", "--invariant", temporary.string()});
+    InstallEfi(temporary, efi, ia32);
+    fs::rename(temporary, output);
+    std::cout << "MakePayloads: 已生成 ESP " << output << "（BOOTX64.EFI " << efi.size() << " 字节"
+              << (ia32.empty() ? "" : "，BOOTIA32.EFI " + std::to_string(ia32.size()) + " 字节") << "）\n";
+}
+
+// 入口：参数是输出目录，--help 打印用法；--esp-image 走只组装 ESP 的模式
 int main(int argc, char** argv) {
     try {
+        if (argc >= 2 && std::string_view(argv[1]) == "--esp-image") {
+            fs::path output;
+            fs::path bootx64;
+            fs::path bootia32;
+            for (int i = 2; i < argc; ++i) {
+                const std::string_view option = argv[i];
+                const auto value = [&](const char* name) -> fs::path {
+                    Require(i + 1 < argc, std::string(name) + " 缺参数");
+                    return fs::absolute(argv[++i]);
+                };
+                if (option == "--out") output = value("--out");
+                else if (option == "--bootx64") bootx64 = value("--bootx64");
+                else if (option == "--bootia32") bootia32 = value("--bootia32");
+                else Require(false, "无法识别的参数 " + std::string(option));
+            }
+            Require(!output.empty() && !bootx64.empty(), "用法：MakePayloads --esp-image --out <文件> --bootx64 <文件> [--bootia32 <文件>]");
+            AssembleEsp(output, bootx64, bootia32);
+            return 0;
+        }
         if (argc != 2 || std::string_view(argv[1]) == "--help") {
             std::cout << "用法：MakePayloads <输出目录>\n"
-                         "仅生成带 PLACEHOLDER 标识的载荷；需要 nasm、mkfs.vfat、mkfs.ext4。\n"
+                         "      MakePayloads --esp-image --out <文件> --bootx64 <文件> [--bootia32 <文件>]\n"
+                         "第一种模式仅生成带 PLACEHOLDER 标识的载荷；需要 nasm、mkfs.vfat、mkfs.ext4。\n"
                          "输出目录里若已有 BOOTIA32.EFI，会把它装进 ESP 的 \\EFI\\BOOT\\BOOTIA32.EFI。\n"
+                         "第二种模式只组装一份 ESP 镜像（4 MiB FAT16），装入调用方给的真实引导器。\n"
                          "SOURCE_DATE_EPOCH 默认 1700000000。\n";
             return argc == 2 ? 0 : 2;
         }

@@ -20,10 +20,12 @@ namespace Baleen {
 
     namespace PrintTargets {
         // 诊断行前缀的标签：方括号内的内容，模块名与等级名同属一套写法
+        // 这套词汇由 BIOS 路径与 UEFI 路径共用，两个固件环境的诊断行因此长得一样
         enum class Tag : uint8_t {
             Continue, // 延续上一行信息
             BaleenStub,     // 模块名：Stub 阶段
             BaleenCore, // 模块名：BaleenCore 阶段
+            BaleenUefi, // 模块名：UEFI 阶段
             Info,     // 状态说明，与模块名同为白字黑底
             Debug,    // 诊断值
             Ok,       // 步骤已推进
@@ -38,6 +40,7 @@ namespace Baleen {
             switch (tag) {
                 case Tag::BaleenStub:
                 case Tag::BaleenCore:
+                case Tag::BaleenUefi:
                 case Tag::Info: return Devices::Vga::kDefaultAttribute;
                 case Tag::Continue:
                 case Tag::Debug: return 0x07;   // 亮灰字黑底
@@ -55,6 +58,7 @@ namespace Baleen {
                 case Tag::Continue: return "...";
                 case Tag::BaleenStub: return "BALEENSTUB";
                 case Tag::BaleenCore: return "BALEENCORE";
+                case Tag::BaleenUefi: return "BALEENUEFI";
                 case Tag::Info: return "INFO";
                 case Tag::Debug: return "DEBUG";
                 case Tag::Ok: return "OK";

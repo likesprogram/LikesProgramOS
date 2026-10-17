@@ -25,18 +25,18 @@ namespace Baleen {
             uint8_t s_chunk[kChunkBytes];
 
             // —— 本阶段失败原因的编号：编号是稳定标识，文本可以润色 ——
-            constexpr Diagnostic kFailOpen{"E-CORE-33", "Open the kernel image"};
-            constexpr Diagnostic kFailFacts{"E-CORE-34", "Read the kernel image facts"};
-            constexpr Diagnostic kFailDirectory{"E-CORE-35", "The kernel image path points to a directory"};
-            constexpr Diagnostic kFailLength{"E-CORE-36", "The kernel image length is out of range"};
-            constexpr Diagnostic kFailRead{"E-CORE-37", "Read the kernel image"};
-            constexpr Diagnostic kFailShort{"E-CORE-38", "The kernel image is shorter than its declared size"};
-            constexpr Diagnostic kFailBootInfo{"E-CORE-39", "The kernel asks for a BootInfo version that isn't supported"};
-            constexpr Diagnostic kFailLoadSpan{"E-CORE-52", "The kernel load span isn't inside a usable memory area"};
-            constexpr Diagnostic kFailDigest{"E-CORE-53", "The kernel image digest doesn't match"};
+            constexpr Diagnostic kFailOpen{BALEEN_STAGE_CODE("33"), "Open the kernel image"};
+            constexpr Diagnostic kFailFacts{BALEEN_STAGE_CODE("34"), "Read the kernel image facts"};
+            constexpr Diagnostic kFailDirectory{BALEEN_STAGE_CODE("35"), "The kernel image path points to a directory"};
+            constexpr Diagnostic kFailLength{BALEEN_STAGE_CODE("36"), "The kernel image length is out of range"};
+            constexpr Diagnostic kFailRead{BALEEN_STAGE_CODE("37"), "Read the kernel image"};
+            constexpr Diagnostic kFailShort{BALEEN_STAGE_CODE("38"), "The kernel image is shorter than its declared size"};
+            constexpr Diagnostic kFailBootInfo{BALEEN_STAGE_CODE("39"), "The kernel asks for a BootInfo version that isn't supported"};
+            constexpr Diagnostic kFailLoadSpan{BALEEN_STAGE_CODE("52"), "The kernel load span isn't inside a usable memory area"};
+            constexpr Diagnostic kFailDigest{BALEEN_STAGE_CODE("53"), "The kernel image digest doesn't match"};
             // 内核镜像数据的字段校验在 Packages/Common 的实现里，原因文本由它给出，编号在本阶段统一
-            constexpr Diagnostic kFailKernelData{"E-CORE-54", "The kernel image data is invalid"};
-            constexpr Diagnostic kFailLoad{"E-CORE-57", "Load the kernel image into memory"};
+            constexpr Diagnostic kFailKernelData{BALEEN_STAGE_CODE("54"), "The kernel image data is invalid"};
+            constexpr Diagnostic kFailLoad{BALEEN_STAGE_CODE("57"), "Load the kernel image into memory"};
 
             // 从 offset 起读 want 字节到块缓冲；长度不足或读失败返回带编号的原因
             Diagnostic ReadChunk(Storage::FileSystem& fs, const Storage::FileId& id, uint32_t offset, uint32_t want) {

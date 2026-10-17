@@ -43,7 +43,9 @@ namespace Baleen {
             // 只读介质不提供该服务，设备保持只读
             void BindWrite(WriteSectorsFn write);
             // 绑定写缓存刷新服务：交权块没有刷新原语，由主流程绑入平台实现（当前是 AHCI）
-            void BindFlush(FlushFn flush);
+            // covers 是主流程核验出来的事实：可刷新的端口是不是启动介质所在的设备
+            // 刷不到自己写的介质时，那次提交只有设备缓存的保证——这一位就是"能不能声称持久"的唯一来源
+            void BindFlush(FlushFn flush, bool covers);
             // 解除绑定
             void Unbind();
             // 逻辑块大小（会话扇区大小）；未绑定返回 0
@@ -60,6 +62,9 @@ namespace Baleen {
             // 只读设备直接返回 Ok；没有可刷新端口（光盘、USB、NVMe）按“无可用原语”返回 Ok；
             // 端口在但命令出错或超时返回 Io——那表示这次写的持久化没有保证，按写失败处理
             Storage::Error Flush() override;
+            // 只有写服务在、刷新服务在、且刷新确实覆盖本介质时才敢声称提交是持久的
+            // 光盘 / USB / NVMe 上没有可刷新的端口；平台上另有 ATA 盘时刷新的是别人，同样不算覆盖
+            bool HasFlushPrimitive() const override { return m_write != nullptr && m_flush != nullptr && m_flushCovers; }
 
         private:
             ReadSectorsFn m_read = nullptr;    // 读盘服务入口
@@ -68,7 +73,8 @@ namespace Baleen {
             uint32_t m_windowBytes = 0;        // 窗口字节数
             uint64_t m_capacityBytes = 0;      // 设备容量，字节
             WriteSectorsFn m_write = nullptr;  // 写盘服务入口
-            FlushFn m_flush = nullptr;         // 写缓存刷新服务入口；未绑定时按无缓存通过
+            FlushFn m_flush = nullptr;
+            bool m_flushCovers = false;      // 刷新的端口是否就是启动介质所在设备（主流程核验）         // 写缓存刷新服务入口；未绑定时按无缓存通过
         };
     }
 }

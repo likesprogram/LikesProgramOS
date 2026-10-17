@@ -70,6 +70,8 @@ namespace Kernel {
         const uint64_t infoBegin = reinterpret_cast<uintptr_t>(&info);
         MarkUsed(infoBegin, sizeof(info));
         if (info.memoryMap != 0) MarkUsed(info.memoryMap, static_cast<uint64_t>(info.memoryMapCount) * sizeof(Boot::MemoryMapEntry));
+        // 引导器自身的残留不能当可用内存：它在交权后冻结常驻，放行给内核就是踩运行中的代码与数据
+        if (info.loaderBytes != 0) MarkUsed(info.loaderBegin, info.loaderBytes);
         return m_freePages;
     }
 

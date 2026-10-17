@@ -44,6 +44,13 @@ namespace Baleen {
             // 刷新：按 AHCI、传统 IDE 的次序取第一条可用路径下发命令
             // 一条路径失败不影响另一条；超时有界，绝不无限等待
             Result Flush();
+
+            // 可刷新的端口是不是**启动介质所在**的设备：把同一段字节经 AHCI 直读一次，
+            // 与调用方经固件读到的内容比对，相同才算覆盖
+            // 只读一个空闲命令槽、不下发任何写命令；传统 IDE 路径不做这项核验，一律按未覆盖返回
+            // 用途见 Docs/Specs/Baleen/引导状态记录.md 第五节：刷不到自己写的介质，
+            // 那次提交就只有设备缓存的保证，调用方必须把这条边界报出来
+            bool CoversMedium(uint64_t byteOffset, const uint8_t* expected, uint32_t bytes);
         }
     }
 }

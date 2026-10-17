@@ -2,10 +2,19 @@
     引导状态记录：内核集选版的持久状态，读写引导状态区域里的双副本记录
 
     记录字节表、副本布局、写入顺序与掉电语义见 Docs/Specs/Baleen/引导状态记录.md；
-    读取选最新完整有效的一份，空区域与损坏分开处理；写入只落在非活动副本并读回校验
-    版本 2 起记录带撤销事实（纪元、最低允许安全版本、已吊销签名密钥位图）：写入方一律写版本 2，
-    读方仍接受版本 1 并把它的撤销字段按全零处理。运行期写入方（Updater / Init）必须读—改—写，
-    保留撤销字段——清掉它们等于把吊销退回到“依赖签名记录文件在场”
+    读取取代次最高且可验证的那一个槽位，空区域与损坏分开处理；写入只落在最旧的槽位并读回校验
+
+    区域切成 8 个等长槽位，**每个槽位占一个 512 字节扇区，一次提交只写一个槽位**：
+    提交因此落在设备的单个写单元里，被打断时最多毁掉那一个槽位，其余槽位不受影响
+    读取取代次最高且可验证的槽位；写入落在"最旧"的那个槽位（代次最低，未写过视为最低），
+    当前最新的那个槽位在写的过程中永不被覆盖——这条不变量是掉电安全的全部依据
+    槽位环形使用：连续多次断电各毁一个槽位也要毁到第 8 个才会丢掉全部记录（见规格第一节）
+
+    **格式尚未发布，只有一个版本：`kVersion` 为 1，读写都按同一张字段表。** 字段调整直接改本文件与
+    Docs/Specs/Baleen/引导状态记录.md 的字节表，不留兼容分支——首次发布前不背兼容包袱；
+    读方遇到版本号不是 1 的记录按损坏处理，不猜字段表
+    运行期写入方（Updater / Init）必须读—改—写，保留撤销字段与已试次数：
+    清掉撤销字段等于把吊销退回到"依赖签名记录文件在场"
 */
 
 #pragma once
@@ -17,21 +26,23 @@
 namespace Baleen {
     namespace Core {
         namespace BootState {
-            // 区域固定 4096 字节，等分为两份副本
+            // 区域固定 4096 字节
             constexpr uint32_t kAreaBytes = 4096;
-            // 单份副本长度
-            constexpr uint32_t kCopyBytes = 0x800;
-            // 记录有效长度：版本 2 起为 0xF0
+            // 单个槽位长度：一个 512 字节扇区
+            constexpr uint32_t kCopyBytes = 0x200;
+            // 槽位数：环形推进，一次提交写一个
+            constexpr uint32_t kSlots = kAreaBytes / kCopyBytes;
+            // 记录有效长度
             constexpr uint32_t kRecordBytes = 0xF0;
-            // 记录版本：写入方一律写当前版本
-            constexpr uint16_t kVersion = 2;
-            // 版本 1 的记录版本号与长度：没有撤销字段，读取兼容用
-            constexpr uint16_t kVersionV1 = 1;
-            constexpr uint32_t kRecordBytesV1 = 0xC0;
+            // 记录版本：格式尚未发布，只有版本 1
+            constexpr uint16_t kVersion = 1;
             // 尝试次数上限
             constexpr uint8_t kMaxTries = 15;
             // 默认尝试次数（候选发布时的写入方取用）
             constexpr uint8_t kDefaultTries = 3;
+
+            // 记录必须落在单份副本（一个扇区）之内：这是"提交是单扇区写"的前提
+            static_assert(kRecordBytes <= kCopyBytes, "记录长度超过一份副本，单扇区提交不成立");
 
             // 记录状态：与规格第四节一致
             enum class State : uint8_t {
@@ -43,9 +54,10 @@ namespace Baleen {
 
             // 记录内容：读取或写入的一份完整记录
             struct Record {
-                uint64_t generation = 0;                // 代次，写入方按两份副本最大值加一
+                uint64_t generation = 0;                // 代次，写入方按所有槽位最大值加一
                 State state = State::Confirmed;         // 状态
                 uint8_t triesRemaining = 0;             // 本次记录之外还允许的尝试次数
+                uint8_t triesDone = 0;                  // 本候选已经试过几次；只增，不参与判定
                 uint64_t attemptId = 0;                 // 尝试身份；Trying 必须非零，其他状态必须为零
                 uint8_t confirmedBuildId[32] = {};      // 已知良好集标识
                 uint8_t confirmedManifestDigest[32] = {};   // 已知良好集清单摘要
@@ -59,48 +71,47 @@ namespace Baleen {
             enum class ReadResult : uint8_t {
                 Ok,           // 有有效记录
                 Empty,        // 区域为空：按“无记录”处理
-                Corrupt,      // 有写入痕迹但两份副本都不可用
+                Corrupt,      // 有写入痕迹但没有一个槽位可用
                 Unavailable,  // 没有状态区域或读失败
             };
 
-            // 单份副本的校验结论（维护与恢复用）
+            // 单个槽位的校验结论（维护与恢复用）
             enum class CopyStatus : uint8_t {
-                NotWritten,   // 标记全零：该副本未写过
+                NotWritten,   // 标记全零：该槽位未写过
                 Valid,        // 结构、组合与校验和都通过
                 Invalid,      // 写过但不可用
             };
 
-            // 单份副本的检查结论：状态与代次（不可用时代次为 0）
+            // 单个槽位的检查结论：状态与代次（不可用时代次为 0）
             struct CopyFacts {
                 CopyStatus status = CopyStatus::NotWritten;   // 校验结论
-                uint64_t generation = 0;                      // 该副本记录的代次
+                uint64_t generation = 0;                      // 该槽位记录的代次
             };
 
-            // 副本级检查结果：维护工具据此报告"哪一份坏了"，选版只关心 Read 的分类
+            // 槽位级检查结果：维护工具据此报告"哪些槽位坏了"，选版只关心 Read 的分类
             struct Inspection {
                 ReadResult result = ReadResult::Unavailable;  // 与 Read 相同的分类
-                CopyFacts copyA{};                            // 副本 A 的结论
-                CopyFacts copyB{};                            // 副本 B 的结论
+                CopyFacts slots[kSlots]{};                    // 每个槽位的结论
                 Record record{};                              // 有效时选中的那份记录
             };
 
-            // 读状态记录：两份副本都校验，取代次更大的有效副本
+            // 读状态记录：所有槽位都校验，取代次最高且可验证的一个
             ReadResult Read(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, Record& record);
 
-            // 副本级检查：与 Read 读同一块区域，另外带回两份副本各自的结论
+            // 槽位级检查：与 Read 读同一块区域，另外带回每个槽位各自的结论
             Inspection Inspect(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes);
 
-            // 写状态记录：落在非活动副本，代次取两份最大值加一，写后刷盘并读回校验
+            // 写状态记录：落在最旧的槽位，代次取所有槽位最大值加一，写后刷盘并读回校验
             // writtenGeneration 带回实际写入的代次（Trying 的尝试身份取它）
             // 记录不可写、写失败、刷盘失败或读回校验失败都返回 false
             bool Write(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const Record& record, uint64_t& writtenGeneration);
 
-            // 受控恢复：把状态区域两份副本清零，回到出厂形态（选版按"无记录"直启缺省集）
+            // 受控恢复：把状态区域全部槽位清零，回到出厂形态（选版按"无记录"直启缺省集）
             // 只写状态区域，不碰系统卷；介质不可写或写后读回不是全零都返回 false
             bool Clear(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes);
 
-            // 受控恢复：用一份有效副本修复另一份
-            // 没有可用记录（空区域、两份都不可用、或两份有效但代次相等）返回 false，不猜测目标集
+            // 受控恢复：用有效记录重建每一个不可用的槽位，把冗余恢复到满
+            // 没有可用记录（空区域、全部不可用、或最高代次出现两次）返回 false，不猜测目标集
             bool Repair(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t& writtenGeneration);
 
             // 人工接受：把已见最高安全版本下调到显式接受的值；这是防回滚的唯一例外

@@ -34,15 +34,15 @@ namespace Baleen {
             // 撤销的生效点是一次可信的引导器更新，见 Docs/Specs/内核集清单与签名.md 第五节
 
             // —— 本阶段失败原因的编号：编号是稳定标识，文本可以润色 ——
-            constexpr Diagnostic kFailManifestRead{"E-CORE-61", "Read the kernel set manifest"};
-            constexpr Diagnostic kFailManifestFormat{"E-CORE-62", "The kernel set manifest is invalid"};
-            constexpr Diagnostic kFailManifestKey{"E-CORE-63", "The manifest signature key isn't trusted"};
-            constexpr Diagnostic kFailManifestSignature{"E-CORE-64", "The manifest signature doesn't verify"};
-            constexpr Diagnostic kFailManifestBuildId{"E-CORE-65", "The manifest BuildId doesn't match the selected set"};
-            constexpr Diagnostic kFailRollback{"E-CORE-66", "The manifest SecurityVersion is below what the device or the bootloader allows"};
-            constexpr Diagnostic kFailArtifactRead{"E-CORE-67", "Read a kernel set artifact"};
-            constexpr Diagnostic kFailArtifactDigest{"E-CORE-68", "A kernel set artifact digest doesn't match"};
-            constexpr Diagnostic kFailKeyRevoked{"E-CORE-74", "The manifest signature key is revoked"};
+            constexpr Diagnostic kFailManifestRead{BALEEN_STAGE_CODE("61"), "Read the kernel set manifest"};
+            constexpr Diagnostic kFailManifestFormat{BALEEN_STAGE_CODE("62"), "The kernel set manifest is invalid"};
+            constexpr Diagnostic kFailManifestKey{BALEEN_STAGE_CODE("63"), "The manifest signature key isn't trusted"};
+            constexpr Diagnostic kFailManifestSignature{BALEEN_STAGE_CODE("64"), "The manifest signature doesn't verify"};
+            constexpr Diagnostic kFailManifestBuildId{BALEEN_STAGE_CODE("65"), "The manifest BuildId doesn't match the selected set"};
+            constexpr Diagnostic kFailRollback{BALEEN_STAGE_CODE("66"), "The manifest SecurityVersion is below what the device or the bootloader allows"};
+            constexpr Diagnostic kFailArtifactRead{BALEEN_STAGE_CODE("67"), "Read a kernel set artifact"};
+            constexpr Diagnostic kFailArtifactDigest{BALEEN_STAGE_CODE("68"), "A kernel set artifact digest doesn't match"};
+            constexpr Diagnostic kFailKeyRevoked{BALEEN_STAGE_CODE("74"), "The manifest signature key is revoked"};
 
             // 按小端读取 16 位
             uint16_t Get16(const uint8_t* field) {

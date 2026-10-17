@@ -43,8 +43,9 @@ namespace Baleen {
             m_write = write;
         }
 
-        void BiosBlockDevice::BindFlush(FlushFn flush) {
+        void BiosBlockDevice::BindFlush(FlushFn flush, bool covers) {
             m_flush = flush;
+            m_flushCovers = flush != nullptr && covers;
         }
 
         Storage::Error BiosBlockDevice::Read(uint64_t offset, void* buffer, uint32_t bytes) {

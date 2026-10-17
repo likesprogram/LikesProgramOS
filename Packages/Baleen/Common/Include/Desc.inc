@@ -16,9 +16,10 @@ DESC_AREA_MAGIC       EQU 0x43534442  ; 'BDSC'，介质字节为 42 44 53 43
 DESC_AREA_HEAD_BYTES  EQU 16          ; 头部长度：标记 4 + 版本 2 + 头长 2 + 起止扇区 8
 
 ; —— 段的通用头：每个段都以它开头 ——
-DESC_SEG_MAGIC        EQU 0x00        ; 段格式标记，4 字节小端
-DESC_SEG_VERSION      EQU 0x04        ; 版本，2 字节小端
-DESC_SEG_LENGTH       EQU 0x06        ; 段长，2 字节小端，含此头，按它跳到下一个段
+; 下面三个是**段头内字段的偏移**（不是版本号）：标记 4 字节 + 版本 2 字节 + 段长 2 字节
+DESC_SEG_MAGIC        EQU 0x00        ; 段格式标记字段的偏移，4 字节小端
+DESC_SEG_VERSION      EQU 0x04        ; 版本字段的偏移，2 字节小端；取值是 DESC_VERSION
+DESC_SEG_LENGTH       EQU 0x06        ; 段长字段的偏移，2 字节小端，含此头，按它跳到下一个段
 DESC_SEG_HEAD_BYTES   EQU 8           ; 通用头长度
 
 ; —— 各段的格式标记 ——

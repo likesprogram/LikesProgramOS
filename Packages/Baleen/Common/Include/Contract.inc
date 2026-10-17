@@ -22,7 +22,7 @@ MEDIA_CDROM      EQU 4           ; 交权时 DH 的介质编号：光盘
 CORE_LOAD        EQU 0x100000    ; BaleenCore 映像装入的物理地址，即镜像基址；交权入口 = 它 + 头里的 EntryOffset
 CORE_MAX_BYTES   EQU 0x400000    ; BaleenCore 文件字节数上限
 CORE_HANDOFF_MAGIC EQU 0x484E4C42 ; 'BLNH'，Stub 交给 BaleenCore 的交权块格式标记
-CORE_HANDOFF_VER EQU 4           ; 交权块的开发格式标记
+CORE_HANDOFF_VER EQU 1           ; 交权块的开发格式标记（格式未发布，版本号统一为 1）
 CORE_HANDOFF_BYTES EQU 84        ; 交权块长度，BaleenCore 侧据此核对
 CORE_HANDOFF_WRITE_SECTORS EQU 0x50 ; 写盘服务入口，字段偏移
 

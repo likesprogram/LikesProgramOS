@@ -33,6 +33,9 @@ namespace hostbuild {
         uint64_t volume_bytes = 0;     // 系统卷长度，字节；必须非 0
         uint64_t state_offset = BaleenLayout::kStateOffset;  // 引导状态区域起始偏移；0 表示无状态区域
         uint64_t state_bytes = BaleenLayout::kStateBytes;    // 引导状态区域长度，字节
+        // 记录损坏时是否允许退到本描述指定的缺省集（置 LayoutDescriptor::kFlagDegradeWithoutRecord）
+        // 默认不置位：那条路会丢掉设备已见最高安全版本与记录里的吊销并集，是可预期性换可用性
+        uint32_t flags = 0;                                  // 布局描述的标志位
     };
 
     // 从 Ext4 镜像读卷标识（superblock 的 s_uuid）；镜像过小或魔数不符时报错

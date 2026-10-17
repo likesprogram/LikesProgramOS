@@ -29,6 +29,7 @@ namespace Baleen {
 
         // 选版：读状态记录、验证目标集、按需写回状态记录
         // layoutKernelPath 是布局描述给出的缺省集内核路径，用于推导集根与缺省集
-        Diagnostic SelectKernelSet(Storage::FileSystem& fs, Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const char* layoutKernelPath, SelectedSet& selected);
+        // layoutFlags 是布局描述的标志位：位 0 置位时，记录损坏也退到缺省集（默认不置位，见 LayoutDescriptor）
+        Diagnostic SelectKernelSet(Storage::FileSystem& fs, Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const char* layoutKernelPath, uint32_t layoutFlags, SelectedSet& selected);
     }
 }

@@ -8,6 +8,7 @@
 */
 
 #include <DiskFlush.hpp>
+#include <LayoutDescriptor.hpp>
 
 #include <stddef.h>
 
@@ -87,6 +88,10 @@ namespace Baleen {
                 constexpr uint8_t kStatusError = 0x01;
                 // ATA 命令：FLUSH CACHE 与 IDENTIFY DEVICE
                 constexpr uint8_t kCommandFlushCache = 0xE7;
+                constexpr uint8_t kCommandReadDmaExt = 0x25;   // READ DMA EXT：身份核验用
+                constexpr uint32_t kCommandTablePrdt = 0x80;   // 命令表里 PRDT 的偏移
+                constexpr uint32_t kPrdtEntryBytes = 16;
+                constexpr uint32_t kDmaByteLimit = 0x10000;    // 一次 DMA 的字节上限（PRDT 一个条目）
                 constexpr uint8_t kCommandIdentify = 0xEC;
                 // IDENTIFY DEVICE 返回的字数：512 字节
                 constexpr uint32_t kIdentifyWords = 256;
@@ -98,8 +103,26 @@ namespace Baleen {
                 // 选盘之后读替代状态的次数：填满 ATA 规范的 400ns 等待
                 constexpr uint32_t kSelectDelayReads = 4;
 
-                // 命令表：128 字节对齐；本命令没有数据，只需要 CFIS 那一段
-                alignas(128) uint8_t s_commandTable[128];
+                // 命令表：128 字节对齐；刷新只用 CFIS 那一段，身份核验的读还要一个 PRDT 条目
+                // 布局：CFIS 64 + ACMD 32 + 保留 16 + PRDT（每条目 16 字节，从 0x80 起）
+                constexpr uint32_t kCommandTableBytes = 256;
+                alignas(128) uint8_t s_commandTable[kCommandTableBytes];
+                // 身份核验的读回缓冲：与布局描述块等长
+                uint8_t s_compare[Baleen::LayoutDescriptor::kBytes];
+                // 往字节缓冲写 32 位小端：PRDT 条目按字节拼
+                void Put32(uint8_t* target, uint32_t value) {
+                    target[0] = static_cast<uint8_t>(value);
+                    target[1] = static_cast<uint8_t>(value >> 8);
+                    target[2] = static_cast<uint8_t>(value >> 16);
+                    target[3] = static_cast<uint8_t>(value >> 24);
+                }
+
+                // 两段字节是否逐字节相同
+                bool SameBytes(const uint8_t* left, const uint8_t* right, uint32_t bytes) {
+                    for (uint32_t i = 0; i < bytes; ++i) if (left[i] != right[i]) return false;
+                    return true;
+                }
+
 
                 // 读 PCI 配置空间的 32 位
                 uint32_t PciRead32(uint32_t device, uint32_t function, uint8_t offset) {
@@ -161,6 +184,64 @@ namespace Baleen {
                     header[3] = 0;                  // CTBA 高 32 位
 
                     // 清旧的完成位，再置本位发起命令，然后等该位清零
+                    _Cpu_Write32(base + kPortInterruptStatus, kClearAll);
+                    _Cpu_Write32(base + kPortCommandIssue, 1u << slot);
+                    uint32_t waited = 0;
+                    while ((_Cpu_Read32(base + kPortCommandIssue) & (1u << slot)) != 0) {
+                        if (++waited >= kAhciWaitLimit) return false;
+                    }
+                    const uint32_t status = _Cpu_Read32(base + kPortInterruptStatus);
+                    const uint32_t taskFile = _Cpu_Read32(base + kPortTaskFile);
+                    _Cpu_Write32(base + kPortInterruptStatus, status);
+                    if ((status & kInterruptTaskFileError) != 0) return false;
+                    if ((taskFile & kTaskFileError) != 0) return false;
+                    return true;
+                }
+
+                // 经 AHCI 读一段介质：READ DMA EXT + 一个 PRDT 条目，轮询等待，超时有界
+                // 只读一个空闲槽；此阶段没有分页，缓冲的线性地址就是 DMA 要的物理地址
+                bool IssueAhciRead(uint32_t base, uint32_t slot, uint64_t byteOffset, uint8_t* buffer, uint32_t bytes) {
+                    if (bytes == 0 || bytes > kDmaByteLimit) return false;
+                    const uint32_t listAddress = _Cpu_Read32(base + kPortCommandList);
+                    if (listAddress == 0) return false;
+                    const uint64_t lba = byteOffset / 512;
+                    if ((byteOffset % 512) != 0 || (bytes % 512) != 0) return false;
+
+                    for (uint32_t i = 0; i < sizeof(s_commandTable); ++i) s_commandTable[i] = 0;
+                    // H2D 寄存器 FIS（20 字节）：READ DMA EXT，LBA48，扇区数按 512 字节计
+                    // 字段顺序按 ATA 规范：命令、特征低、LBA 7:0 / 15:8 / 23:16、设备、LBA 31:24 / 39:32 / 47:40、
+                    // 特征高、扇区数低 / 高、ICC、控制——设备寄存器在 byte 7，LBA 的第 4 个字节在 byte 8
+                    const uint32_t sectors = bytes / 512;
+                    s_commandTable[0] = 0x27;                                  // FIS 类型：H2D 寄存器
+                    s_commandTable[1] = 0x80;                                  // C = 1：这是一条命令
+                    s_commandTable[2] = kCommandReadDmaExt;                    // 命令
+                    s_commandTable[3] = 0;                                     // 特征低
+                    s_commandTable[4] = static_cast<uint8_t>(lba);             // LBA 7:0
+                    s_commandTable[5] = static_cast<uint8_t>(lba >> 8);        // LBA 15:8
+                    s_commandTable[6] = static_cast<uint8_t>(lba >> 16);       // LBA 23:16
+                    s_commandTable[7] = 0x40;                                  // 设备寄存器：LBA 模式
+                    s_commandTable[8] = static_cast<uint8_t>(lba >> 24);       // LBA 31:24
+                    s_commandTable[9] = static_cast<uint8_t>(lba >> 32);       // LBA 39:32
+                    s_commandTable[10] = static_cast<uint8_t>(lba >> 40);      // LBA 47:40
+                    s_commandTable[11] = 0;                                    // 特征高
+                    s_commandTable[12] = static_cast<uint8_t>(sectors);        // 扇区数低
+                    s_commandTable[13] = static_cast<uint8_t>(sectors >> 8);   // 扇区数高
+                    s_commandTable[14] = 0;                                    // ICC
+                    s_commandTable[15] = 0x80;                                 // 控制
+                    // PRDT：一个条目，DBC 是"字节数 - 1"，最高位要求完成后置中断
+                    const uint32_t address = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(buffer));
+                    Put32(s_commandTable + kCommandTablePrdt + 0, address);
+                    Put32(s_commandTable + kCommandTablePrdt + 4, 0);
+                    Put32(s_commandTable + kCommandTablePrdt + 8, 0);
+                    Put32(s_commandTable + kCommandTablePrdt + 12, (bytes - 1) | 0x80000000u);
+
+                    const uint32_t tableAddress = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(s_commandTable));
+                    volatile uint32_t* header = reinterpret_cast<volatile uint32_t*>(static_cast<uintptr_t>(listAddress + slot * kCommandHeaderBytes));
+                    header[0] = kFisDwords << 16;   // CFL = 5；W = 0 表示设备→主机
+                    header[1] = 1;                  // PRDTL = 1
+                    header[2] = tableAddress;
+                    header[3] = 0;
+
                     _Cpu_Write32(base + kPortInterruptStatus, kClearAll);
                     _Cpu_Write32(base + kPortCommandIssue, 1u << slot);
                     uint32_t waited = 0;
@@ -303,6 +384,37 @@ namespace Baleen {
                 if (ScanAhci(false) != Result::Unsupported) return Path::Ahci;
                 if (ScanLegacy(false) != Result::Unsupported) return Path::LegacyAta;
                 return Path::None;
+            }
+
+            bool CoversMedium(uint64_t byteOffset, const uint8_t* expected, uint32_t bytes) {
+                if (expected == nullptr || bytes == 0 || bytes > sizeof(s_compare)) return false;
+                // 只走 AHCI：传统 IDE 路径没有做身份核验的机制，按"未覆盖"返回（保守方向，绝不谎报覆盖）
+                for (uint32_t device = 0; device < kPciDevices; ++device) {
+                    for (uint32_t function = 0; function < kPciFunctions; ++function) {
+                        if ((PciRead32(device, function, kPciVendorId) & 0xFFFF) == 0xFFFF) continue;
+                        const uint32_t classCode = PciRead32(device, function, kPciClassCode);
+                        if (((classCode >> 24) & 0xFF) != kClassMassStorage) continue;
+                        if (((classCode >> 16) & 0xFF) != kSubclassSata) continue;
+                        if (((classCode >> 8) & 0xFF) != kInterfaceAhci) continue;
+                        const uint32_t bar = PciRead32(device, function, kPciBar5);
+                        if ((bar & kBarIoSpace) != 0) continue;
+                        if ((bar & kBar64Bit) != 0 && PciRead32(device, function, kPciBar6) != 0) continue;
+                        const uint32_t abar = bar & kBarAddressMask;
+                        if (abar == 0) continue;
+                        const uint32_t implemented = _Cpu_Read32(abar + kRegPortsImplemented);
+                        for (uint32_t port = 0; port < kCommandSlots; ++port) {
+                            if ((implemented & (1u << port)) == 0) continue;
+                            const uint32_t base = abar + kPortBase + port * kPortStride;
+                            uint32_t slot = 0;
+                            if (!PortFlushable(base, slot)) continue;
+                            for (uint32_t i = 0; i < bytes; ++i) s_compare[i] = 0;
+                            if (!IssueAhciRead(base, slot, byteOffset, s_compare, bytes)) continue;
+                            // 读得回来且逐字节相同：这个端口上的设备就是启动介质
+                            if (SameBytes(s_compare, expected, bytes)) return true;
+                        }
+                    }
+                }
+                return false;
             }
 
             Result Flush() {

@@ -39,6 +39,10 @@ namespace Storage {
         }
         // 刷新写缓存；默认无缓存，返回 Ok
         virtual Error Flush() { return Error::Ok; }
+        // 是否有真正的刷新原语：没有原语时写入仍然成立，但那次提交可能只落在设备缓存里，
+        // 掉电会让它回退（回退是丢一次转换，不是损坏——环形槽位保证仍有可用记录）
+        // 默认 true：内存介质与有原语的后端都按"提交即持久"处理
+        virtual bool HasFlushPrimitive() const { return true; }
 
     protected:
         BlockDevice() = default;

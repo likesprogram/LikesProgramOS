@@ -94,6 +94,8 @@ namespace {
         bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
         bool core_unchecked = false;                                       // 是否免除 BaleenCore 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
+        // 记录损坏时允许退到缺省集：写进布局描述的标志位（默认不置位，见布局描述第七节）
+        bool degrade_without_record = false;                               // 布局描述：记录损坏时退到缺省集
     };
 
     // 取卷时间戳：命令行优先，其次 SOURCE_DATE_EPOCH，都没有就写全零
@@ -169,6 +171,7 @@ namespace {
             else if (arg == "--system-volume") options.system_volume = needValue(i, arg);
             else if (arg == "--layout") options.layout = needValue(i, arg);
             else if (arg == "--kernel-path") options.kernel_path = needValue(i, arg);
+            else if (arg == "--degrade-without-record") options.degrade_without_record = true;
             else if (arg == "--iso-name") options.iso_name = needValue(i, arg);
             else if (arg == "--file") {
                 const std::string value = needValue(i, arg);
@@ -367,6 +370,8 @@ namespace {
             spec.volume_image = options.system_volume;
             spec.volume_offset = volumePlaced->offset;
             spec.volume_bytes = volumePlaced->bytes;
+            // 介质策略位：记录损坏时是停机等人工，还是退到布局描述指定的缺省集
+            if (options.degrade_without_record) spec.flags |= Baleen::LayoutDescriptor::kFlagDegradeWithoutRecord;
             if (!options.kernel_path.empty()) spec.kernel_path = options.kernel_path;
             else if (!options.layout.empty()) spec.kernel_path = ReadTemplateKernelPath(options.layout);
             const std::vector<uint8_t> block = BuildBaleenLayout(spec);

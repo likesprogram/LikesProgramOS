@@ -20,6 +20,7 @@ namespace hostbuild {
         constexpr uint16_t kVersion = Baleen::LayoutDescriptor::kVersion;
         constexpr uint16_t kHeaderBytes = Baleen::LayoutDescriptor::kHeaderBytes;
         constexpr uint32_t kLayoutBytes = Baleen::LayoutDescriptor::kLayoutBytes;
+        constexpr std::size_t kFieldFlags = Baleen::LayoutDescriptor::kFieldFlags;
         constexpr std::size_t kFieldUuid = Baleen::LayoutDescriptor::kFieldVolumeUuid;
         constexpr std::size_t kFieldVolumeOffset = Baleen::LayoutDescriptor::kFieldVolumeOffset;
         constexpr std::size_t kFieldVolumeBytes = Baleen::LayoutDescriptor::kFieldVolumeBytes;
@@ -110,7 +111,9 @@ namespace hostbuild {
         Put16Le(block.data() + 4, kVersion);
         Put16Le(block.data() + 6, kHeaderBytes);
         Put32Le(block.data() + 8, kLayoutBytes);
-        // Flags 与保留字段保持 0
+        // 标志位由部署侧给出：当前只定义"记录损坏时允许退到缺省集"，未定义的位必须为 0
+        // 引导侧按 LayoutDescriptor::kKnownFlags 核对，出现未定义的位即拒绝（E-CORE-22 / E-UEFI-22）
+        Put32Le(block.data() + kFieldFlags, spec.flags);
         std::copy(uuid.begin(), uuid.end(), block.begin() + static_cast<std::ptrdiff_t>(kFieldUuid));
         Put64Le(block.data() + kFieldVolumeOffset, spec.volume_offset);
         Put64Le(block.data() + kFieldVolumeBytes, spec.volume_bytes);

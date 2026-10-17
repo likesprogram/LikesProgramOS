@@ -1,9 +1,11 @@
 /* BootState.cpp
-    引导状态记录的实现：副本校验、最新有效副本选择、非活动副本写入、刷盘、读回校验与受控恢复
+    引导状态记录的实现：槽位校验、最高代次选择、最旧槽位写入、刷盘、读回校验与受控恢复
 
     记录字节表与写入顺序见 Docs/Specs/Baleen/引导状态记录.md 第二、四节；
     校验用 CRC-32（IEEE 802.3 参数），整数按小端读写，保留字段必须为零
-    写入一律用版本 2 字段表；读方接受版本 1（撤销字段按全零），兼容升级前写下的记录
+    **格式尚未发布，只有一个版本 1**：读写用同一张字段表，不留兼容分支；
+    版本号不是 1 的记录按损坏处理，不猜字段表
+    一次提交只写一份副本（一个 512 字节扇区），提交因此落在设备的单个写单元里
     本文件放在 Packages/Common：引导期选择器与运行期写入方（Updater / Init）用同一份实现，
     "同一后端、同一格式"因此是一份代码而不是两份约定；无运行库环境只用到 memcpy，就地声明
 */
@@ -19,8 +21,7 @@ namespace Baleen {
     namespace Core {
         namespace BootState {
             namespace {
-                // 记录格式：标记“BLST”；写入一律用版本 2 的 0xF0 字段表，
-                // 版本 1 的 0xC0 字段表只用于读取兼容，其撤销字段所在区间当时是保留区
+                // 记录格式：标记“BLST”，版本 1 的 0xF0 字段表；字段偏移与规格第二节逐条对应
                 constexpr uint32_t kMagic = 0x54534C42u;
                 // 副本内字段偏移
                 constexpr uint32_t kFieldMagic = 0x000;
@@ -29,7 +30,8 @@ namespace Baleen {
                 constexpr uint32_t kFieldGeneration = 0x008;
                 constexpr uint32_t kFieldState = 0x010;
                 constexpr uint32_t kFieldTries = 0x011;
-                constexpr uint32_t kFieldFlags = 0x012;
+                constexpr uint32_t kFieldTriesDone = 0x012;
+                constexpr uint32_t kFieldFlags = 0x013;
                 constexpr uint32_t kFieldReserved = 0x014;
                 constexpr uint32_t kFieldAttemptId = 0x018;
                 constexpr uint32_t kFieldConfirmedBuildId = 0x020;
@@ -42,13 +44,10 @@ namespace Baleen {
                 constexpr uint32_t kFieldRevokedKeyMask = 0x0B8;
                 constexpr uint32_t kFieldReserved2 = 0x0D8;
                 constexpr uint32_t kFieldChecksum = 0x0EC;
-                // 版本 1 的字段表：撤销字段所在区间是保留区，校验和更靠前
-                constexpr uint32_t kFieldReserved2V1 = 0x0A8;
-                constexpr uint32_t kFieldChecksumV1 = 0x0BC;
                 // 保留区长度：两版都是 20 字节
                 constexpr uint32_t kReservedBytes = 20;
 
-                // 区域读缓冲：两份副本一次读完
+                // 区域读缓冲：全部槽位一次读完
                 uint8_t s_area[kAreaBytes];
 
                 // 记录是否全零：用于区分“未写过”与“写过但不可用”
@@ -128,33 +127,25 @@ namespace Baleen {
                     Invalid,      // 写过但不可用
                 };
 
-                // 校验一份副本并解出记录：按版本选字段表，版本 1 的撤销字段按全零
+                // 校验一份副本并解出记录：只有一个版本，字段表就是本文件里那一张
                 CopyState CheckCopy(const uint8_t* copy, Record& record) {
                     if (IsZero(copy, 4)) return CopyState::NotWritten;
                     if (Get32(copy + kFieldMagic) != kMagic) return CopyState::Invalid;
-                    if (Get16(copy + kFieldFlags) != 0) return CopyState::Invalid;
+                    if (Get16(copy + kFieldVersion) != kVersion) return CopyState::Invalid;   // 不是版本 1 一律不猜字段表
+                    if (Get16(copy + kFieldBytes) != kRecordBytes) return CopyState::Invalid;
+                    if (copy[kFieldFlags] != 0) return CopyState::Invalid;
                     if (Get32(copy + kFieldReserved) != 0) return CopyState::Invalid;
-                    const uint16_t version = Get16(copy + kFieldVersion);
+                    if (!IsZero(copy + kFieldReserved2, kReservedBytes)) return CopyState::Invalid;
+                    if (Get32(copy + kFieldChecksum) != Crc32(copy, kFieldChecksum)) return CopyState::Invalid;
                     record.revocation = Revocation::Facts{};
-                    if (version == kVersionV1) {
-                        if (Get16(copy + kFieldBytes) != kRecordBytesV1) return CopyState::Invalid;
-                        if (!IsZero(copy + kFieldReserved2V1, kReservedBytes)) return CopyState::Invalid;
-                        if (Get32(copy + kFieldChecksumV1) != Crc32(copy, kFieldChecksumV1)) return CopyState::Invalid;
-                    } else if (version == kVersion) {
-                        if (Get16(copy + kFieldBytes) != kRecordBytes) return CopyState::Invalid;
-                        if (!IsZero(copy + kFieldReserved2, kReservedBytes)) return CopyState::Invalid;
-                        if (Get32(copy + kFieldChecksum) != Crc32(copy, kFieldChecksum)) return CopyState::Invalid;
-                        record.revocation.epoch = Get64(copy + kFieldRevocationEpoch);
-                        record.revocation.minimumSecurityVersion = Get64(copy + kFieldRevocationFloor);
-                        memcpy(record.revocation.revokedKeyMask, copy + kFieldRevokedKeyMask, Revocation::kKeyMaskBytes);
-                    } else {
-                        // 未知版本不猜测字段表
-                        return CopyState::Invalid;
-                    }
+                    record.revocation.epoch = Get64(copy + kFieldRevocationEpoch);
+                    record.revocation.minimumSecurityVersion = Get64(copy + kFieldRevocationFloor);
+                    memcpy(record.revocation.revokedKeyMask, copy + kFieldRevokedKeyMask, Revocation::kKeyMaskBytes);
                     record.generation = Get64(copy + kFieldGeneration);
                     if (record.generation == 0) return CopyState::Invalid;
                     record.state = static_cast<State>(copy[kFieldState]);
                     record.triesRemaining = copy[kFieldTries];
+                    record.triesDone = copy[kFieldTriesDone];
                     record.attemptId = Get64(copy + kFieldAttemptId);
                     memcpy(record.confirmedBuildId, copy + kFieldConfirmedBuildId, 32);
                     memcpy(record.confirmedManifestDigest, copy + kFieldConfirmedDigest, 32);
@@ -165,12 +156,36 @@ namespace Baleen {
                     return CopyState::Valid;
                 }
 
-                // 读出两份副本：返回两份的校验结论与记录
-                ReadResult ReadCopies(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, Record& copyA, Record& copyB, CopyState& stateA, CopyState& stateB) {
+                // 读出所有槽位：返回每个槽位的校验结论
+                ReadResult ReadSlots(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, Record* records, CopyState* states) {
                     if (stateOffset == 0 || stateBytes < kAreaBytes) return ReadResult::Unavailable;
                     if (medium.Read(stateOffset, s_area, kAreaBytes) != Storage::Error::Ok) return ReadResult::Unavailable;
-                    stateA = CheckCopy(s_area, copyA);
-                    stateB = CheckCopy(s_area + kCopyBytes, copyB);
+                    for (uint32_t slot = 0; slot < kSlots; ++slot) states[slot] = CheckCopy(s_area + slot * kCopyBytes, records[slot]);
+                    return ReadResult::Ok;
+                }
+
+                // 按所有槽位的结论选出记录：取最高代次的那个，最高代次出现两次即视为损坏
+                // 没有任何有效槽位时区分"从未写过"（空区域）与"写过但都不可用"（损坏）
+                ReadResult SelectRecord(const CopyState* states, const Record* records, Record& record) {
+                    uint64_t best = 0;
+                    uint32_t bestSlot = 0;
+                    uint32_t bestCount = 0;
+                    bool wroteAnything = false;
+                    for (uint32_t slot = 0; slot < kSlots; ++slot) {
+                        if (states[slot] != CopyState::NotWritten) wroteAnything = true;
+                        if (states[slot] != CopyState::Valid) continue;
+                        if (records[slot].generation > best) {
+                            best = records[slot].generation;
+                            bestSlot = slot;
+                            bestCount = 1;
+                        } else if (records[slot].generation == best) {
+                            ++bestCount;
+                        }
+                    }
+                    if (bestCount == 0) return wroteAnything ? ReadResult::Corrupt : ReadResult::Empty;
+                    // 最高代次出现两次：写方违规或异常损坏，两份都不采用（不猜测）
+                    if (bestCount > 1) return ReadResult::Corrupt;
+                    record = records[bestSlot];
                     return ReadResult::Ok;
                 }
 
@@ -179,22 +194,8 @@ namespace Baleen {
                     switch (state) {
                         case CopyState::NotWritten: return CopyStatus::NotWritten;
                         case CopyState::Valid: return CopyStatus::Valid;
-                        case CopyState::Invalid: return CopyStatus::Invalid;
+                        default: return CopyStatus::Invalid;
                     }
-                    return CopyStatus::Invalid;
-                }
-
-                // 按两份副本的结论选出记录：两份都有效取代次更大的，代次相等按损坏；只有一份有效取它
-                ReadResult SelectRecord(CopyState stateA, const Record& copyA, CopyState stateB, const Record& copyB, Record& record) {
-                    if (stateA == CopyState::Valid && stateB == CopyState::Valid) {
-                        if (copyA.generation == copyB.generation) return ReadResult::Corrupt;
-                        record = copyA.generation > copyB.generation ? copyA : copyB;
-                        return ReadResult::Ok;
-                    }
-                    if (stateA == CopyState::Valid) { record = copyA; return ReadResult::Ok; }
-                    if (stateB == CopyState::Valid) { record = copyB; return ReadResult::Ok; }
-                    if (stateA == CopyState::NotWritten && stateB == CopyState::NotWritten) return ReadResult::Empty;
-                    return ReadResult::Corrupt;
                 }
 
                 // 维护操作的整块缓冲：清零与读回确认共用，不在栈上开
@@ -202,22 +203,22 @@ namespace Baleen {
             }
 
             ReadResult Read(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, Record& record) {
-                Record copyA, copyB;
-                CopyState stateA = CopyState::NotWritten, stateB = CopyState::NotWritten;
-                if (const ReadResult result = ReadCopies(medium, stateOffset, stateBytes, copyA, copyB, stateA, stateB); result != ReadResult::Ok) return result;
-                return SelectRecord(stateA, copyA, stateB, copyB, record);
+                Record records[kSlots];
+                CopyState states[kSlots] = {};
+                if (const ReadResult result = ReadSlots(medium, stateOffset, stateBytes, records, states); result != ReadResult::Ok) return result;
+                return SelectRecord(states, records, record);
             }
 
             Inspection Inspect(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes) {
                 Inspection inspection;
-                Record copyA, copyB;
-                CopyState stateA = CopyState::NotWritten, stateB = CopyState::NotWritten;
-                inspection.result = ReadCopies(medium, stateOffset, stateBytes, copyA, copyB, stateA, stateB);
-                inspection.copyA.status = ToStatus(stateA);
-                inspection.copyB.status = ToStatus(stateB);
-                if (stateA == CopyState::Valid) inspection.copyA.generation = copyA.generation;
-                if (stateB == CopyState::Valid) inspection.copyB.generation = copyB.generation;
-                if (inspection.result == ReadResult::Ok) inspection.result = SelectRecord(stateA, copyA, stateB, copyB, inspection.record);
+                Record records[kSlots];
+                CopyState states[kSlots] = {};
+                inspection.result = ReadSlots(medium, stateOffset, stateBytes, records, states);
+                for (uint32_t slot = 0; slot < kSlots; ++slot) {
+                    inspection.slots[slot].status = ToStatus(states[slot]);
+                    if (states[slot] == CopyState::Valid) inspection.slots[slot].generation = records[slot].generation;
+                }
+                if (inspection.result == ReadResult::Ok) inspection.result = SelectRecord(states, records, inspection.record);
                 return inspection;
             }
 
@@ -225,23 +226,27 @@ namespace Baleen {
                 if (stateOffset == 0 || stateBytes < kAreaBytes) return false;
                 if (!medium.Writable()) return false;
 
-                Record copyA, copyB;
-                CopyState stateA = CopyState::NotWritten, stateB = CopyState::NotWritten;
-                if (ReadCopies(medium, stateOffset, stateBytes, copyA, copyB, stateA, stateB) != ReadResult::Ok) return false;
+                Record records[kSlots];
+                CopyState states[kSlots] = {};
+                if (ReadSlots(medium, stateOffset, stateBytes, records, states) != ReadResult::Ok) return false;
 
-                // 目标副本：两份都有效时取代次较小的一份，否则取任意非有效副本，都非有效时取副本 A
-                bool writeB = false;
-                if (stateA == CopyState::Valid && stateB == CopyState::Valid) {
-                    if (copyA.generation == copyB.generation) return false;
-                    writeB = copyB.generation < copyA.generation;
-                } else {
-                    writeB = stateA == CopyState::Valid;
+                // 目标槽位：代次最低的那个（未写过视为最低，优先于任何有效槽位）
+                // 不变量：当前最新的槽位永不被覆盖——写完之后它仍是有效的旧记录，直到新槽位落盘
+                uint64_t generation = 0;
+                uint32_t targetSlot = 0;
+                uint64_t targetGeneration = 0;
+                bool targetPicked = false;
+                for (uint32_t slot = 0; slot < kSlots; ++slot) {
+                    const uint64_t slotGeneration = states[slot] == CopyState::Valid ? records[slot].generation : 0;
+                    if (states[slot] == CopyState::Valid && slotGeneration > generation) generation = slotGeneration;
+                    if (!targetPicked || slotGeneration < targetGeneration) {
+                        targetSlot = slot;
+                        targetGeneration = slotGeneration;
+                        targetPicked = true;
+                    }
                 }
 
-                // 代次：两份有效代次的最大值加一；达到全一说明写入路径失控
-                uint64_t generation = 0;
-                if (stateA == CopyState::Valid) generation = copyA.generation;
-                if (stateB == CopyState::Valid && copyB.generation > generation) generation = copyB.generation;
+                // 代次：所有有效槽位的最大值加一；达到全一说明写入路径失控
                 if (generation == 0xFFFFFFFFFFFFFFFFull) return false;
                 ++generation;
 
@@ -250,7 +255,7 @@ namespace Baleen {
                 if (effective.state == State::Trying && effective.attemptId == 0) effective.attemptId = generation;
                 if (!CombinationValid(effective)) return false;
 
-                // 构造整份副本：记录加零填充，校验和在末尾
+                // 构造整份槽位：记录加零填充，校验和在末尾
                 uint8_t copy[kCopyBytes] = {};
                 Put32(copy + kFieldMagic, kMagic);
                 Put16(copy + kFieldVersion, kVersion);
@@ -258,7 +263,8 @@ namespace Baleen {
                 Put64(copy + kFieldGeneration, generation);
                 copy[kFieldState] = static_cast<uint8_t>(effective.state);
                 copy[kFieldTries] = effective.triesRemaining;
-                Put16(copy + kFieldFlags, 0);
+                copy[kFieldTriesDone] = effective.triesDone;
+                copy[kFieldFlags] = 0;
                 Put32(copy + kFieldReserved, 0);
                 Put64(copy + kFieldAttemptId, effective.attemptId);
                 memcpy(copy + kFieldConfirmedBuildId, effective.confirmedBuildId, 32);
@@ -271,7 +277,7 @@ namespace Baleen {
                 memcpy(copy + kFieldRevokedKeyMask, effective.revocation.revokedKeyMask, Revocation::kKeyMaskBytes);
                 Put32(copy + kFieldChecksum, Crc32(copy, kFieldChecksum));
 
-                const uint64_t target = stateOffset + (writeB ? kCopyBytes : 0);
+                const uint64_t target = stateOffset + targetSlot * kCopyBytes;
                 if (medium.Write(target, copy, kCopyBytes) != Storage::Error::Ok) return false;
 
                 // 刷介质缓存（写入顺序第 4 步）：后端没有刷新原语时基类返回 Ok，
@@ -305,10 +311,20 @@ namespace Baleen {
 
             bool Repair(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t& writtenGeneration) {
                 Record record;
-                // 没有可用记录时不猜测目标集：空区域、两份都不可用、两份有效但代次相等都拒绝
+                // 没有可用记录时不猜测目标集：空区域、全部槽位不可用、最高代次出现两次都拒绝
                 if (Read(medium, stateOffset, stateBytes, record) != ReadResult::Ok) return false;
-                // 用读出的那份重建另一份：Write 落在非活动副本并抬代次，修复后两份都有效
-                return Write(medium, stateOffset, stateBytes, record, writtenGeneration);
+                // 用读出的那份重建每一个不可用槽位：每次写落在代次最低的槽位并抬一代，
+                // 因此修完的槽位代次互不相同，也不会与源槽位撞代次（最多修 kSlots - 1 个）
+                for (uint32_t round = 0; round < kSlots - 1; ++round) {
+                    Inspection inspection = Inspect(medium, stateOffset, stateBytes);
+                    bool damaged = false;
+                    for (uint32_t slot = 0; slot < kSlots; ++slot) {
+                        if (inspection.slots[slot].status != CopyStatus::Valid) damaged = true;
+                    }
+                    if (!damaged) return true;
+                    if (!Write(medium, stateOffset, stateBytes, record, writtenGeneration)) return false;
+                }
+                return true;
             }
 
             bool AcceptSeenSecurityVersion(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t acceptedVersion, uint64_t& writtenGeneration) {
@@ -333,6 +349,8 @@ namespace Baleen {
 
                 record.state = State::Pending;
                 record.triesRemaining = triesRemaining;
+                // 新候选的已试次数从零开始：它是“这一版试过几次”的账，换候选就重新记
+                record.triesDone = 0;
                 record.attemptId = 0;
                 memcpy(record.candidateBuildId, candidateBuildId, 32);
                 memcpy(record.candidateManifestDigest, candidateManifestDigest, 32);
@@ -356,6 +374,7 @@ namespace Baleen {
                 }
                 next.attemptId = 0;
                 next.triesRemaining = 0;
+                next.triesDone = 0;   // 候选转正：这一版已经跑通，重试的账清零
                 return Write(medium, stateOffset, stateBytes, next, writtenGeneration);
             }
         }

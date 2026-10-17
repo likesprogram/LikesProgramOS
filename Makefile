@@ -22,9 +22,24 @@
 #                                 例：make run-win hdd qemu built bios / make run-win iso qemu built uefi
 #      make clean                 删除顶层 Out/；make clean-all 连同子包与两类工具的产物
 #
+#      make check-all [WITH_BOOT=1]
+#                                 把验证收成一条命令：宿主侧 8 个检查工具串行执行，输出一张
+#                                 “通过/失败 + 用例计数”表；WITH_BOOT=1 再跑六档启动矩阵
+#                                 （HDD / ISO / HDD 当 U 盘 / ISO 写入 U 盘 × QEMU，HDD / CD × Bochs），
+#                                 每档抽三列：进内核 / 刷新路径 / 诊断编号
+#                                 输出落 Out/check/ —— **它是构建产物，不是证据目录**：
+#                                 make clean 与 clean-all 会连同 Out/ 一起删掉它，要长期留存的
+#                                 记录请把 CHECK_ALL_ARGS 里的 --out 指到 Out/ 之外
+#                                 例：make check-all / make check-all WITH_BOOT=1
+#                                 目标是脚本 Tools/Test/CheckAll.sh；make 的实参写不成
+#                                 “--with-boot”（那是 make 的未知选项），所以 make 侧用
+#                                 WITH_BOOT=1，脚本侧等价地接受 --with-boot
+#                                 其余参数经 CHECK_ALL_ARGS 透传，如 CHECK_ALL_ARGS="--timeout 120"
+#
 #    载荷来源：各子包的真实产物优先，缺失时用 Tools/Bin/MakePayloads 生成的占位件
-#    （EFI 引导镜像尚用占位件；系统卷由 Packages/LikesProgramOS 生成并含内核映像；
-#    布局描述由组装器生成；Stub、BaleenCore 与内核侧 Core 已有阶段性实现，
+#    （EFI 引导镜像与 ESP 已由 Packages/Baleen/Uefi 真实产出，占位件只在它缺失时顶上；
+#    系统卷由 Packages/LikesProgramOS 生成并含内核映像；
+#    布局描述由组装器生成；Stub、BaleenCore、UEFI 侧与内核侧 Core 已有阶段性实现，
 #    每个占位件都写明身份，构建时会打印实际用到的那一份）
 
 # 顶层产物目录
@@ -50,7 +65,7 @@ SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
 # 构建期宿主工具目录：默认构建与镜像组装依赖它们，缺失会直接失败
 TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/MakeKeys Tools/Build/MakeManifest Tools/Build/SignManifest Tools/Build/MakeRevocation
 # 测试与回归工具目录：手工执行，不进入默认构建
-TEST_TOOL_DIRS := Tools/Test/CheckIpl Tools/Test/CheckStub Tools/Test/CheckStorage Tools/Test/CheckExt4 Tools/Test/CheckCrypto Tools/Test/CheckSelect Tools/Test/CheckMemory Tools/Test/CheckRevocation Tools/Test/RunBootCase
+TEST_TOOL_DIRS := Tools/Test/CheckIpl Tools/Test/CheckStub Tools/Test/CheckStorage Tools/Test/CheckExt4 Tools/Test/CheckCrypto Tools/Test/CheckSelect Tools/Test/CheckMemory Tools/Test/CheckRevocation Tools/Test/CheckEfiBlockDevice Tools/Test/RunBootCase
 # 维护工具目录：面向介质与状态的运维动作，手工执行，不进入默认构建
 MAINTAIN_TOOL_DIRS := Tools/Maintain/FixBootState
 
@@ -175,7 +190,7 @@ RUN_WINDOWED := $(filter run-win,$(MAKECMDGOALS))
 RUN_LABEL := $(if $(RUN_WINDOWED),run-win,run)
 
 .DEFAULT_GOAL := all
-.PHONY: all images iso hdd packages tools test-tools compile-db payloads payload-report run run-win run-check run-uefi clean clean-all help qemu bochs built usb bios uefi
+.PHONY: all images iso hdd packages tools test-tools maintain-tools compile-db payloads payload-report run run-win run-check run-uefi check-all clean clean-all help qemu bochs built usb bios uefi
 
 # 默认目标
 all: images
@@ -207,6 +222,18 @@ test-tools:
 maintain-tools:
 	@for dir in $(MAINTAIN_TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
 
+# —— 验证：一条命令跑完宿主侧全部检查，可选追加启动矩阵 ——
+# 前提：test-tools 先把 8 个检查工具建到 Tools/Bin；WITH_BOOT=1 时再先建出两份镜像
+# 参数经 CHECK_ALL_ARGS 透传，如 CHECK_ALL_ARGS="--timeout 120"
+# ACCEPT=1 是工业验收：启动矩阵与状态演练之外再跑失败注入、4Kn 与 NVMe 控制器、引导状态机多轮
+CHECK_ALL_DEPS := test-tools maintain-tools \
+                  $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),images $(ISO) $(HDD)) \
+                  $(if $(filter 1,$(ACCEPT)),$(OUT_DIR)/LikesProgram.4kn.hdd $(OUT_DIR)/LikesProgram.degrade.hdd)
+CHECK_ALL_ARGS ?=
+
+check-all: $(CHECK_ALL_DEPS)
+	@Tools/Test/CheckAll.sh $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),--with-boot,) $(if $(filter 1,$(ACCEPT)),--accept,) $(CHECK_ALL_ARGS)
+
 # 生成 compile_commands.json：扫描子包与工具的编译命令，供 clangd 与编辑器取用
 compile-db:
 	@Tools/Build/MakeCompileDb.sh
@@ -231,12 +258,22 @@ $(ISO): payloads
 	    --volume-id $(VOLUME_ID) --sector-bytes $(DISK_SECTOR_BYTES) $(if $(LAYOUT),--layout $(LAYOUT),) $$kernel_arg \
 	    --manifest $(OUT_DIR)/LikesProgram.iso.json
 
+# 4Kn 验收镜像：同一批载荷按 4096 单位再组装一份分区表，供验收挂 4Kn 设备
+# 复用 hdd 的配方（不复制组装命令），只换产物路径与扇区单位
+$(OUT_DIR)/LikesProgram.4kn.hdd:
+	@$(MAKE) --no-print-directory hdd HDD=$@ DISK_SECTOR_BYTES=4096
+
+# 验收变体：布局描述里置"记录损坏时退到缺省集"的策略位，用于验收那条降级路径
+# 复用 hdd 的配方（不复制组装命令），只多带一个开关
+$(OUT_DIR)/LikesProgram.degrade.hdd:
+	@$(MAKE) --no-print-directory hdd HDD=$@ LAYOUT_DEGRADE=1
+
 # 组装整盘镜像（TestInstaller，测试安装器）：供写入内置硬盘 / 移动硬盘 / U 盘
 $(HDD): payloads
 	@$(MAKE) --no-print-directory payload-report
 	@kernel_arg=; \
 	[ ! -f "$(KERNEL_PATH_FILE)" ] || kernel_arg="--kernel-path $$(cat $(KERNEL_PATH_FILE))"; \
-	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) $(if $(LAYOUT),--layout $(LAYOUT),) $$kernel_arg --manifest $(OUT_DIR)/LikesProgram.hdd.json
+	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) $(if $(LAYOUT),--layout $(LAYOUT),) $$kernel_arg $(if $(filter 1,$(LAYOUT_DEGRADE)),--degrade-without-record,) --manifest $(OUT_DIR)/LikesProgram.hdd.json
 
 # 打印实际用到的是真实产物还是占位件
 payload-report:
@@ -375,6 +412,16 @@ help:
 	    '                         例：make run-win hdd qemu built bios' \
 	    '                         显示方式可覆盖：QEMU_DISPLAY_WIN= / BOCHS_DISPLAY_WIN=' \
 	    '  make run-uefi          = make run iso qemu built uefi' \
+	    '  make check-all [WITH_BOOT=1]' \
+	    '                         宿主侧 8 个检查工具串行跑完，出一张“通过/失败 + 用例计数”表；' \
+	    '                         WITH_BOOT=1 先建两份镜像，再跑六档启动矩阵，每档三列：' \
+	    '                         进内核 / 刷新路径 / 诊断编号' \
+	    '                         之后再跑引导状态演练：在介质副本上造出空区域、两份损坏、候选失败、' \
+	    '                         只剩痕迹等状态，各起一次真实引导，按“进内核/停机 + 编号 + 状态是否推进”核对' \
+	    '                         输出落 $(OUT_DIR)/check/ —— 构建产物，不是证据目录，clean 会删；' \
+	    '  make check-all ACCEPT=1  工业验收：再加失败注入（描述符区 / Stub / BaleanCore / 布局描述逐层弄坏）、' \
+	    '                         NVMe 与 4Kn 介质控制器、引导状态机多轮（十档矩阵与状态演练约 1 分钟，验收约 1 分 40 秒）' \
+	    '                         参数透传：CHECK_ALL_ARGS="--out /tmp/check --timeout 120"' \
 	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与两类工具' \
 	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；只影响 Ext4 分区项，ESP 固定双份' \
 	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME（默认取真实产物，缺失时用占位件）；LAYOUT 为可选的布局描述模板'

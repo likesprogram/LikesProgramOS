@@ -26,7 +26,7 @@ namespace Baleen {
         static constexpr uint32_t kFieldVersion = 0x004;         // 版本
         static constexpr uint32_t kFieldHeaderBytes = 0x006;     // 头部长度
         static constexpr uint32_t kFieldLayoutBytes = 0x008;     // 有效长度
-        static constexpr uint32_t kFieldFlags = 0x00C;           // 标志，当前为 0
+        static constexpr uint32_t kFieldFlags = 0x00C;           // 标志；已定义的位见下，未定义的位必须为 0
         static constexpr uint32_t kFieldVolumeUuid = 0x010;      // 卷标识（Ext4 s_uuid，16 字节）
         static constexpr uint32_t kFieldVolumeOffset = 0x020;    // 系统卷起始字节偏移（8 字节）
         static constexpr uint32_t kFieldVolumeBytes = 0x028;     // 系统卷长度（8 字节）
@@ -36,6 +36,13 @@ namespace Baleen {
         static constexpr uint32_t kFieldReserved = 0x03E;        // 保留（2 字节）
         static constexpr uint32_t kFieldKernelPath = 0x040;      // 内核路径（256 字节字段）
         static constexpr uint32_t kFieldChecksum = 0x140;        // 校验和（4 字节）
+
+        // 标志位：位 0 = 引导状态记录损坏时允许退到本描述指定的缺省集
+        // 默认不置位：记录损坏意味着设备已见最高安全版本与记录里的吊销并集都丢了，
+        // 那时直启缺省集是可用性换掉一档防回滚强度；要不要换由介质侧显式声明
+        static constexpr uint32_t kFlagDegradeWithoutRecord = 0x00000001;
+        // 已定义的标志位合集：位运算之外的位一律拒绝（E-CORE-22 / E-UEFI-22）
+        static constexpr uint32_t kKnownFlags = kFlagDegradeWithoutRecord;
 
         // 引导状态区域的默认位置与长度
         static constexpr uint64_t kStateOffset = 0x21000;

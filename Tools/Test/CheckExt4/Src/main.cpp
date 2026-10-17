@@ -6,7 +6,8 @@
     按宿主选项编译后直接运行，不做第二份参考解析
     检查分两类：
     1. 真实卷夹具：用 mkfs 生成带已知文件的 Ext4 卷，核对按路径读取的字节与原文件一致，
-       覆盖空文件、奇数长度、跨 extent 树的文件与多级目录
+       覆盖空文件、奇数长度、跨 extent 树的文件与多级目录，以及目录遍历的目录项集合、
+       类型、长度、游标推进与名字缓冲过小
     2. 故障注入：坏 superblock、未知与拒绝特性、缺失解析前提位、64 位卷的高位块数与
        描述符大小、卷状态位、越界块号、错误卷偏移，以及块设备适配器的窗口中转、
        对齐与读盘失败路径
@@ -29,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -43,7 +45,7 @@ namespace {
     namespace fs = std::filesystem;
     using Bytes = std::vector<uint8_t>;
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 20;
+    constexpr unsigned kCaseCount = 25;
     // 已跑用例数
     unsigned g_ran = 0;
     // 夹具卷的固定参数：16 MiB、4096 字节块，卷标识与 mkfs 参数一致
@@ -294,6 +296,28 @@ namespace {
         Require(fs.Read(id, expected.size(), buffer.data(), 16, tail) == Storage::Error::Ok && tail == 0, std::string("文件尾之后应读到 0：") + path);
     }
 
+    // 列一个目录的全部目录项：从游标 0 起反复读，直到遍历结束返回 NotFound
+    // 名字按字典序归集，事实一并带回；顺手核对结尾空字符与重复项
+    std::map<std::string, Storage::FileInfo> ListDirectory(Storage::FileSystem& filesystem, const char* path) {
+        Storage::FileId id;
+        Require(filesystem.Open(path, id) == Storage::Error::Ok, std::string("Open 应成功：") + path);
+        std::map<std::string, Storage::FileInfo> entries;
+        uint64_t cursor = 0;
+        for (;;) {
+            char name[128] = {};
+            uint32_t nameLength = 0;
+            Storage::FileInfo info;
+            const Storage::Error error = filesystem.ReadDirectory(id, cursor, name, sizeof(name), nameLength, info);
+            if (error == Storage::Error::NotFound) break;
+            Require(error == Storage::Error::Ok, std::string("ReadDirectory 应成功：") + path);
+            Require(nameLength > 0 && name[nameLength] == '\0', "目录项名字应以空字符结尾");
+            const std::string entry(name, nameLength);
+            Require(entries.find(entry) == entries.end(), "目录项不应重复：" + entry);
+            entries.emplace(entry, info);
+        }
+        return entries;
+    }
+
     // 用例：挂载卷并核对卷事实
     void CaseMountFacts() {
         Mounted mounted;
@@ -302,7 +326,7 @@ namespace {
         Require(mounted.fs.InodesCount() > 0 && mounted.fs.BlocksCount() == kVolumeBlocks, "卷块数应为 8192");
         Require(mounted.fs.Uuid() != nullptr && std::memcmp(mounted.fs.Uuid(), kVolumeUuid, 16) == 0, "卷标识应与 mkfs 指定的一致");
         const Storage::FileSystemCaps caps = mounted.fs.Caps();
-        Require(!caps.writable && !caps.directoryListing && !caps.symlinks, "能力位应为只读、不遍历、不跟随符号链接");
+        Require(!caps.writable && caps.directoryListing && !caps.symlinks, "能力位应为只读、可列目录、不跟随符号链接");
         Require(std::strcmp(mounted.fs.Format(), "ext4") == 0, "格式名应为 ext4");
         // 根目录可解析
         Storage::FileId root;
@@ -565,18 +589,114 @@ namespace {
         device.BindWrite(&AcceptWrite);
         // 没有绑定刷新服务：按“无可用原语”通过
         Require(device.Flush() == Storage::Error::Ok, "未绑定刷新服务时应通过");
-        device.BindFlush(&FlushStub);
+        // 覆盖核验成立：主流程已确认这个可刷新端口就是启动介质所在的设备
+        device.BindFlush(&FlushStub, true);
+        Require(device.HasFlushPrimitive(), "写服务与刷新服务都在且覆盖成立时才算有原语");
         g_flushOutcome = Baleen::Core::FlushOutcome::Unsupported;
         Require(device.Flush() == Storage::Error::Ok, "无可用原语时应通过");
         g_flushOutcome = Baleen::Core::FlushOutcome::Flushed;
         Require(device.Flush() == Storage::Error::Ok, "刷新成立时应通过");
         g_flushOutcome = Baleen::Core::FlushOutcome::Failed;
         Require(device.Flush() == Storage::Error::Io, "刷新失败时按写失败返回 Io");
+        // 端口是别人的：刷新函数在，但它刷的不是本介质——不算有原语，状态写入要据此报持久化边界
+        Baleen::Core::BiosBlockDevice foreign;
+        foreign.Bind(&ForwardRead, 512, window, 1024, 1u << 20);
+        foreign.BindWrite(&AcceptWrite);
+        foreign.BindFlush(&FlushStub, false);
+        Require(!foreign.HasFlushPrimitive(), "覆盖核验不成立时不得声称有刷新原语");
+        g_flushOutcome = Baleen::Core::FlushOutcome::Flushed;
+        Require(foreign.Flush() == Storage::Error::Ok, "覆盖不成立时刷新照旧下发（读到通过即可）");
         // 只读设备没有写缓存要刷：即使绑了刷新服务也不调用
         Baleen::Core::BiosBlockDevice readOnly;
         readOnly.Bind(&ForwardRead, 512, window, 1024, 1u << 20);
-        readOnly.BindFlush(&FlushStub);
+        readOnly.BindFlush(&FlushStub, true);
+        Require(!readOnly.HasFlushPrimitive(), "没有写服务的介质不得声称有刷新原语");
         Require(readOnly.Flush() == Storage::Error::Ok, "只读设备的刷新应通过");
+    }
+
+    // 用例：列出内核集目录——目录项集合、类型与长度都要对，"." 与 ".." 不作为目录项交出
+    void CaseListSetDirectory() {
+        Mounted mounted;
+        Require(MountFixture(mounted, ReadBytes(g_volume)) == Storage::Error::Ok, "挂载应成功");
+        const std::map<std::string, Storage::FileInfo> entries = ListDirectory(mounted.fs, kSystemDir);
+        Require(entries.size() == 2, "内核集目录应有两个目录项");
+        Require(entries.count(".") == 0 && entries.count("..") == 0, "\".\" 与 \"..\" 不应作为目录项交出");
+        const auto kernel = entries.find("LikesProgram.os");
+        Require(kernel != entries.end() && !kernel->second.directory, "内核镜像应是常规文件");
+        Require(kernel != entries.end() && kernel->second.bytes == kKernelBytes, "内核镜像长度应与夹具一致");
+        const auto modules = entries.find("Modules");
+        Require(modules != entries.end() && modules->second.directory, "Modules 应是目录");
+        Require(modules != entries.end() && modules->second.bytes == 0, "目录的长度应为 0");
+    }
+
+    // 用例：列根目录——目录项集合与空文件的零长度；mkfs 会在根目录建 lost+found，一并核对
+    void CaseListRoot() {
+        Mounted mounted;
+        Require(MountFixture(mounted, ReadBytes(g_volume)) == Storage::Error::Ok, "挂载应成功");
+        const std::map<std::string, Storage::FileInfo> entries = ListDirectory(mounted.fs, "/");
+        Require(entries.size() == 4, "根目录应有四个目录项");
+        Require(entries.count("lost+found") == 1 && entries.at("lost+found").directory, "mkfs 建的 lost+found 应是目录");
+        Require(entries.count("LikesProgram") == 1 && entries.at("LikesProgram").directory, "LikesProgram 应是目录");
+        Require(entries.count("big.bin") == 1 && entries.at("big.bin").bytes == kBigBytes, "big.bin 长度应与夹具一致");
+        Require(entries.count("empty.bin") == 1 && entries.at("empty.bin").bytes == 0, "空文件长度应为 0");
+    }
+
+    // 用例：名字缓冲放不下时返回 NameTooLong 且不推进游标，换大缓冲可以接着读
+    void CaseListSmallBuffer() {
+        Mounted mounted;
+        Require(MountFixture(mounted, ReadBytes(g_volume)) == Storage::Error::Ok, "挂载应成功");
+        Storage::FileId id;
+        Require(mounted.fs.Open(kSystemDir, id) == Storage::Error::Ok, "内核集目录应可打开");
+        char small[4] = {};
+        uint32_t nameLength = 0;
+        Storage::FileInfo info;
+        uint64_t cursor = 0;
+        Require(mounted.fs.ReadDirectory(id, cursor, small, sizeof(small), nameLength, info) == Storage::Error::NameTooLong, "缓冲过小应返回 NameTooLong");
+        Require(cursor == 0, "缓冲过小时不应推进游标");
+        char large[128] = {};
+        Require(mounted.fs.ReadDirectory(id, cursor, large, sizeof(large), nameLength, info) == Storage::Error::Ok, "换大缓冲应能继续");
+        Require(nameLength > 0 && cursor != 0, "读出目录项后应推进游标");
+    }
+
+    // 用例：游标语义——按上一项返回的游标接着读，读完之后停在 NotFound
+    void CaseListCursor() {
+        Mounted mounted;
+        Require(MountFixture(mounted, ReadBytes(g_volume)) == Storage::Error::Ok, "挂载应成功");
+        Storage::FileId id;
+        Require(mounted.fs.Open(kSystemDir, id) == Storage::Error::Ok, "内核集目录应可打开");
+        uint32_t seen = 0;
+        uint64_t cursor = 0;
+        for (;;) {
+            char name[128] = {};
+            uint32_t nameLength = 0;
+            Storage::FileInfo info;
+            if (mounted.fs.ReadDirectory(id, cursor, name, sizeof(name), nameLength, info) == Storage::Error::NotFound) break;
+            ++seen;
+            Require(seen <= 8, "遍历没有在有限步内结束");
+        }
+        Require(seen == 2, "游标遍历应恰好走完两个目录项");
+        // 游标越过目录尾之后仍是遍历结束，不是错误
+        uint64_t beyond = 1u << 20;
+        char name[128] = {};
+        uint32_t nameLength = 0;
+        Storage::FileInfo info;
+        Require(mounted.fs.ReadDirectory(id, beyond, name, sizeof(name), nameLength, info) == Storage::Error::NotFound, "目录尾之后应返回 NotFound");
+    }
+
+    // 用例：对常规文件与越界标识调用目录遍历的错误映射
+    void CaseListErrors() {
+        Mounted mounted;
+        Require(MountFixture(mounted, ReadBytes(g_volume)) == Storage::Error::Ok, "挂载应成功");
+        Storage::FileId file;
+        Require(mounted.fs.Open("/big.bin", file) == Storage::Error::Ok, "常规文件应可打开");
+        char name[128] = {};
+        uint32_t nameLength = 0;
+        Storage::FileInfo info;
+        uint64_t cursor = 0;
+        Require(mounted.fs.ReadDirectory(file, cursor, name, sizeof(name), nameLength, info) == Storage::Error::NotDirectory, "对常规文件应返回 NotDirectory");
+        Require(mounted.fs.ReadDirectory(file, cursor, nullptr, sizeof(name), nameLength, info) == Storage::Error::InvalidArgument, "名字缓冲为空应返回 InvalidArgument");
+        Storage::FileId missing{999999};
+        Require(mounted.fs.ReadDirectory(missing, cursor, name, sizeof(name), nameLength, info) != Storage::Error::Ok, "越界标识应上报失败");
     }
 
     // 跑全部用例并核对数量
@@ -601,6 +721,11 @@ namespace {
         Case("读盘失败传播", CaseReadFailure);
         Case("未绑定块设备", CaseUnboundDevice);
         Case("写缓存刷新的返回值映射", CaseFlushMapping);
+        Case("列出内核集目录", CaseListSetDirectory);
+        Case("列出根目录", CaseListRoot);
+        Case("目录项名字缓冲过小", CaseListSmallBuffer);
+        Case("目录遍历游标", CaseListCursor);
+        Case("目录遍历错误映射", CaseListErrors);
         Require(g_ran == kCaseCount, "用例数量与登记不符");
         std::cout << "CheckExt4: " << g_ran << " 项用例全部通过" << std::endl;
     }

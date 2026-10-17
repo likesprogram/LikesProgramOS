@@ -6,8 +6,8 @@
     字段偏移、固定取值与摘要覆盖区间完全一致
     字节表与自引用处理见 Packages/Baleen/Stub/README.md 第三、四节
     本文件只做机制：校验失败只回报带编号的原因，打印与停机由调用方决定
-    同一原因在检测阶段各有编号（Stub 阶段 E-STUB-40 起、BaleenCore 阶段 E-CORE-40 起）：
-    编号标识在哪个阶段查出什么，序号在两个阶段一致
+    同一原因在检测阶段各有编号（Stub 阶段 E-STUB-40 起、BaleenCore 阶段 E-CORE-40 起、
+    UEFI 阶段 E-UEFI-40 起）：编号标识在哪个阶段查出什么，序号在三个阶段一致
 */
 
 #pragma once
@@ -95,6 +95,7 @@ namespace Baleen {
     enum class ImageDiagStage : uint32_t {
         Stub = 0,   // Stub 阶段，编号前缀 E-STUB
         Core = 1,   // BaleenCore 阶段，编号前缀 E-CORE
+        Uefi = 2,   // UEFI 阶段，编号前缀 E-UEFI
     };
 
     // 按小端读取 16 位

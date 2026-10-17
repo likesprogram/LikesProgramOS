@@ -126,6 +126,14 @@ namespace {
     Baleen::Core::Ext4FileSystem s_ext4;
     // 布局描述原字节
     uint8_t s_layoutBlock[kLayoutBlockBytes] = {};
+    // 内核路径与 BIOS 驱动器号：都放在静态存储里，交接后由内核按物理地址读取
+    // 内核路径原本是 _Core_Main 的局部量，交接时把栈地址交给内核太脆；驱动器号只对固件环境有意义，供诊断
+    char s_kernelPath[Baleen::LayoutDescriptor::kKernelPathMaxBytes + 1] = {};
+    uint8_t s_biosDrive = 0;
+    // 刷新结论：可刷新的端口是不是启动介质所在的设备（读首块后经 AHCI 直读核验）
+    bool s_flushCovers = false;
+    // 启动介质的第 0 号块：身份核验的比对基准（光盘与硬盘在这一块上必然不同，布局描述块则可能相同）
+    uint8_t s_firstBlock[kLayoutBlockBytes] = {};
     // 选版结果：目标集路径、集目录与集身份
     Baleen::Core::SelectedSet s_selected;
     // 交权块：固定字段校验通过后常驻，Fail 路径经它取读盘失败记录
@@ -169,7 +177,7 @@ namespace {
         if (Get16(block + LayoutDescriptor::kFieldVersion) != LayoutDescriptor::kVersion) return kFailLayoutVersion;
         if (Get16(block + LayoutDescriptor::kFieldHeaderBytes) != LayoutDescriptor::kHeaderBytes) return kFailLayoutHead;
         if (Get32(block + LayoutDescriptor::kFieldLayoutBytes) != LayoutDescriptor::kLayoutBytes) return kFailLayoutBytes;
-        if (Get32(block + LayoutDescriptor::kFieldFlags) != 0) return kFailLayoutFlags;
+        if ((Get32(block + LayoutDescriptor::kFieldFlags) & ~LayoutDescriptor::kKnownFlags) != 0) return kFailLayoutFlags;
         if (Get16(block + LayoutDescriptor::kFieldReserved) != 0) return kFailLayoutReserved;
         if (Get32(block + LayoutDescriptor::kFieldChecksum) != LayoutDescriptor::Checksum(block)) return kFailLayoutChecksum;
         const uint32_t pathBytes = Get16(block + LayoutDescriptor::kFieldKernelPathBytes);
@@ -247,10 +255,12 @@ namespace {
         return total;
     }
 
-    // 构造交给内核的 BootInfo：字段取自交权块，内存图复制到本阶段的静态存储
+    // 构造交给内核的 BootInfo：字段取自交权块与布局描述，内存图复制到本阶段的静态存储
     // 固件状态填 None：BIOS 路径进入长模式后没有可调用的固件服务，内核按这个事实固定运行模式
     // 输出通道按事实给出：调试口无条件可用，串口以存在性探测为准；内核按这些位装配自己的控制台
+    // 启动来源取自布局描述：内核与运行期更新据此定位启动介质、系统卷、状态区域与内核路径
     void BuildBootInfo(const Baleen::CoreHandoff& handoff, const Baleen::Core::SelectedSet& selected) {
+        using Baleen::LayoutDescriptor;
         uint32_t count = handoff.memoryMapCount;
         if (count > kMemoryMapEntries) count = kMemoryMapEntries;
         for (uint32_t i = 0; i < count; ++i) s_bootMemoryMap[i] = handoff.memoryMap[i];
@@ -272,6 +282,26 @@ namespace {
         if (selected.verified) memcpy(s_bootInfo.kernelSetBuildId, selected.buildId, Boot::InfoLayout::kKernelSetBuildIdBytes);
         else for (uint32_t i = 0; i < Boot::InfoLayout::kKernelSetBuildIdBytes; ++i) s_bootInfo.kernelSetBuildId[i] = 0;
         s_bootInfo.attemptId = selected.attemptId;
+        // —— 启动来源：布局描述给出的位置事实，加固件环境自己的介质事实 ——
+        s_bootInfo.layoutOffset = LayoutDescriptor::kOffset;
+        s_bootInfo.volumeOffset = Get64(s_layoutBlock + LayoutDescriptor::kFieldVolumeOffset);
+        s_bootInfo.volumeBytes = Get64(s_layoutBlock + LayoutDescriptor::kFieldVolumeBytes);
+        s_bootInfo.stateOffset = Get64(s_layoutBlock + LayoutDescriptor::kFieldStateOffset);
+        s_bootInfo.stateBytes = Get32(s_layoutBlock + LayoutDescriptor::kFieldStateBytes);
+        // 交权块没有介质容量这个事实：如实填 0（未提供），不按 LBA 上限猜
+        s_bootInfo.mediumBytes = 0;
+        s_bootInfo.kernelPathBytes = Get16(s_layoutBlock + LayoutDescriptor::kFieldKernelPathBytes);
+        s_bootInfo.kernelPath = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(s_kernelPath));
+        for (uint32_t i = 0; i < Boot::InfoLayout::kVolumeUuidBytes; ++i)
+            s_bootInfo.volumeUuid[i] = s_layoutBlock[LayoutDescriptor::kFieldVolumeUuid + i];
+        // 设备线索：IPL 交权时的驱动器号，只对固件环境有意义，给内核用于诊断与人工定位
+        s_bootInfo.devicePath = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&s_biosDrive));
+        s_bootInfo.devicePathBytes = 1;
+        s_bootInfo.deviceKind = static_cast<uint32_t>(Boot::DeviceKind::BiosDrive);
+        // 引导器自身占用区间：内核不得把 BaleenCore 的残留当可用内存
+        s_bootInfo.loaderBegin = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(__image_start));
+        s_bootInfo.loaderBytes = static_cast<uint64_t>(__bss_end - __image_start);
+        for (uint32_t i = 0; i < 4; ++i) s_bootInfo.reserved1[i] = 0;
     }
 
     // 建恒等映射页表：PML4[0] 指向 PDPT，PDPT 的 4 项各指向一张页目录，2MiB 大页覆盖低 4GiB
@@ -355,7 +385,9 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Print::WriteHex(s_cpu.HasPae() ? 1 : 0);
     Print::Write(" Long=");
     Print::WriteHex(s_cpu.HasLongMode() ? 1 : 0);
-    Print::Write(" Nx=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Nx=");
     Print::WriteHex(s_cpu.HasNx() ? 1 : 0);
     Print::Write(" Build=");
     Print::WriteHex(facts.buildId);
@@ -390,10 +422,18 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     s_medium.Bind(handoff->readSectors, handoff->sectorBytes, bounce, Baleen::kBounceBytes, static_cast<uint64_t>(handoff->sectorBytes) << 32);
     // 写能力：引导状态区的写入经 Stub 的写盘服务执行；介质不提供写服务时写入失败并按降级路径处理
     s_medium.BindWrite(handoff->writeSectors);
-    s_medium.BindFlush(&FlushMedium);
     if (s_medium.BlockBytes() != handoff->sectorBytes || s_medium.BlockBytes() == 0) Fail(kFailBindDisk);
     if (const Storage::Error error = s_medium.Read(Baleen::LayoutDescriptor::kOffset, s_layoutBlock, sizeof(s_layoutBlock)); error != Storage::Error::Ok)
         Fail(kFailReadLayout, Storage::ErrorMessage(error));
+    // 刷新能力：先看平台有没有可刷新的端口，再用"同一段字节经两种路径读出的内容"核验覆盖关系
+    // 比对基准取**第 0 号块**而不是布局描述块：同一批载荷装出来的光盘与硬盘，布局描述块逐字节相同，
+    // 拿它比对会把"刷别人"判成"刷自己"；第 0 号块带分区表或 ISO 结构，两者必然不同
+    // 只在有端口时做这次核验（读一个空闲命令槽、只读不写）；核验不成立就按未覆盖处理
+    if (Baleen::Core::DiskFlush::Probe() != Baleen::Core::DiskFlush::Path::None &&
+        s_medium.Read(0, s_firstBlock, s_medium.BlockBytes()) == Storage::Error::Ok) {
+        s_flushCovers = Baleen::Core::DiskFlush::CoversMedium(0, s_firstBlock, s_medium.BlockBytes());
+    }
+    s_medium.BindFlush(&FlushMedium, s_flushCovers);
     if (const Baleen::Diagnostic reason = CheckLayoutBlock(s_layoutBlock); reason.code != nullptr) Fail(reason);
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The layout descriptor is valid");
     const uint64_t volumeOffset = Get64(s_layoutBlock + Baleen::LayoutDescriptor::kFieldVolumeOffset);
@@ -401,19 +441,22 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     const uint64_t stateOffset = Get64(s_layoutBlock + Baleen::LayoutDescriptor::kFieldStateOffset);
     const uint32_t stateBytes = Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldStateBytes);
     const uint32_t kernelPathBytes = Get16(s_layoutBlock + Baleen::LayoutDescriptor::kFieldKernelPathBytes);
-    char kernelPath[Baleen::LayoutDescriptor::kKernelPathMaxBytes + 1] = {};
-    memcpy(kernelPath, s_layoutBlock + Baleen::LayoutDescriptor::kFieldKernelPath, kernelPathBytes);
+    memcpy(s_kernelPath, s_layoutBlock + Baleen::LayoutDescriptor::kFieldKernelPath, kernelPathBytes);
+    // 设备线索：IPL 交权时的驱动器号，随 BootInfo 交给内核用于诊断与人工定位
+    s_biosDrive = static_cast<uint8_t>(handoff->drive);
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Volume=");
     Print::WriteHex64(volumeOffset);
     Print::Write(" Bytes=");
     Print::WriteHex64(volumeBytes);
-    Print::Write(" State=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("State=");
     Print::WriteHex64(stateOffset);
     Print::Write("\r\n");
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Kernel=");
-    Print::Write(kernelPath);
+    Print::Write(s_kernelPath);
     Print::Write("\r\n");
 
     // —— 系统卷：在介质设备上开偏移视图，挂 Ext4 并核对卷标识 ——
@@ -436,24 +479,27 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
 
     // —— 写缓存刷新能力：交权块没有刷新原语，写缓存由本阶段直接刷新（AHCI 优先，传统 IDE 兜底）——
     // 没有可刷新的端口是正常形态（光盘、USB、NVMe），不是失败；有端口时给出路径与结论
+    // 有端口还不够：还要核验那个端口上挂的是不是启动介质——刷别人不算持久（s_flushCovers）
     {
         const Baleen::Core::DiskFlush::Path path = Baleen::Core::DiskFlush::Probe();
         const bool flushable = path != Baleen::Core::DiskFlush::Path::None;
-        Baleen::PrintTargets::WriteLine(flushable ? Baleen::PrintTargets::Tag::Ok : Baleen::PrintTargets::Tag::Info,
-                                        flushable ? "The write cache can be flushed on this medium" : "No write cache flush primitive is available on this medium");
+        Baleen::PrintTargets::WriteLine(flushable ? Baleen::PrintTargets::Tag::Ok : Baleen::PrintTargets::Tag::Info, flushable ? "The write cache can be flushed on this medium" : "No write cache flush primitive is available on this medium");
         if (flushable) {
             Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
             Print::Write("Flush=");
             Print::Write(Baleen::Core::DiskFlush::PathText(path));
             Print::Write("\r\n");
         }
+        // 覆盖结论单独一行：只有它成立，提交才敢声称持久；不成立时状态写入会报 E-CORE-71
+        if (flushable && !s_flushCovers)
+            Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "The flushable port isn't this medium's device; the boot state write has no durable guarantee");
     }
 
     // —— 选版：读引导状态记录，选出目标集并验证清单与签名 ——
     // 状态机与写入边界见 Docs/Specs/内核集更新与回滚.md 与 Baleen/引导状态记录.md；
     // 清单与信任锚见 Docs/Specs/内核集清单与签名.md；只读介质与写失败按降级路径直启
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Selecting the kernel set");
-    if (const Baleen::Diagnostic reason = Baleen::Core::SelectKernelSet(s_ext4, s_medium, stateOffset, stateBytes, kernelPath, s_selected); reason.code != nullptr)
+    if (const Baleen::Diagnostic reason = Baleen::Core::SelectKernelSet(s_ext4, s_medium, stateOffset, stateBytes, s_kernelPath, Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldFlags), s_selected); reason.code != nullptr)
         Fail(reason);
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, s_selected.verified ? "The kernel set is verified" : "No kernel set identity; starting the image the layout names");
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
@@ -468,7 +514,9 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     } else {
         Print::Write("none");
     }
-    Print::Write(" Attempt=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Attempt=");
     Print::WriteHex64(s_selected.attemptId);
     Print::Write("\r\n");
 
@@ -537,6 +585,25 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Print::WriteHex(s_bootInfo.memoryMapCount);
     Print::Write(" Channels=");
     Print::WriteHex(s_bootInfo.channels);
+    Print::Write("\r\n");
+    // 启动来源：内核与运行期更新据此知道“从哪个卷、哪条路径起来的”
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Boot=Volume=");
+    Print::WriteHex64(s_bootInfo.volumeOffset);
+    Print::Write(" Bytes=");
+    Print::WriteHex64(s_bootInfo.volumeBytes);
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("State=");
+    Print::WriteHex64(s_bootInfo.stateOffset);
+    Print::Write(" Kind=");
+    Print::WriteHex(s_bootInfo.deviceKind);
+    Print::Write(" Drive=");
+    Print::WriteHex(s_biosDrive);
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Path=");
+    Print::Write(s_kernelPath);
     Print::Write("\r\n");
 
     // 引导耗时：从 Stub 进入起算到交接完成的总耗时与本阶段耗时，预算判定同行的 Verdict 给出
