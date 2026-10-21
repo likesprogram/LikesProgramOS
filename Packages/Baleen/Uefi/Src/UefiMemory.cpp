@@ -13,6 +13,12 @@ namespace {
     // 按小端把描述符里的物理起址与页数换算成字节长度：页大小固定 4096
     uint64_t RegionBytes(uint64_t pages) { return pages * Baleen::Uefi::kPageBytes; }
 
+    // 退出启动服务之前只有常规内存算可用：装载跨度必须落在它上面，
+    // 启动服务内存与引导器内存这时还在固件手里，不能当可写目标
+    bool UsableBeforeExit(uint32_t type) {
+        return type == Baleen::Uefi::kMemoryConventional;
+    }
+
     // 该类型的内存在退出启动服务之后是否归系统使用
     bool UsableAfterExit(uint32_t type) {
         using namespace Baleen::Uefi;
@@ -66,7 +72,7 @@ namespace Baleen {
             return kFailMemoryMapRead;
         }
 
-        uint32_t MemoryMap::Convert() {
+        uint32_t MemoryMap::Convert(bool afterExit) {
             m_count = 0;
             m_truncated = false;
             if (m_buffer == nullptr || m_descriptorBytes == 0) return 0;
@@ -77,9 +83,10 @@ namespace Baleen {
                     m_truncated = true;
                     break;
                 }
+                const bool usable = afterExit ? UsableAfterExit(descriptor->type) : UsableBeforeExit(descriptor->type);
                 m_entries[m_count].base = descriptor->physicalStart;
                 m_entries[m_count].length = RegionBytes(descriptor->pages);
-                m_entries[m_count].type = UsableAfterExit(descriptor->type) ? 1u : 2u;
+                m_entries[m_count].type = usable ? 1u : 2u;
                 m_entries[m_count].attributes = 1u;   // bit0 置 1：条目有效；内核侧只按类型判定
                 ++m_count;
             }

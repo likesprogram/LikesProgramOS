@@ -9,7 +9,7 @@
 | `Include/Storage/`、`Src/Storage/` | 块设备、偏移视图、统一路径与文件系统抽象 | 同上 |
 | `Include/BootInfo.hpp` | 引导交接契约：尺寸、版本、固件状态、介质与内存图 | Baleen 各阶段、内核 |
 | `Include/KernelImage.hpp`、`Src/KernelImage.cpp` | 内核镜像数据的字段布局与校验，字节表见 [内核镜像数据](../../Docs/Specs/Baleen/内核镜像数据.md) | BaleenCore、内核侧 Core |
-| `Include/BootState.hpp`、`Src/BootState.cpp` | 引导状态记录：双副本校验与选择、写入顺序（写 → 刷盘 → 读回）、副本级检查与受控恢复（清零 / 按有效副本修复）与人工接受，字节表见 [引导状态记录](../../Docs/Specs/Baleen/引导状态记录.md) | BaleenCore 的选版、运行期 Updater / Init、维护工具 [FixBootState](../../Tools/Maintain/FixBootState/README.md) |
+| `Include/BootState.hpp`、`Src/BootState.cpp` | 引导状态记录：八槽环形的槽位校验与选择、写入顺序（写 → 刷盘 → 读回）、槽位级检查与受控恢复（清零 / 按有效槽位修复）与人工接受，提交按设备逻辑块落盘（4Kn 上读—改—写整块），字节表见 [引导状态记录](../../Docs/Specs/Baleen/引导状态记录.md) | BaleenCore 的选版、运行期 Updater / Init、维护工具 [FixBootState](../../Tools/Maintain/FixBootState/README.md) |
 | `Include/Revocation.hpp`、`Src/Revocation.cpp` | 签名吊销记录（`LPRV`）：字节表、结构检查、签名覆盖准备、签名者自吊销拒绝、位图判定与并集，以及从系统卷读取的三态结论，见[内核集清单与签名](../../Docs/Specs/内核集清单与签名.md) 5.1、5.2 | BaleenCore 的选版、宿主工具 [MakeRevocation](../../Tools/Build/MakeRevocation/README.md) 与 [CheckRevocation](../../Tools/Test/CheckRevocation/README.md)；运行期读取方待内核存储阶段 |
 
 `BootState` 放在共用包是**规格要求的一部分**：运行期确认写入与引导期选择必须使用同一状态存储后端和记录格式（[内核集更新与回滚](../../Docs/Specs/内核集更新与回滚.md)第三节），因此两侧引用同一份实现，而不是各写一份“约定”。记录里的 `SeenSecurityVersion` 只在人工接受时下调（同样在本文件里实现），抬高由选择器随清单更新完成；记录还带吊销事实（纪元、下限、已吊销密钥位图），运行期写入方必须读—改—写、原样保留这三个字段与已试次数 `TriesDone`。**记录格式尚未发布，只有版本 1**：字段调整直接改字节表，不留兼容分支。

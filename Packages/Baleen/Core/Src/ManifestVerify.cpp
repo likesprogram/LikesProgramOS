@@ -11,6 +11,7 @@
 #include <BootMemory.hpp>
 #include <Ed25519.hpp>
 #include <KernelImage.hpp>
+#include <LayoutCheck.hpp>
 #include <Libc.hpp>
 #include <SecurityFloor.hpp>
 #include <Sha256.hpp>
@@ -25,7 +26,9 @@ namespace Baleen {
             uint8_t s_manifest[ML::kManifestMaxBytes];
             // 产物摘要的读取缓冲：块大小取低地址弹跳窗口，与装载路径一致
             uint8_t s_chunk[kBounceBytes];
-            // 集内路径缓冲：集目录（约 120 字节）加相对路径（上限 255）充裕
+            // 集内路径缓冲：集目录（由布局描述的内核路径推出，至多 254 字节）加 '/'
+            // 加相对路径（上限 255）组合后不超过 510 字节，加结尾空字符仍在 512 内
+            // 规格把组合上限写死为 510 字节，超限按清单格式错误拒绝
             constexpr uint32_t kPathBytes = 512;
             char s_path[kPathBytes];
 
@@ -34,6 +37,7 @@ namespace Baleen {
             // 撤销的生效点是一次可信的引导器更新，见 Docs/Specs/内核集清单与签名.md 第五节
 
             // —— 本阶段失败原因的编号：编号是稳定标识，文本可以润色 ——
+            constexpr Diagnostic kFailKernelData{BALEEN_STAGE_CODE("54"), "The kernel image data is invalid"};
             constexpr Diagnostic kFailManifestRead{BALEEN_STAGE_CODE("61"), "Read the kernel set manifest"};
             constexpr Diagnostic kFailManifestFormat{BALEEN_STAGE_CODE("62"), "The kernel set manifest is invalid"};
             constexpr Diagnostic kFailManifestKey{BALEEN_STAGE_CODE("63"), "The manifest signature key isn't trusted"};
@@ -85,22 +89,6 @@ namespace Baleen {
                 return Diagnostic{};
             }
 
-            // 条目路径是否合法：非空、不以 / 开头、分量非空、不含 . 与 ..
-            bool PathValid(const uint8_t* path, uint32_t bytes) {
-                if (bytes == 0) return false;
-                if (path[0] == '/') return false;
-                uint32_t begin = 0;
-                for (uint32_t i = 0; i <= bytes; ++i) {
-                    if (i < bytes && path[i] != '/') continue;
-                    const uint32_t component = i - begin;
-                    if (component == 0) return false;
-                    if (component == 1 && path[begin] == '.') return false;
-                    if (component == 2 && path[begin] == '.' && path[begin + 1] == '.') return false;
-                    begin = i + 1;
-                }
-                return true;
-            }
-
             // 清单尾部签名区的结构检查与取用：算法、密钥编号与签名值
             bool CheckSignatureArea(const uint8_t* manifest, uint32_t bytes, uint8_t& keyId, const uint8_t*& signature) {
                 const uint32_t begin = bytes - ML::kSignatureAreaBytes;
@@ -125,7 +113,7 @@ namespace Baleen {
             uint32_t read = 0;
             if (fs.Read(id, 0, s_manifest, bytes, read) != Storage::Error::Ok || read != bytes) return kFailManifestRead;
 
-            // 2. 结构与保留字段：头部固定值、长度一致、保留字段为零、签名区字段合法
+            // 2. 结构与条目格式：头部固定值、长度一致、保留字段为零、条目字段与路径
             if (Get32(s_manifest + ML::kFieldMagic) != ML::kMagic) return kFailManifestFormat;
             if (Get16(s_manifest + ML::kFieldVersion) != ML::kVersion) return kFailManifestFormat;
             if (Get16(s_manifest + ML::kFieldHeaderBytes) != ML::kHeaderBytes) return kFailManifestFormat;
@@ -134,13 +122,13 @@ namespace Baleen {
             if (Get16(s_manifest + ML::kFieldReserved16) != 0 || Get32(s_manifest + ML::kFieldReserved32) != 0) return kFailManifestFormat;
             const uint16_t artifactCount = Get16(s_manifest + ML::kFieldArtifactCount);
             if (artifactCount == 0 || artifactCount > ML::kEntryMaxCount) return kFailManifestFormat;
-            uint8_t keyId = 0;
-            const uint8_t* signature = nullptr;
-            if (!CheckSignatureArea(s_manifest, bytes, keyId, signature)) return kFailManifestSignature;
-
             const uint32_t signatureBegin = bytes - ML::kSignatureAreaBytes;
             uint32_t offset = ML::kFieldArtifacts;
             uint32_t osCount = 0;
+            // 已登记条目路径：用于“路径互不重复”检查（规格第二节的约束）
+            const uint8_t* seenPaths[ML::kEntryMaxCount] = {};
+            uint16_t seenPathBytes[ML::kEntryMaxCount] = {};
+            uint32_t seenPathCount = 0;
             for (uint16_t i = 0; i < artifactCount; ++i) {
                 if (offset + ML::kEntryFixedBytes > signatureBegin) return kFailManifestFormat;
                 const uint8_t type = s_manifest[offset + ML::kEntryType];
@@ -149,26 +137,29 @@ namespace Baleen {
                 const uint16_t pathBytes = Get16(s_manifest + offset + ML::kEntryPathBytes);
                 if (pathBytes == 0 || pathBytes > ML::kEntryPathMaxBytes) return kFailManifestFormat;
                 if (s_manifest[offset + ML::kEntryReserved] != 0) return kFailManifestFormat;
-                if (!PathValid(s_manifest + offset + ML::kEntryPath, pathBytes)) return kFailManifestFormat;
+                // 条目是集内相对路径：与布局路径共用同一份语法判据（禁止 . 与 ..）
+                if (!LayoutCheck::PathValid(s_manifest + offset + ML::kEntryPath, pathBytes, false)) return kFailManifestFormat;
+                // 路径互不重复：同一路径登记两次会让“签名覆盖全部产物”的语义变弱
+                for (uint32_t seen = 0; seen < seenPathCount; ++seen) {
+                    if (seenPathBytes[seen] == pathBytes &&
+                        memcmp(seenPaths[seen], s_manifest + offset + ML::kEntryPath, pathBytes) == 0)
+                        return kFailManifestFormat;
+                }
+                seenPaths[seenPathCount] = s_manifest + offset + ML::kEntryPath;
+                seenPathBytes[seenPathCount] = pathBytes;
+                ++seenPathCount;
                 if (Get64(s_manifest + offset + ML::kEntryDataBytes) == 0) return kFailManifestFormat;
                 offset += ML::kEntryFixedBytes + pathBytes;
             }
             if (offset != signatureBegin) return kFailManifestFormat;
             if (osCount != 1) return kFailManifestFormat;
 
-            // 3. 集身份一致：清单 BuildId 必须等于所选集标识
-            uint8_t buildIdAny = 0;
-            for (uint32_t i = 0; i < ML::kBuildIdBytes; ++i) buildIdAny |= s_manifest[ML::kFieldBuildId + i];
-            if (buildIdAny == 0) return kFailManifestFormat;
-            if (memcmp(s_manifest + ML::kFieldBuildId, expectedBuildId, ML::kBuildIdBytes) != 0) return kFailManifestBuildId;
+            // 3. 签名区结构：算法、密钥编号与保留字段；结构不符属于清单格式错误，不是验签失败
+            uint8_t keyId = 0;
+            const uint8_t* signature = nullptr;
+            if (!CheckSignatureArea(s_manifest, bytes, keyId, signature)) return kFailManifestFormat;
 
-            // 防回滚：SecurityVersion 不低于内嵌下限、设备已见最高与吊销记录给出的下限
-            const uint64_t securityVersion = Get64(s_manifest + ML::kFieldSecurityVersion);
-            if (securityVersion < Crypto::kMinimumSecurityVersion) return kFailRollback;
-            if (securityVersion < seenSecurityVersion) return kFailRollback;
-            if (securityVersion < revocation.minimumSecurityVersion) return kFailRollback;
-
-            // 4. 摘要与验签：签名值先取出，字段按零代入后覆盖整份清单
+            // 4. 签名与吊销：签名值先取出，签名区按零代入后覆盖整份清单
             uint8_t signatureValue[Crypto::kEd25519SignatureBytes];
             memcpy(signatureValue, signature, sizeof(signatureValue));
             // 吊销先于查表：被吊销是显式策略结论，比“不在表里”更能说明现场
@@ -182,7 +173,19 @@ namespace Baleen {
             digest.Finish(facts.manifestDigest);
             if (!Crypto::Ed25519Verify(publicKey, signatureValue, s_manifest, bytes)) return kFailManifestSignature;
 
-            // 5. 逐产物：路径合法已在结构检查里核对；这里核对存在、长度与摘要
+            // 5. 集身份一致：验签通过后才比较 BuildId，否则被改过的标识会掩盖真正的验签失败
+            uint8_t buildIdAny = 0;
+            for (uint32_t i = 0; i < ML::kBuildIdBytes; ++i) buildIdAny |= s_manifest[ML::kFieldBuildId + i];
+            if (buildIdAny == 0) return kFailManifestFormat;
+            if (memcmp(s_manifest + ML::kFieldBuildId, expectedBuildId, ML::kBuildIdBytes) != 0) return kFailManifestBuildId;
+
+            // 6. 防回滚：SecurityVersion 不低于内嵌下限、设备已见最高与吊销记录给出的下限
+            const uint64_t securityVersion = Get64(s_manifest + ML::kFieldSecurityVersion);
+            if (securityVersion < Crypto::kMinimumSecurityVersion) return kFailRollback;
+            if (securityVersion < seenSecurityVersion) return kFailRollback;
+            if (securityVersion < revocation.minimumSecurityVersion) return kFailRollback;
+
+            // 7. 逐产物：路径合法已在结构检查里核对；这里核对存在、长度与摘要
             offset = ML::kFieldArtifacts;
             for (uint16_t i = 0; i < artifactCount; ++i) {
                 const uint8_t type = s_manifest[offset + ML::kEntryType];
@@ -209,8 +212,12 @@ namespace Baleen {
                     const uint32_t headBytes = fileBytes < Kernel::ImageDataLayout::kBytes ? fileBytes : Kernel::ImageDataLayout::kBytes;
                     if (const Diagnostic reason = ReadChunk(fs, id, 0, headBytes); reason.code != nullptr) return reason;
                     Kernel::ImageFacts kernelFacts;
-                    if (const char* reason = Kernel::CheckImageData(s_chunk, fileBytes, kernelFacts)) return Diagnostic{kFailManifestFormat.code, reason};
+                    if (const char* reason = Kernel::CheckImageData(s_chunk, fileBytes, kernelFacts)) return Diagnostic{kFailKernelData.code, reason};
                     if (memcmp(s_chunk + Kernel::ImageDataLayout::kFieldBuildId, s_manifest + ML::kFieldBuildId, ML::kBuildIdBytes) != 0) return kFailManifestBuildId;
+                    // 装载路径只认这一条：把清单登记的 .os 相对路径带回，选择器不得另行拼接固定文件名
+                    memcpy(facts.kernelPath, s_manifest + offset + ML::kEntryPath, pathBytes);
+                    facts.kernelPath[pathBytes] = 0;
+                    facts.kernelPathBytes = pathBytes;
                 }
                 offset += ML::kEntryFixedBytes + pathBytes;
             }

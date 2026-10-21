@@ -14,15 +14,18 @@
 #include <stdint.h>
 
 #include <BootInfo.hpp>
+#include <BootMemory.hpp>
 #include <Console.hpp>
 #include <Diagnostics.hpp>
 #include <EfiBlockDevice.hpp>
 #include <EfiTypes.hpp>
 #include <Ext4.hpp>
+#include <LayoutCheck.hpp>
 #include <LayoutDescriptor.hpp>
 #include <Libc.hpp>
 #include <LoadKernel.hpp>
 #include <Print.hpp>
+#include <Print/SerialTarget.hpp>
 #include <PrintTarget.hpp>
 #include <SelectSet.hpp>
 #include <Storage/Error.hpp>
@@ -68,6 +71,10 @@ namespace {
     Baleen::Core::SelectedSet s_selected;
     // 交接事实：内核入口按物理地址读取它
     Boot::Info s_bootInfo;
+    // 本映像的装载跨度：必须在退出启动服务之前从 LoadedImage 协议取出并保存，
+    // 协议内存退出后不保证有效；随 BootInfo 交给内核，内核不得把它当可用内存
+    uint64_t s_loaderBegin = 0;
+    uint64_t s_loaderBytes = 0;
 
     // 按小端读取 16 位
     uint16_t Get16(const uint8_t* field) {
@@ -86,21 +93,20 @@ namespace {
         return static_cast<uint64_t>(Get32(field)) | (static_cast<uint64_t>(Get32(field + 4)) << 32);
     }
 
-    // 校验布局描述的固定字段与校验和：不通过时返回带编号的原因；判据与 BaleenCore 完全一致
+    // 校验布局描述：判据、编号与 BaleenCore 侧共用 LayoutCheck 的一份实现
     Diagnostic CheckLayoutBlock(const uint8_t* block) {
-        using Baleen::LayoutDescriptor;
-        if (Get32(block + LayoutDescriptor::kFieldMagic) != LayoutDescriptor::kMagic) return kFailLayoutMagic;
-        if (Get16(block + LayoutDescriptor::kFieldVersion) != LayoutDescriptor::kVersion) return kFailLayoutVersion;
-        if (Get16(block + LayoutDescriptor::kFieldHeaderBytes) != LayoutDescriptor::kHeaderBytes) return kFailLayoutHead;
-        if (Get32(block + LayoutDescriptor::kFieldLayoutBytes) != LayoutDescriptor::kLayoutBytes) return kFailLayoutBytes;
-        if ((Get32(block + LayoutDescriptor::kFieldFlags) & ~LayoutDescriptor::kKnownFlags) != 0) return kFailLayoutFlags;
-        if (Get16(block + LayoutDescriptor::kFieldReserved) != 0) return kFailLayoutReserved;
-        if (Get32(block + LayoutDescriptor::kFieldChecksum) != LayoutDescriptor::Checksum(block)) return kFailLayoutChecksum;
-        const uint32_t pathBytes = Get16(block + LayoutDescriptor::kFieldKernelPathBytes);
-        if (pathBytes == 0 || pathBytes > LayoutDescriptor::kKernelPathMaxBytes) return kFailLayoutPathBytes;
-        if (block[LayoutDescriptor::kFieldKernelPath] != '/') return kFailLayoutPathAbsolute;
-        if (Get64(block + LayoutDescriptor::kFieldVolumeBytes) == 0) return kFailLayoutVolumeBytes;
-        return Diagnostic{};
+        return Baleen::Core::LayoutCheck::Check(block);
+    }
+
+    // 重叠安全的内存搬运：退出启动服务之后，中转缓冲与固定装载地址都可能落在
+    // 同一段归系统的可用内存里，正向/反向按源与目标的相对位置选择
+    void MoveBytes(uint8_t* destination, const uint8_t* source, uint32_t bytes) {
+        if (destination == source || bytes == 0) return;
+        if (destination < source) {
+            for (uint32_t i = 0; i < bytes; ++i) destination[i] = source[i];
+        } else {
+            for (uint32_t i = bytes; i > 0; --i) destination[i - 1] = source[i - 1];
+        }
     }
 
     // 取路径的父目录：去掉最后一个 '/' 之后的部分；没有父目录时返回 false
@@ -189,14 +195,18 @@ namespace {
         s_bootInfo.firmware = static_cast<uint32_t>(Boot::Firmware::UefiExited);
         s_bootInfo.media = static_cast<uint32_t>(media);
         s_bootInfo.sectorBytes = sectorBytes;
-        s_bootInfo.channels = static_cast<uint32_t>(Boot::Channel::Serial) | static_cast<uint32_t>(Boot::Channel::DebugPort);
+        // 输出通道按事实给出：调试口无条件可用，串口以存在性探测为准（与 BaleenCore 同一写法）
+        uint32_t channels = static_cast<uint32_t>(Boot::Channel::DebugPort);
+        if (Print::SerialTarget::Probe(Print::SerialTarget::kDefaultBase)) channels |= static_cast<uint32_t>(Boot::Channel::Serial);
+        s_bootInfo.channels = channels;
         s_bootInfo.memoryMapCount = s_memory.Count();
         s_bootInfo.memoryMapTruncated = s_memory.Truncated() ? 1u : 0u;
         s_bootInfo.reserved0 = 0;
         // 内存图数组的物理地址：本阶段静态存储，交接期间保持有效
         s_bootInfo.memoryMap = reinterpret_cast<uint64_t>(s_memory.Entries());
         for (uint32_t i = 0; i < 4; ++i) s_bootInfo.reserved[i] = 0;
-        for (uint32_t i = 0; i < Boot::InfoLayout::kKernelSetBuildIdBytes; ++i) s_bootInfo.kernelSetBuildId[i] = s_selected.verified ? s_selected.buildId[i] : 0;
+        // 内核集身份：选版成功的集标识与试启动身份；选版成功时集一定经过清单验签
+        for (uint32_t i = 0; i < Boot::InfoLayout::kKernelSetBuildIdBytes; ++i) s_bootInfo.kernelSetBuildId[i] = s_selected.buildId[i];
         s_bootInfo.attemptId = s_selected.attemptId;
         // —— 启动来源：布局描述给出的位置事实，加固件环境自己的介质与映像事实 ——
         s_bootInfo.layoutOffset = LayoutDescriptor::kOffset;
@@ -248,6 +258,10 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     if (IsError(bootServices->handleProtocol(imageHandle, &kLoadedImageProtocolGuid, reinterpret_cast<void**>(&image))) ||
         image == nullptr || image->deviceHandle == nullptr)
         Fail(kFailBindDisk, "the loaded image reports no device handle");
+    // 引导器占用区间：在退出启动服务之前取出并保存，之后不再读协议内存
+    if (image->imageBase == nullptr || image->imageSize == 0) Fail(kFailLoadedImageFacts);
+    s_loaderBegin = reinterpret_cast<uint64_t>(image->imageBase);
+    s_loaderBytes = image->imageSize;
     BlockIo* imageBlockIo = nullptr;
     if (IsError(bootServices->handleProtocol(image->deviceHandle, &kBlockIoProtocolGuid, reinterpret_cast<void**>(&imageBlockIo))) ||
         imageBlockIo == nullptr)
@@ -359,49 +373,36 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Print::Write("\r\n");
 
     // —— 写缓存刷新能力：固件给的 FlushBlocks 就是刷新原语，不需要自建控制器路径 ——
-    // 只读介质没有写缓存要刷，按“无可用原语”报出；命令出错按写失败处理
+    // 只读介质没有写缓存要刷；固件对 FlushBlocks 报 Unsupported 时这一次按"无缓存"通过，
+    // 但"没有原语"已经记下——结论按 HasFlushPrimitive 给，不按单次 Flush 的返回值谎称可刷新
     const Storage::Error flush = s_medium.Flush();
-    if (flush == Storage::Error::Ok) {
+    if (flush == Storage::Error::Ok && s_medium.HasFlushPrimitive()) {
         Baleen::PrintTargets::WriteLine(Tag::Ok, "The write cache can be flushed on this medium");
         Baleen::PrintTargets::WriteTag(Tag::Continue);
         Print::Write("Flush=firmware FlushBlocks\r\n");
-    } else if (flush == Storage::Error::NotSupported || flush == Storage::Error::ReadOnly) {
+    } else if (flush == Storage::Error::Ok || flush == Storage::Error::NotSupported || flush == Storage::Error::ReadOnly) {
         Baleen::PrintTargets::WriteLine(Tag::Info, "No write cache flush primitive is available on this medium");
     } else {
         Baleen::PrintTargets::WriteLine(Tag::Warn, "The write cache flush failed on this medium");
     }
 
-    // —— 内存图：选版与装载都要拿它核对事实，交接时再取一次把 MapKey 交回固件 ——
-    Baleen::PrintTargets::WriteLine(Tag::Info, "Capturing the firmware memory map");
-    if (const Diagnostic reason = s_memory.Allocate(bootServices); reason.code != nullptr) Fail(reason);
-    if (const Diagnostic reason = s_memory.Capture(bootServices); reason.code != nullptr) Fail(reason);
-    s_memory.Convert();
-    Baleen::PrintTargets::WriteLine(Tag::Ok, "The firmware memory map is captured");
-    Baleen::PrintTargets::WriteTag(Tag::Continue);
-    Print::Write("Entries=");
-    Print::WriteHex(s_memory.Count());
-    Print::Write(" Truncated=");
-    Print::WriteHex(s_memory.Truncated() ? 1 : 0);
-    Print::Write("\r\n");
-
     // —— 选版：读引导状态记录，选出目标集并验证清单与签名 ——
     // 状态机与写入边界见 Docs/Specs/内核集更新与回滚.md 与 Baleen/引导状态记录.md；
-    // 清单与信任锚见 Docs/Specs/内核集清单与签名.md；只读介质与写失败按降级路径直启
+    // 清单与信任锚见 Docs/Specs/内核集清单与签名.md；只读介质与写失败按降级路径启动缺省集，
+    // 缺省集与其它集一样先验证清单与签名（没有未验证的直启回退）
     Baleen::PrintTargets::WriteLine(Tag::Info, "Selecting the kernel set");
     if (const Diagnostic reason = Baleen::Core::SelectKernelSet(s_ext4, s_medium, stateOffset, stateBytes, s_kernelPath, Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldFlags), s_selected); reason.code != nullptr)
         Fail(reason);
-    Baleen::PrintTargets::WriteLine(Tag::Ok, s_selected.verified ? "The kernel set is verified" : "No kernel set identity; starting the image the layout names");
+    Baleen::PrintTargets::WriteLine(Tag::Ok, "The kernel set is verified");
     Baleen::PrintTargets::WriteTag(Tag::Continue);
     Print::Write("Set=");
-    if (s_selected.verified) {
+    {
         // 集标识按字节顺序的 64 位小写十六进制，与集目录名同一串字符
         const char kHexDigits[] = "0123456789abcdef";
         for (uint32_t i = 0; i < 32; ++i) {
             const char text[3] = { kHexDigits[s_selected.buildId[i] >> 4], kHexDigits[s_selected.buildId[i] & 0x0f], '\0' };
             Print::Write(text);
         }
-    } else {
-        Print::Write("none");
     }
     Print::Write(" Attempt=");
     Print::WriteHex64(s_selected.attemptId);
@@ -411,10 +412,12 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Baleen::PrintTargets::WriteLine(Tag::Info, "Locating and checking the kernel image");
     Baleen::Core::KernelFacts kernelFacts;
     bool kernelMissing = false;
-    const Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, s_selected.kernelPath, s_memory.Entries(), s_memory.Count(), kernelFacts, kernelMissing);
+    // 装载区在退出启动服务之后按最终内存图核对：退出前看到的“可用”不等于本阶段能写
+    const Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, s_selected.kernelPath, s_selected.buildId, nullptr, 0, s_loaderBegin, s_loaderBytes, kernelFacts, kernelMissing);
     if (kernelMissing) {
         Baleen::WriteDiagnostic(Tag::Warn, kWarnKernelMissing);
-        Baleen::PrintTargets::WriteLine(Tag::Warn, "The UEFI stage ends here: there is no kernel to hand over");
+        // 没有内核可交：本阶段到此为止，编号随阶段前缀换成 E-UEFI-58（与 E-CORE-58 同一句话）
+        Baleen::WriteDiagnostic(Tag::Warn, kWarnNoKernel);
         Stop();
     }
     if (kernelReason.code != nullptr) Fail(kernelReason);
@@ -428,14 +431,22 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Print::WriteHex(kernelFacts.entryOffset);
     Print::Write("\r\n");
 
-    // —— 装载：整幅读进装载地址，按静态内存跨度清零未落盘尾部 ——
+    // —— 内核镜像先读进固件分配的中转缓冲：镜像数据声明的固定装载地址在本阶段退出启动服务
+    //    之前可能正落在固件启动服务内存里，不能直接写入；AllocatePages 保证中转缓冲的归属，
+    //    镜像内容在被拷到最终地址之前一直由本阶段持有 ——
+    const uint64_t kernelSpan = kernelFacts.memoryBytes > kernelFacts.imageBytes ? kernelFacts.memoryBytes : kernelFacts.imageBytes;
+    const uint64_t stagingPages = (static_cast<uint64_t>(kernelFacts.imageBytes) + kPageBytes - 1) / kPageBytes;
+    uint64_t staging = 0;
+    const EfiStatus stagingStatus = bootServices->allocatePages(kAllocateAnyPages, kMemoryLoaderData, stagingPages, &staging);
+    if (IsError(stagingStatus) || staging == 0) Fail(kFailKernelMemory);
+    Baleen::PrintTargets::WriteLine(Tag::Ok, "The kernel image buffer is allocated");
+
+    // —— 装载：整幅读进中转缓冲；固定装载地址等退出启动服务后再写入 ——
     Baleen::PrintTargets::WriteLine(Tag::Info, "Loading the kernel image");
-    if (const Diagnostic reason = Baleen::Core::LoadKernelImage(s_ext4, s_selected.kernelPath, kernelFacts.loadAddress, kernelFacts.imageBytes); reason.code != nullptr)
+    uint8_t* const stagingImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(staging));
+    if (const Diagnostic reason = Baleen::Core::LoadKernelImageTo(s_ext4, s_selected.kernelPath, stagingImage, kernelFacts.imageBytes); reason.code != nullptr)
         Fail(reason);
-    uint8_t* const kernelImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(kernelFacts.loadAddress));
-    if (kernelFacts.memoryBytes > kernelFacts.imageBytes)
-        memset(kernelImage + kernelFacts.imageBytes, 0, kernelFacts.memoryBytes - kernelFacts.imageBytes);
-    Baleen::PrintTargets::WriteLine(Tag::Ok, "The kernel image is loaded");
+    Baleen::PrintTargets::WriteLine(Tag::Ok, "The kernel image is loaded into the firmware buffer");
     Baleen::PrintTargets::WriteTag(Tag::Continue);
     Print::Write("Load=");
     Print::WriteHex(kernelFacts.loadAddress);
@@ -446,7 +457,9 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Print::Write("\r\n");
 
     // —— 退出启动服务：MapKey 必须与当前内存图匹配，键过期就重新取图再试 ——
-    // 这一步不是清理，而是固定运行模式：此后不再调用任何固件服务，BootInfo 里如实标记
+    // 最终快照必须紧贴 ExitBootServices 取得；取图缓冲在退出前分配，之后不再调用固件
+    Baleen::PrintTargets::WriteLine(Tag::Info, "Capturing the final firmware memory map");
+    if (const Diagnostic reason = s_memory.Allocate(bootServices); reason.code != nullptr) Fail(reason);
     Baleen::PrintTargets::WriteLine(Tag::Info, "Exiting the firmware boot services");
     bool exited = false;
     for (uint32_t attempt = 0; attempt < 8; ++attempt) {
@@ -462,16 +475,31 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     if (!exited) Fail(kFailExitBootServices);
     // 固件控制台与池分配都到此为止：控制台换成串口与调试口，最后一张内存图就是交给内核的事实
     s_console.ExitFirmwareConsole();
-    s_memory.Convert();
+    // 取图快照是退出启动服务之前抓的；退出之后启动服务与引导器内存归系统，
+    // 按退出后的视角转换，BootServices 内存不再当作固件占用
+    s_memory.Convert(true);
+    // 固定装载跨度在退出后必须整段归系统：最终内存图说可用才允许拷入并清零静态内存，
+    // 这段内存在退出前可能是固件启动服务内存，本阶段从未在退出前写过它
+    if (!Baleen::SpanUsable(s_memory.Entries(), s_memory.Count(), kernelFacts.loadAddress, kernelSpan)) Fail(kFailKernelSpanAfterExit);
+    // 目标跨度不得与仍在执行的引导器映像重叠：本阶段还要从这里跳内核
+    const uint64_t kernelEnd = static_cast<uint64_t>(kernelFacts.loadAddress) + kernelSpan;
+    if (static_cast<uint64_t>(kernelFacts.loadAddress) < s_loaderBegin + s_loaderBytes && s_loaderBegin < kernelEnd)
+        Fail(kFailKernelSpanAfterExit);
+    uint8_t* const kernelImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(kernelFacts.loadAddress));
+    // 中转缓冲与目标可能落在同一段归系统的内存里，用重叠安全的搬运
+    MoveBytes(kernelImage, stagingImage, kernelFacts.imageBytes);
+    if (kernelFacts.memoryBytes > kernelFacts.imageBytes)
+        memset(kernelImage + kernelFacts.imageBytes, 0, kernelFacts.memoryBytes - kernelFacts.imageBytes);
     // 8254 此时归本阶段使用：CPUID 没给出频率时用它实测一次，好把耗时换算成毫秒
     s_clock.CalibrateWithPit();
     Baleen::PrintTargets::WriteLine(Tag::Ok, "The firmware boot services are exited");
+    Baleen::PrintTargets::WriteLine(Tag::Ok, "The kernel image is placed at its load address");
 
     // —— 交接状态：BootInfo 与内存图数组都在本阶段的静态存储里 ——
     // 启动介质按块大小判定：光盘是 2048 字节块，其余按硬盘上报
     Baleen::PrintTargets::WriteLine(Tag::Info, "Building the handover state");
     BuildBootInfo(s_medium.BlockBytes() == 2048 ? Boot::Media::Cdrom : Boot::Media::Hdd, s_medium.BlockBytes(), s_medium.CapacityBytes(),
-                  reinterpret_cast<uint64_t>(image->imageBase), image->imageSize);
+                  s_loaderBegin, s_loaderBytes);
     Baleen::PrintTargets::WriteLine(Tag::Ok, "The handover state is ready");
     Baleen::PrintTargets::WriteTag(Tag::Continue);
     Print::Write("BootInfo=");

@@ -33,9 +33,14 @@ namespace Baleen {
             constexpr Diagnostic kFailShort{BALEEN_STAGE_CODE("38"), "The kernel image is shorter than its declared size"};
             constexpr Diagnostic kFailBootInfo{BALEEN_STAGE_CODE("39"), "The kernel asks for a BootInfo version that isn't supported"};
             constexpr Diagnostic kFailLoadSpan{BALEEN_STAGE_CODE("52"), "The kernel load span isn't inside a usable memory area"};
+            // 引导器自己还在这段内存里执行：镜像数据的固定装载地址不得与它重叠
+            constexpr Diagnostic kFailLoadOverlap{BALEEN_STAGE_CODE("91"), "The kernel load span overlaps the bootloader"};
             constexpr Diagnostic kFailDigest{BALEEN_STAGE_CODE("53"), "The kernel image digest doesn't match"};
             // 内核镜像数据的字段校验在 Packages/Common 的实现里，原因文本由它给出，编号在本阶段统一
             constexpr Diagnostic kFailKernelData{BALEEN_STAGE_CODE("54"), "The kernel image data is invalid"};
+            // 与清单验证的 E-CORE-65 同一编号与文本：装载路径接收所选集的期望标识，
+            // 镜像 BuildId 不符时在装载之前拒绝，挡住“验证 A、装载 B”
+            constexpr Diagnostic kFailBuildId{BALEEN_STAGE_CODE("65"), "The manifest BuildId doesn't match the selected set"};
             constexpr Diagnostic kFailLoad{BALEEN_STAGE_CODE("57"), "Load the kernel image into memory"};
 
             // 从 offset 起读 want 字节到块缓冲；长度不足或读失败返回带编号的原因
@@ -47,7 +52,7 @@ namespace Baleen {
             }
         }
 
-        Diagnostic CheckKernelImage(Storage::FileSystem& fs, const char* path, const Boot::MemoryMapEntry* memoryMap, uint32_t memoryMapCount, KernelFacts& facts, bool& missing) {
+        Diagnostic CheckKernelImage(Storage::FileSystem& fs, const char* path, const uint8_t expectedBuildId[32], const Boot::MemoryMapEntry* memoryMap, uint32_t memoryMapCount, uint64_t loaderBegin, uint64_t loaderBytes, KernelFacts& facts, bool& missing) {
             missing = false;
             Storage::FileId id;
             const Storage::Error open = fs.Open(path, id);
@@ -67,6 +72,8 @@ namespace Baleen {
             if (const Diagnostic reason = ReadChunk(fs, id, 0, headBytes); reason.code != nullptr) return reason;
             Kernel::ImageFacts kernelFacts;
             if (const char* reason = Kernel::CheckImageData(s_chunk, fileBytes, kernelFacts)) return Diagnostic{kFailKernelData.code, reason};
+            // 装载路径必须装载所选集：镜像数据里的 BuildId 与选版定下的标识逐字节相同
+            if (memcmp(s_chunk + Kernel::ImageDataLayout::kFieldBuildId, expectedBuildId, Kernel::ImageDataLayout::kBuildIdBytes) != 0) return kFailBuildId;
             if (kernelFacts.bootInfoVersion != Boot::InfoLayout::kVersion) return kFailBootInfo;
             uint8_t expected[Kernel::ImageDataLayout::kDigestBytes] = {};
             memcpy(expected, s_chunk + Kernel::ImageDataLayout::kFieldDigest, sizeof(expected));
@@ -74,8 +81,15 @@ namespace Baleen {
 
             // 装载区：映像与静态内存的较大者必须整段落在可用区间；判定与 Stub、BaleenCore 的
             // 弹跳窗口共用 SpanUsable，相邻可用条目合并，三处不会对同一张内存图给出不同结论
+            // 内存图为空表示调用方在装载之后自行核对（UEFI 在退出启动服务后按最终内存图核对）
             const uint64_t span = kernelFacts.memoryBytes > fileBytes ? kernelFacts.memoryBytes : fileBytes;
-            if (!SpanUsable(memoryMap, memoryMapCount, kernelFacts.loadAddress, span)) return kFailLoadSpan;
+            // 装载跨度不得与仍在执行的引导器映像重叠：BIOS 侧 kLoadMin 正好是 BaleenCore 的装入地址，
+            // 不核对时声明 LoadAddress=1MiB 的镜像能通过 SpanUsable，装载即覆盖 BaleenCore 自身
+            if (loaderBytes != 0 &&
+                static_cast<uint64_t>(kernelFacts.loadAddress) < loaderBegin + loaderBytes &&
+                loaderBegin < static_cast<uint64_t>(kernelFacts.loadAddress) + span)
+                return kFailLoadOverlap;
+            if (memoryMap != nullptr && !SpanUsable(memoryMap, memoryMapCount, kernelFacts.loadAddress, span)) return kFailLoadSpan;
 
             // 摘要：从文件起点读到末尾，首块的摘要字段已按零参与
             Digest::Sha256 sha;
@@ -100,14 +114,18 @@ namespace Baleen {
         }
 
         Diagnostic LoadKernelImage(Storage::FileSystem& fs, const char* path, uint32_t loadAddress, uint32_t imageBytes) {
+            return LoadKernelImageTo(fs, path, reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(loadAddress)), imageBytes);
+        }
+
+        Diagnostic LoadKernelImageTo(Storage::FileSystem& fs, const char* path, uint8_t* destination, uint32_t imageBytes) {
+            if (destination == nullptr) return kFailLoad;
             Storage::FileId id;
             if (fs.Open(path, id) != Storage::Error::Ok) return kFailOpen;
-            // 目标地址在高位时按文件偏移逐块写入：块设备内部按窗口中转，这里不再分缓冲
-            uint8_t* const dest = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(loadAddress));
+            // 按文件偏移逐块读进目标缓冲：块设备内部按窗口中转，这里不再分缓冲
             for (uint32_t offset = 0; offset < imageBytes; offset += kChunkBytes) {
                 const uint32_t want = (imageBytes - offset) < kChunkBytes ? (imageBytes - offset) : kChunkBytes;
                 uint32_t read = 0;
-                if (fs.Read(id, offset, dest + offset, want, read) != Storage::Error::Ok) return kFailLoad;
+                if (fs.Read(id, offset, destination + offset, want, read) != Storage::Error::Ok) return kFailLoad;
                 if (read != want) return kFailShort;
             }
             return Diagnostic{};

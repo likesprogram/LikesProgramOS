@@ -52,14 +52,20 @@ LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Core.o Console.o Ext4.o BiosBlockDevice.o 
 COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o Error.o Path.o SubDevice.o FileSystem.o KernelImage.o BootState.o Revocation.o)
 BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o Sha512.o Ed25519.o ImageHeader.o BootMemory.o ReadFailure.o)
 
-# 开发期签名密钥与信任锚源：私钥不进仓库，缺失时由 MakeKeys 生成后复用；
-# 锚源是生成物，随密钥变化重新生成，供 --anchor-cpp 写进本包产物目录
+# 开发期签名密钥与信任锚：私钥不进仓库，缺失时由 MakeKeys 生成后复用；
+# 锚源与锚文本是生成物，随密钥变化重新生成，供 --anchor-cpp / --anchor-text 写进本包产物目录
 KEYS_DIR       := ../../../.cache/Keys
 TRUST_ANCHOR_SRC := $(LOCAL_OUT_DIR)/TrustAnchors.cpp
+# 信任锚文本：与 TrustAnchors.cpp 同源的 "<KeyId> <公钥 64 位十六进制>" 表，
+# 供 SignManifest 签名/验签时核对“清单的签名密钥确实在锚表里”
+TRUST_ANCHOR_TEXT := $(LOCAL_OUT_DIR)/TrustAnchors.txt
+# 当前密钥的信任锚编号：KEY_ID 由顶层 export 下来（默认 1），签名工具与锚表用同一个编号
+KEY_ID         ?= 1
 # 保留锚条目（生成输入，进版本库）：轮换窗口里仍要承认的旧公钥，默认空；
 # 旧公钥由这份输入复现，不依赖本地构建产物，见 Docs/Specs/内核集清单与签名.md 第五节
-ANCHORS_FILE   := Anchors/Retained.txt
-# 密钥与锚源生成工具：产物在 Tools/Bin，随源码交付
+# 可覆盖：变体构建用 --anchors 给一份含第二把公钥的锚文本（绝对路径亦可）
+ANCHORS_FILE   ?= Anchors/Retained.txt
+# 密钥与锚生成工具：产物在 Tools/Bin，随源码交付
 MAKE_KEYS      := ../../../Tools/Bin/MakeKeys
 # 内嵌的最低允许 SecurityVersion：发布时抬高它即吊销更低世代的清单，不必改源码；
 # 生成头按内容变化重写，值没变时不触碰文件，ManifestVerify.o 的 .d 依赖会跟着重编
@@ -73,10 +79,10 @@ CORE_BIN  := $(BIN_DIR)/BaleenCore.bin
 PACK_IMAGE := ../../../Tools/Bin/PackImage
 
 .DEFAULT_GOAL := all
-.PHONY: all upstream check clean help
+.PHONY: all upstream check clean help trust-anchors
 
-# 顶层取用的是 BaleenCore.bin
-all: $(CORE_BIN)
+# 顶层取用的是 BaleenCore.bin；锚文本是签名链的输入，随默认构建一起生成
+all: $(CORE_BIN) $(TRUST_ANCHOR_TEXT)
 
 # 链接：上游对象由各自包的 Makefile 生成，子 make 自己判断是否需要重编
 $(CORE_ELF): $(LOCAL_OBJS) $(COMMON_OBJS) $(BALEEN_COMMON_OBJS) Core.ld | $(BIN_DIR)
@@ -113,13 +119,17 @@ $(MAKE_KEYS):
 $(KEYS_DIR)/Development.sec: $(MAKE_KEYS)
 	$(MAKE_KEYS) --out $(KEYS_DIR)
 
-# 信任锚源：当前密钥与保留锚条目合并导出；换锚 = 换密钥文件并重建引导器，
-# 打开轮换窗口 = 往保留锚条目里追加旧公钥
-$(TRUST_ANCHOR_SRC): $(MAKE_KEYS) $(KEYS_DIR)/Development.sec $(ANCHORS_FILE)
-	@mkdir -p $(dir $@)
-	$(MAKE_KEYS) --out $(KEYS_DIR) --anchor-cpp $@ --key-id 1 --anchors $(ANCHORS_FILE)
+# 信任锚源与锚文本：当前密钥与保留锚条目合并导出；换锚 = 换密钥文件并重建引导器，
+# 打开轮换窗口 = 往保留锚条目里追加旧公钥。两份产物由同一次调用生成，保证同源
+$(TRUST_ANCHOR_SRC) $(TRUST_ANCHOR_TEXT) &: $(MAKE_KEYS) $(KEYS_DIR)/Development.sec $(ANCHORS_FILE)
+	@mkdir -p $(dir $(TRUST_ANCHOR_SRC)) $(dir $(TRUST_ANCHOR_TEXT))
+	$(MAKE_KEYS) --out $(KEYS_DIR) --anchor-cpp $(TRUST_ANCHOR_SRC) --anchor-text $(TRUST_ANCHOR_TEXT) \
+	    --key-id $(KEY_ID) $(if $(ANCHORS_FILE),--anchors $(ANCHORS_FILE),)
 
-# 生成物按本包编译选项编进镜像
+# 只生成锚表（C++ 源与文本）：给只关心签名链、不构建镜像的调用方用
+trust-anchors: $(TRUST_ANCHOR_TEXT)
+
+# 生成物按本包编译选项编进镜像；文本产物不参与编译，只随 all 一起生成
 $(OBJ_DIR)/TrustAnchors.o: $(TRUST_ANCHOR_SRC) | $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -178,6 +188,8 @@ help:
 	  '  make check  校验镜像大小、完整性头字段与摘要' \
 	  '  make clean  删除 $(LOCAL_OUT_DIR)/' \
 	  '  变量：OUT_DIR（共享产物根，定位上游对象）/ LOCAL_OUT_DIR（本包产物根）' \
+	  '        KEY_ID（当前密钥的信任锚编号，默认 1；顶层构建会 export）' \
+	  '        ANCHORS_FILE（附加锚输入，默认 Anchors/Retained.txt）' \
 	  '        SECURITY_FLOOR（内嵌的最低允许 SecurityVersion，默认 0；抬高即吊销更低世代）' \
 	  '        CXX / NASM / LD / OBJCOPY 与各 FLAGS 可覆盖'
 

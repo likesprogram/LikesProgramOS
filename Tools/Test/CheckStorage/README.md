@@ -10,7 +10,7 @@ Tools/Bin/CheckStorage --cases-only    # 只跑用例，跳过双编译检查
 
 ## 检查内容
 
-**用例检查（24 项）** 用编译进来的 `Packages/Common/Src/Storage/` 实现运行：
+**用例检查（25 项）** 用编译进来的 `Packages/Common/Src/Storage/` 实现运行：
 
 - 路径语法与切分：根路径、多层合法路径、空指针与非绝对路径、空分量与结尾分隔符、`.` 与 `..`、整条路径与单分量的长度上限、非 ASCII 与空格按原字节使用
 - 共用名字比较：逐字节比较、ASCII 折叠比较、非 ASCII 字节按原值、单字节折叠
@@ -20,7 +20,7 @@ Tools/Bin/CheckStorage --cases-only    # 只跑用例，跳过双编译检查
 
 **双编译检查** 用 `CXX`（默认 `g++`）完成，输入是本工具的源码与 `Packages/Common/` 下的 Storage 源码：
 
-1. **32 位编译、链接与运行**：把 Storage 的四个源与同一份用例源码用 `-m32` 重新编译、链接并运行，核对 24 项用例在 32 位下的结果
+1. **32 位编译、链接与运行**：把 Storage 的四个源与同一份用例源码用 `-m32` 重新编译、链接并运行，核对 25 项用例在 32 位下的结果
 2. **目标侧链接**：按 Baleen 各阶段的选项（`-m32 -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie -fno-stack-protector`）编译并做 `-nostdlib` 静态链接，核对无未定义符号；产物符号表里不牵入 `__udivdi3` / `__umoddi3` / `__divdi3` / `__moddi3` 这类 64 位除法辅助函数
 
 ## 选项

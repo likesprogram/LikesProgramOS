@@ -8,6 +8,7 @@
 
     writeSectors 只按契约写引导状态区：源是低地址花码缓冲，写后经 readSectors 读回逐字节比对；
     只读介质（光盘）以服务返回 0 为通过，判定按 CheckStub 传入的 EXPECT_WRITE_SECTORS
+    CHECK_READ_FAILURE_CLEAR 构建另核一件：先制造一次读失败再成功读，要求失败现场被清空
     汇编常量由 CheckStub 以 -D 传入，取值来自 CoreHandoff.hpp 与本工具的命令行，不在这里重复
 */
 
@@ -44,8 +45,23 @@ ORG CORE_ENTRY
 %ifndef HANDOFF_QUERY
 %define HANDOFF_QUERY 0x3C
 %endif
+%ifndef HANDOFF_LASTFAIL
+%define HANDOFF_LASTFAIL 0x40
+%endif
 %ifndef HANDOFF_WRITE_SECTORS
 %define HANDOFF_WRITE_SECTORS 0x50
+%endif
+%ifndef FAIL_LBA
+%define FAIL_LBA 0x00
+%endif
+%ifndef FAIL_COUNT
+%define FAIL_COUNT 0x04
+%endif
+%ifndef FAIL_STATUS
+%define FAIL_STATUS 0x08
+%endif
+%ifndef FAIL_PHASE
+%define FAIL_PHASE 0x0C
 %endif
 %ifndef EXPECT_SECT
 %define EXPECT_SECT 512
@@ -176,6 +192,45 @@ After_Write:
     TEST EAX, EAX
     JZ Bad_Mmap
 
+%ifdef CHECK_READ_FAILURE_CLEAR
+    ; 成功返回必须清空失败现场：先用介质之外的 LBA 制造一次失败，再从 LBA 0 读成功，
+    ; 最后核对交权块里的 lastReadFailure 四字段都回到 0（旧实现只在进入时清，重试成功留旧现场）
+    PUSH DWORD [ESI + HANDOFF_SECTOR_BYTES]
+    PUSH DWORD READ_ADDR
+    PUSH 1
+    PUSH 0xFFFFFFF0
+    MOV EAX, [ESI + HANDOFF_READ]
+    CALL EAX
+    ADD ESP, 16
+    TEST EAX, EAX
+    JNZ Clear_Bad                   ; 介质之外的读必须失败
+    MOV EBX, [ESI + HANDOFF_LASTFAIL]
+    CMP DWORD [EBX + FAIL_PHASE], 0
+    JE Clear_Bad                    ; 失败现场此刻应当非零
+    PUSH DWORD [ESI + HANDOFF_SECTOR_BYTES]
+    PUSH DWORD READ_ADDR
+    PUSH 1
+    PUSH 0
+    MOV EAX, [ESI + HANDOFF_READ]
+    CALL EAX
+    ADD ESP, 16
+    TEST EAX, EAX
+    JZ Clear_Bad                    ; 从 LBA 0 重读必须成功
+    MOV EBX, [ESI + HANDOFF_LASTFAIL]
+    MOV EAX, [EBX + FAIL_LBA]
+    OR EAX, [EBX + FAIL_COUNT]
+    OR EAX, [EBX + FAIL_STATUS]
+    OR EAX, [EBX + FAIL_PHASE]
+    JNZ Clear_Bad                   ; 成功后四个字段必须全为 0
+    MOV EBX, Msg_ClearOk
+    CALL Write_Service
+    JMP Clear_Done
+Clear_Bad:
+    MOV EBX, Msg_Clear
+    JMP Fail
+Clear_Done:
+%endif
+
     ; 全部通过：向退出端口写约定值，QEMU 以固定退出码结束
     MOV AL, EXIT_OK
     OUT 0xF4, AL
@@ -225,9 +280,11 @@ Direct:
 Msg_Ok:      DB "CHECKSTUB-BALEENCORE-OK services", 13, 10, 0
 Msg_WriteOk: DB "CHECKSTUB-BALEENCORE-OK write-sectors verified", 13, 10, 0
 Msg_WriteReadOnly: DB "CHECKSTUB-BALEENCORE-OK write-sectors read-only", 13, 10, 0
+Msg_ClearOk: DB "CHECKSTUB-BALEENCORE-OK read-failure cleared", 13, 10, 0
 Msg_Sector:  DB "CHECKSTUB-CORE-FAIL sector-size", 13, 10, 0
 Msg_Read:    DB "CHECKSTUB-CORE-FAIL read-sectors", 13, 10, 0
 Msg_Write:   DB "CHECKSTUB-CORE-FAIL write-sectors", 13, 10, 0
+Msg_Clear:   DB "CHECKSTUB-CORE-FAIL read-failure not cleared", 13, 10, 0
 Msg_Mmap:    DB "CHECKSTUB-CORE-FAIL memory-map", 13, 10, 0
 Msg_Handoff: DB "CHECKSTUB-CORE-FAIL handoff", 13, 10, 0
 )ASM";

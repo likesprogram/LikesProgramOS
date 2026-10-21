@@ -1,21 +1,25 @@
 /* main.cpp
-    CheckExt4：BaleenCore 的 Ext4 只读实现与块设备适配器的宿主侧检查，按需手工执行，不构成默认构建依赖
+    CheckExt4：BaleenCore 的 Ext4 只读实现、块设备适配器与刷盘路径的宿主侧检查，按需手工执行
 
-    检查对象是目标侧源码：Packages/Baleen/Core 的 Ext4.cpp 与 BiosBlockDevice.cpp，
-    与内核侧共用同一份存储接口（Packages/Common/Include/Storage）——本工具把这两份源码
-    按宿主选项编译后直接运行，不做第二份参考解析
-    检查分两类：
+    检查对象是目标侧源码：Packages/Baleen/Core 的 Ext4.cpp、BiosBlockDevice.cpp 与
+    DiskFlush.cpp，与内核侧共用同一份存储接口（Packages/Common/Include/Storage）——
+    本工具把它们按宿主选项编译后直接运行，不做第二份参考解析
+    检查分三类：
     1. 真实卷夹具：用 mkfs 生成带已知文件的 Ext4 卷，核对按路径读取的字节与原文件一致，
        覆盖空文件、奇数长度、跨 extent 树的文件与多级目录，以及目录遍历的目录项集合、
        类型、长度、游标推进与名字缓冲过小
     2. 故障注入：坏 superblock、未知与拒绝特性、缺失解析前提位、64 位卷的高位块数与
        描述符大小、卷状态位、越界块号、错误卷偏移，以及块设备适配器的窗口中转、
        对齐与读盘失败路径
+    3. 伪 AHCI 控制器：把 DiskFlush 的 AHCI 命令接到按 AHCI 1.3.1 字段规则执行的伪控制器上，
+       核对命令头 CFL/PRDTL/PRDBC 与 FIS 的扇区换算；QEMU 对长度字段宽容，这一层不宽容
 
     缺 mkfs 时按基础设施缺失报告（退出码 2），--strict 把它当作失败
 */
 
+#include <AhciCommand.hpp>
 #include <BiosBlockDevice.hpp>
+#include <DiskFlush.hpp>
 #include <Ext4.hpp>
 
 #include <Storage/BlockDevice.hpp>
@@ -38,6 +42,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -45,7 +50,7 @@ namespace {
     namespace fs = std::filesystem;
     using Bytes = std::vector<uint8_t>;
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 25;
+    constexpr unsigned kCaseCount = 28;
     // 已跑用例数
     unsigned g_ran = 0;
     // 夹具卷的固定参数：16 MiB、4096 字节块，卷标识与 mkfs 参数一致
@@ -81,6 +86,166 @@ namespace {
         }
         std::cout << "通过" << std::endl;
     }
+
+    // 伪 AHCI 控制器：把 DiskFlush 的 AHCI 命令接到按 AHCI 1.3.1 字段规则执行的伪设备上
+    // 命令头 DW0 的 CFL 不是 5、PRDTL 与命令不符、DW1（PRDBC）下发前非零、
+    // FIS 的扇区数与 PRDT 声明的字节数不一致，都按任务文件错误收场——QEMU 对长度字段宽容，
+    // 这一层不宽容，因此字段位置写反或 4Kn 按 512 换算都会变红
+    class FakeAhci {
+    public:
+        // 一次命令头与 FIS 的现场
+        struct Capture {
+            uint32_t dw0 = 0;       // 命令头 DW0（CFL 在 bit4:0、PRDTL 在 bit31:16）
+            uint32_t dw1 = 0;       // 命令头 DW1（PRDBC）
+            uint32_t sectors = 0;   // FIS 里的扇区数
+            uint64_t lba = 0;       // FIS 里的 LBA
+            uint32_t bytes = 0;     // PRDT 声明的字节数
+        };
+
+        // 构造：逻辑扇区大小与第 0 号逻辑扇区的内容（身份核验的比对基准）
+        FakeAhci(uint32_t logicalBytes, const Bytes& sectorContent) : m_logicalBytes(logicalBytes), m_sectorContent(sectorContent) {
+            void* list = ::mmap(nullptr, kCommandListBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+            Require(list != MAP_FAILED, "伪 AHCI 命令列表分配失败");
+            m_commandList = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(list));
+            std::memset(list, 0, kCommandListBytes);
+            // 只实现 0 号端口，接一块 ATA 盘；ABAR 取 32 位 MMIO 空间里的固定地址
+            m_regs[m_abar + kRegPortsImplemented] = 1u;
+            m_regs[Port(0) + kPortCommandList] = m_commandList;
+            m_regs[Port(0) + kPortSignature] = kSignatureAta;
+            m_regs[Port(0) + kPortSataStatus] = kDeviceReady;
+        }
+        // 析构：释放命令列表
+        ~FakeAhci() { ::munmap(reinterpret_cast<void*>(static_cast<uintptr_t>(m_commandList)), kCommandListBytes); }
+        // 伪 MMIO 读
+        uint32_t Read(uint32_t address) const {
+            const auto found = m_regs.find(address);
+            return found == m_regs.end() ? 0u : found->second;
+        }
+        // 伪 MMIO 写：端口命令位触发命令执行，中断状态按写 1 清
+        void Write(uint32_t address, uint32_t value) {
+            if (address >= m_abar + kPortBase && address < m_abar + kPortBase + kPortStride * kPorts) {
+                const uint32_t offset = address - (m_abar + kPortBase);
+                const uint32_t index = offset / kPortStride;
+                const uint32_t reg = offset % kPortStride;
+                if (index == 0 && reg == kPortInterruptStatus) { m_regs[address] &= ~value; return; }
+                if (index == 0 && reg == kPortCommandIssue) { ExecuteIssued(value); return; }
+            }
+            m_regs[address] = value;
+        }
+        // 伪 PCI 配置空间读：只放一个 AHCI 控制器
+        uint32_t ConfigRead(uint32_t address) const {
+            if ((address & 0x80000000u) == 0) return 0xFFFFFFFFu;
+            const uint32_t device = (address >> 11) & 0x1Fu;
+            const uint32_t function = (address >> 8) & 0x7u;
+            const uint8_t offset = static_cast<uint8_t>(address & 0xFCu);
+            if (device != 0 || function != 0) return 0xFFFFFFFFu;
+            switch (offset) {
+                case 0x00: return 0x00008086u;      // 厂商 Intel
+                case 0x08: return 0x01060100u;      // 类 01 / 子类 06 / 接口 01
+                case 0x24: return m_abar;           // BAR5：32 位内存空间
+                default: return 0;
+            }
+        }
+        // 最近一次 FLUSH CACHE 的现场
+        const Capture& FlushCapture() const { return m_flush; }
+        // 最近一次 READ DMA EXT 的现场
+        const Capture& ReadCapture() const { return m_read; }
+        // 伪控制器是否把某条命令判为非法
+        bool Failed() const { return m_failed; }
+
+    private:
+        // 端口 0 的寄存器基址
+        uint32_t Port(uint32_t index) const { return m_abar + kPortBase + index * kPortStride; }
+        // 按 32 位小端读
+        static uint32_t ReadLe32(const uint8_t* field) {
+            return static_cast<uint32_t>(field[0]) | (static_cast<uint32_t>(field[1]) << 8) |
+                   (static_cast<uint32_t>(field[2]) << 16) | (static_cast<uint32_t>(field[3]) << 24);
+        }
+        // 命令被伪控制器判为非法：置任务文件错误位
+        void FailPort() {
+            m_failed = true;
+            m_regs[Port(0) + kPortInterruptStatus] |= 1u << 30;
+            m_regs[Port(0) + kPortTaskFile] |= 1u;
+        }
+        // 执行一个命令槽：按 AHCI 命令头与 ATA FIS 的字段规则校验
+        void Execute(uint32_t slot) {
+            uint8_t* list = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(m_commandList));
+            const uint32_t* header = reinterpret_cast<const uint32_t*>(list + slot * kCommandHeaderBytes);
+            const uint32_t dw0 = header[0];
+            const uint32_t dw1 = header[1];
+            const uint32_t tableAddress = header[2];
+            const uint32_t cfl = dw0 & 0x1Fu;
+            const uint32_t prdtl = dw0 >> 16;
+            if (cfl != kFisDwords || dw1 != 0 || tableAddress == 0) { FailPort(); return; }
+            const uint8_t* fis = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(tableAddress));
+            if (fis[0] != 0x27 || (fis[1] & 0x80) == 0 || (fis[15] & 0x80) == 0) { FailPort(); return; }
+            if (fis[2] == kCommandFlush) {
+                m_flush.dw0 = dw0;
+                m_flush.dw1 = dw1;
+                if (prdtl != 0) { FailPort(); return; }
+                return;
+            }
+            if (fis[2] != kCommandRead || prdtl != 1) { FailPort(); return; }
+            const uint32_t sectors = static_cast<uint32_t>(fis[12]) | (static_cast<uint32_t>(fis[13]) << 8);
+            const uint64_t lba = static_cast<uint64_t>(fis[4]) | (static_cast<uint64_t>(fis[5]) << 8) |
+                (static_cast<uint64_t>(fis[6]) << 16) | (static_cast<uint64_t>(fis[8]) << 24) |
+                (static_cast<uint64_t>(fis[9]) << 32) | (static_cast<uint64_t>(fis[10]) << 40);
+            // PRDT：一个条目，DBC 是字节数减一；扇区数乘逻辑扇区大小必须与 DBC 一致
+            const uint32_t address = ReadLe32(fis + kCommandTablePrdt);
+            const uint32_t dbc = ReadLe32(fis + kCommandTablePrdt + 12) & 0x3FFFFu;
+            const uint64_t wanted = static_cast<uint64_t>(sectors) * m_logicalBytes;
+            if (sectors == 0 || wanted > m_sectorContent.size() || static_cast<uint64_t>(dbc) + 1 != wanted || address == 0) {
+                FailPort();
+                return;
+            }
+            std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(address)), m_sectorContent.data(), static_cast<std::size_t>(wanted));
+            m_read.dw0 = dw0;
+            m_read.dw1 = dw1;
+            m_read.sectors = sectors;
+            m_read.lba = lba;
+            m_read.bytes = dbc + 1;
+        }
+        // 端口命令位置位时逐个执行
+        void ExecuteIssued(uint32_t bits) {
+            for (uint32_t slot = 0; slot < kPorts; ++slot) {
+                if ((bits & (1u << slot)) != 0) Execute(slot);
+            }
+        }
+
+        // 伪控制器的常量：AHCI 寄存器偏移、命令槽与格式
+        static constexpr uint32_t kPorts = 32;
+        static constexpr uint32_t kRegPortsImplemented = 0x0C;
+        static constexpr uint32_t kPortBase = 0x100;
+        static constexpr uint32_t kPortStride = 0x80;
+        static constexpr uint32_t kPortCommandList = 0x00;
+        static constexpr uint32_t kPortInterruptStatus = 0x10;
+        static constexpr uint32_t kPortTaskFile = 0x20;
+        static constexpr uint32_t kPortSignature = 0x24;
+        static constexpr uint32_t kPortSataStatus = 0x28;
+        static constexpr uint32_t kPortCommandIssue = 0x38;
+        static constexpr uint32_t kSignatureAta = 0x00000101;
+        static constexpr uint32_t kDeviceReady = 0x00000003;
+        static constexpr uint32_t kCommandListBytes = 0x1000;
+        static constexpr uint32_t kCommandHeaderBytes = 32;
+        static constexpr uint32_t kCommandTablePrdt = 0x80;
+        static constexpr uint32_t kFisDwords = 5;
+        static constexpr uint8_t kCommandFlush = 0xE7;
+        static constexpr uint8_t kCommandRead = 0x25;
+
+        uint32_t m_abar = 0xFE000000u;   // 伪 ABAR
+        uint32_t m_commandList = 0;      // 低 4GiB 里的命令列表
+        uint32_t m_logicalBytes = 512;   // 逻辑扇区大小
+        Bytes m_sectorContent;           // 设备第 0 号逻辑扇区的内容
+        std::map<uint32_t, uint32_t> m_regs;   // 伪 MMIO 寄存器
+        Capture m_flush;                 // 最近一次 FLUSH CACHE 现场
+        Capture m_read;                  // 最近一次 READ DMA EXT 现场
+        bool m_failed = false;           // 是否有命令被判非法
+    };
+
+    // 当前伪控制器：平台原语按它转发；为空时返回安全值
+    FakeAhci* g_fakeAhci = nullptr;
+    // PCI 配置空间地址锁存
+    uint32_t g_configAddress = 0;
 
     // 读环境变量，未设置或为空时取默认值
     std::string Env(const char* key, const char* fallback) {
@@ -699,6 +864,56 @@ namespace {
         Require(mounted.fs.ReadDirectory(missing, cursor, name, sizeof(name), nameLength, info) != Storage::Error::Ok, "越界标识应上报失败");
     }
 
+    // 用例：AHCI FLUSH CACHE 的命令头字段——CFL 在 DW0 bit4:0、PRDTL 在 bit31:16、DW1 是 PRDBC
+    void CaseAhciFlushHeader() {
+        const Bytes sector(512, 0);
+        FakeAhci fake(512, sector);
+        g_fakeAhci = &fake;
+        Require(Baleen::Core::DiskFlush::Probe() == Baleen::Core::DiskFlush::Path::Ahci, "伪控制器应被识别为 AHCI 路径");
+        Require(Baleen::Core::DiskFlush::Flush() == Baleen::Core::DiskFlush::Result::Succeeded, "FLUSH CACHE 应成功");
+        Require(!fake.Failed(), "伪控制器拒绝了 FLUSH CACHE 的命令头");
+        Require((fake.FlushCapture().dw0 & 0x1Fu) == 5, "DW0 的 CFL 必须是 5");
+        Require((fake.FlushCapture().dw0 >> 16) == 0, "FLUSH CACHE 的 PRDTL 必须是 0");
+        Require(fake.FlushCapture().dw1 == 0, "DW1 的 PRDBC 下发前必须是 0");
+        g_fakeAhci = nullptr;
+    }
+
+    // 用例：身份核验在 512 字节逻辑扇区上按一个扇区读回
+    void CaseAhciRead512() {
+        Bytes content(512);
+        for (std::size_t i = 0; i < content.size(); ++i) content[i] = static_cast<uint8_t>(i * 7 + 3);
+        FakeAhci fake(512, content);
+        g_fakeAhci = &fake;
+        Require(Baleen::Core::DiskFlush::CoversMedium(0, content.data(), 512), "同一介质的内容应判为覆盖");
+        Require(!fake.Failed(), "伪控制器拒绝了 READ DMA EXT 的命令头");
+        Require((fake.ReadCapture().dw0 & 0x1Fu) == 5, "DW0 的 CFL 必须是 5");
+        Require((fake.ReadCapture().dw0 >> 16) == 1, "READ DMA EXT 的 PRDTL 必须是 1");
+        Require(fake.ReadCapture().dw1 == 0, "DW1 的 PRDBC 下发前必须是 0");
+        Require(fake.ReadCapture().sectors == 1 && fake.ReadCapture().bytes == 512, "512 字节读应是一个 512 字节逻辑扇区");
+        g_fakeAhci = nullptr;
+    }
+
+    // 用例：身份核验在 4Kn 上按逻辑扇区换算——一次读 4096 字节是 1 个扇区，不是 8 个
+    void CaseAhciRead4Kn() {
+        Bytes content(4096);
+        for (std::size_t i = 0; i < content.size(); ++i) content[i] = static_cast<uint8_t>(i * 13 + 5);
+        FakeAhci fake(4096, content);
+        g_fakeAhci = &fake;
+        Require(Baleen::Core::DiskFlush::CoversMedium(0, content.data(), 4096), "4Kn 上同一介质的内容应判为覆盖");
+        Require(!fake.Failed(), "伪控制器拒绝了 4Kn 的 READ DMA EXT");
+        Require((fake.ReadCapture().dw0 & 0x1Fu) == 5, "DW0 的 CFL 必须是 5");
+        Require((fake.ReadCapture().dw0 >> 16) == 1, "READ DMA EXT 的 PRDTL 必须是 1");
+        Require(fake.ReadCapture().sectors == 1, "4Kn 上一次读 4096 字节只是 1 个逻辑扇区，不得按 512 换算成 8");
+        Require(fake.ReadCapture().bytes == 4096 && fake.ReadCapture().lba == 0, "4Kn 读应落在 LBA 0、传输 4096 字节");
+        // 内容不同：核验必须报未覆盖（保守方向），不得因为命令成立就声称覆盖
+        Bytes other = content;
+        other[0] ^= 0xFF;
+        FakeAhci foreign(4096, other);
+        g_fakeAhci = &foreign;
+        Require(!Baleen::Core::DiskFlush::CoversMedium(0, content.data(), 4096), "内容不同必须判为未覆盖");
+        g_fakeAhci = nullptr;
+    }
+
     // 跑全部用例并核对数量
     void RunCases() {
         Case("挂载与卷事实", CaseMountFacts);
@@ -726,6 +941,9 @@ namespace {
         Case("目录项名字缓冲过小", CaseListSmallBuffer);
         Case("目录遍历游标", CaseListCursor);
         Case("目录遍历错误映射", CaseListErrors);
+        Case("AHCI 刷盘命令头字段", CaseAhciFlushHeader);
+        Case("AHCI 身份核验 512 字节扇区", CaseAhciRead512);
+        Case("AHCI 身份核验 4Kn 逻辑扇区", CaseAhciRead4Kn);
         Require(g_ran == kCaseCount, "用例数量与登记不符");
         std::cout << "CheckExt4: " << g_ran << " 项用例全部通过" << std::endl;
     }
@@ -784,6 +1002,37 @@ namespace {
         Require(fs::is_directory(base), "无法创建工作目录 " + base.string());
         return base;
     }
+}
+
+// 伪平台原语：把 DiskFlush 的端口与 MMIO 访问接到伪 AHCI 控制器上
+// 目标侧由 Packages/Common/Src/Platform/Cpu.asm 提供同名的外部函数，本工具换成伪实现
+extern "C" void _Cpu_Out8(uint16_t port, uint8_t value) {
+    (void)port;
+    (void)value;
+}
+// 传统 IDE 端口没有设备：AHCI 用例走不到这条路径，返回总线悬空值
+extern "C" uint8_t _Cpu_In8(uint16_t port) {
+    (void)port;
+    return 0xFF;
+}
+// PCI 配置地址锁存
+extern "C" void _Cpu_Out32(uint16_t port, uint32_t value) {
+    if (port == 0x0CF8) g_configAddress = value;
+}
+// PCI 配置数据：交给伪控制器解码
+extern "C" uint32_t _Cpu_In32(uint16_t port) {
+    if (port == 0x0CFC && g_fakeAhci != nullptr) return g_fakeAhci->ConfigRead(g_configAddress);
+    return 0;
+}
+// MMIO 读：交给伪控制器
+extern "C" uint32_t _Cpu_Read32(uintptr_t address) {
+    if (g_fakeAhci == nullptr || address > 0xFFFFFFFFu) return 0;
+    return g_fakeAhci->Read(static_cast<uint32_t>(address));
+}
+// MMIO 写：交给伪控制器
+extern "C" void _Cpu_Write32(uintptr_t address, uint32_t value) {
+    if (g_fakeAhci == nullptr || address > 0xFFFFFFFFu) return;
+    g_fakeAhci->Write(static_cast<uint32_t>(address), value);
 }
 
 // 进程入口

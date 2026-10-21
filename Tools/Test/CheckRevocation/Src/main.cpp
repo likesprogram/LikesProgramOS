@@ -8,10 +8,12 @@
       2. 记录结构：正例与十类结构不符的负例
       3. 签名：正例、换错公钥、改动一个字节、签名者自吊销
       4. 位图与并集：按 KeyId 定位与只增不减
-      5. 系统卷读取：缺文件、长度不符、篡改、合法
+      5. 系统卷读取：缺文件按 Missing，打开失败、长度不符、篡改按 Unusable，合法按 Applied
       6. 真实清单验证：被吊销的签名密钥拒绝（E-CORE-74）、记录下限抬升拒绝（E-CORE-66）
       7. 单调性：记录文件缺失不解除持久事实、回滚成旧纪元同样不解除
       8. 引导状态记录：只有版本 1，往返一致；版本不是 1 的记录按损坏处理
+      9. 清单验签编号与顺序：签名区结构错 62、验签失败 64、内核数据错 54；
+         验签先于 BuildId 比较、吊销判定先于信任锚查表
     手工执行，不进入默认构建；结论行不写“全部通过”以外的措辞
 */
 
@@ -20,6 +22,7 @@
 #include <HostIo.h>
 #include <KernelImage.hpp>
 #include <Manifest.hpp>
+#include <LoadKernel.hpp>
 #include <ManifestVerify.hpp>
 #include <Revocation.hpp>
 #include <Sha256.h>
@@ -243,6 +246,8 @@ namespace {
                 if (entry.path == path) entry.content = content;
             }
         }
+        // 注入 Open 的错误：模拟存储层读不了记录文件；Ok 表示按真实索引返回
+        void SetOpenError(Storage::Error error) { m_openError = error; }
         // 事实查询：文件不存在返回 NotFound
         Storage::Error Stat(const char* path, Storage::FileInfo& info) override {
             for (std::size_t i = 0; i < m_files.size(); ++i) {
@@ -254,8 +259,9 @@ namespace {
             }
             return Storage::Error::NotFound;
         }
-        // 打开：返回 1 起的下标作为标识
+        // 打开：先按注入的错误返回，其余情况返回 1 起的下标作为标识
         Storage::Error Open(const char* path, Storage::FileId& id) override {
+            if (m_openError != Storage::Error::Ok) return m_openError;
             for (std::size_t i = 0; i < m_files.size(); ++i) {
                 if (m_files[i].path != path) continue;
                 id.value = i + 1;
@@ -280,6 +286,7 @@ namespace {
             Bytes content;      // 内容
         };
         std::vector<Entry> m_files;   // 登记的文件
+        Storage::Error m_openError = Storage::Error::Ok;   // Open 错误注入：Ok 表示不注入
     };
 
     // 内存介质：引导状态记录用
@@ -467,6 +474,30 @@ namespace {
         Require(facts.epoch == 4 && RV::IsKeyRevoked(facts.revokedKeyMask, kOtherKeyId), "Applied 应解出纪元与位图");
     }
 
+    // 用例：记录文件打不开是存储层故障——按 Unusable 报原因，不能当成文件不存在
+    void CaseOpenFailureUnusable() {
+        const Bytes good = BuildRecord(5, 0, { kOtherKeyId }, kSignerKeyId, SignerPair());
+        MemoryFileSystem fs;
+        fs.Add(kRevocationPath, good);
+        const char* reason = nullptr;
+        RV::Facts facts;
+
+        // 文件在但 Open 失败（底层读不了）：Unusable，facts 不变
+        fs.SetOpenError(Storage::Error::Io);
+        Require(RV::Load(fs, kRevocationPath, &Baleen::Crypto::FindTrustAnchor, &Baleen::Crypto::Ed25519Verify, facts, reason) == RV::LoadResult::Unusable, "打开失败应返回 Unusable 而不是 Missing");
+        Require(reason != nullptr, "Unusable 应给出原因文本");
+        Require(facts.epoch == 0, "Unusable 不应改动事实");
+
+        // 恢复成缺失形态：NotFound 仍是 Missing
+        fs.SetOpenError(Storage::Error::NotFound);
+        Require(RV::Load(fs, kRevocationPath, &Baleen::Crypto::FindTrustAnchor, &Baleen::Crypto::Ed25519Verify, facts, reason) == RV::LoadResult::Missing, "NotFound 应返回 Missing");
+
+        // 撤掉注入后合法记录照常可读：错误注入不改变正常路径
+        fs.SetOpenError(Storage::Error::Ok);
+        Require(RV::Load(fs, kRevocationPath, &Baleen::Crypto::FindTrustAnchor, &Baleen::Crypto::Ed25519Verify, facts, reason) == RV::LoadResult::Applied, "撤掉注入后合法记录应返回 Applied");
+        Require(facts.epoch == 5 && RV::IsKeyRevoked(facts.revokedKeyMask, kOtherKeyId), "Applied 应解出纪元与位图");
+    }
+
     // 用例：真实清单验证的吊销判定与下限判定
     void CaseManifestVerification() {
         uint8_t buildId[32] = {};
@@ -505,6 +536,88 @@ namespace {
         Require(Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, floor, facts).code == nullptr, "下限等于清单版本时不应拒绝");
     }
 
+    // 用例：清单验签的编号与顺序——签名区结构错 62、验签失败 64、内核数据错 54，
+    // 且验签先于 BuildId 比较、吊销判定先于信任锚查表
+    void CaseManifestFailureOrder() {
+        uint8_t buildId[32] = {};
+        for (unsigned i = 0; i < 32; ++i) buildId[i] = static_cast<uint8_t>(0x60 + i);
+        const std::string artifactPath = "LikesProgram.os";
+        const std::string setDirectory = "/LikesProgram/System/KernelSets/" + Hex64(buildId) + "/";
+        const Bytes image = BuildKernelImage(buildId);
+        const auto digest = DigestOf(image);
+        Baleen::Core::ManifestFacts facts;
+
+        // 签名区结构错：算法非 Ed25519、密钥编号为 0、保留字节非零都属于清单格式错（62）
+        struct SignatureAreaCase {
+            const char* what;               // 破坏项
+            void (*make)(Bytes& manifest);  // 构造破坏
+        };
+        const auto makeAlgorithm = +[](Bytes& manifest) { manifest[manifest.size() - ML::kSignatureAreaBytes + ML::kSignatureAlgorithm] = 0; };
+        const auto makeKeyId = +[](Bytes& manifest) { manifest[manifest.size() - ML::kSignatureAreaBytes + ML::kSignatureKeyId] = 0; };
+        const auto makeReserved = +[](Bytes& manifest) { manifest[manifest.size() - ML::kSignatureAreaBytes + ML::kSignatureReserved] = 1; };
+        const SignatureAreaCase areaCases[] = {
+            { "签名算法不是 Ed25519", makeAlgorithm },
+            { "签名密钥编号为 0", makeKeyId },
+            { "签名区保留字节非零", makeReserved },
+        };
+        for (const SignatureAreaCase& item : areaCases) {
+            MemoryFileSystem fs;
+            Bytes manifest = BuildManifest(buildId, 5, artifactPath, image.size(), digest.data(), kSignerKeyId, SignerPair());
+            item.make(manifest);
+            fs.Add(setDirectory + "Manifest.mft", manifest);
+            const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
+            Require(result.code != nullptr && std::string(result.code) == "E-CORE-62", std::string("签名区结构错（") + item.what + "）应返回 E-CORE-62，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
+        }
+
+        // 签名值错：结构合法，只有验签不通过 → 64
+        {
+            MemoryFileSystem fs;
+            Bytes manifest = BuildManifest(buildId, 5, artifactPath, image.size(), digest.data(), kSignerKeyId, SignerPair());
+            manifest[manifest.size() - ML::kSignatureAreaBytes + ML::kSignatureValue] ^= 0x01;
+            fs.Add(setDirectory + "Manifest.mft", manifest);
+            const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
+            Require(result.code != nullptr && std::string(result.code) == "E-CORE-64", "签名值错应返回 E-CORE-64，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
+        }
+
+        // 验签先于 BuildId 比较：签名错且 BuildId 不符时必须报 64，不能报 65
+        {
+            uint8_t otherBuildId[32] = {};
+            for (unsigned i = 0; i < 32; ++i) otherBuildId[i] = static_cast<uint8_t>(0x70 + i);
+            MemoryFileSystem fs;
+            Bytes manifest = BuildManifest(otherBuildId, 5, artifactPath, image.size(), digest.data(), kSignerKeyId, SignerPair());
+            manifest[manifest.size() - ML::kSignatureAreaBytes + ML::kSignatureValue] ^= 0x01;
+            fs.Add(setDirectory + "Manifest.mft", manifest);
+            const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
+            Require(result.code != nullptr && std::string(result.code) == "E-CORE-64", "签名错且 BuildId 不符时必须先报验签失败 E-CORE-64，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
+        }
+
+        // 吊销先于信任锚查表：KeyId 2 既不在锚表里又被吊销 → 74（不是 63）
+        {
+            MemoryFileSystem fs;
+            const Bytes manifest = BuildManifest(buildId, 5, artifactPath, image.size(), digest.data(), 2, SignerPair());
+            fs.Add(setDirectory + "Manifest.mft", manifest);
+            RV::Facts revoked;
+            revoked.epoch = 1;
+            RevokeKey(revoked, 2);
+            const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, revoked, facts);
+            Require(result.code != nullptr && std::string(result.code) == "E-CORE-74", "被吊销且不在锚表里的签名密钥应按 E-CORE-74 拒绝，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
+        }
+
+        // .os 的镜像数据头错：摘要与签名都成立，但内核数据检查不通过 → 54 并带出原因
+        {
+            MemoryFileSystem fs;
+            Bytes badImage = BuildKernelImage(buildId);
+            badImage[Kernel::ImageDataLayout::kFieldVersion] = 2;
+            const auto badDigest = DigestOf(badImage);
+            const Bytes manifest = BuildManifest(buildId, 5, artifactPath, badImage.size(), badDigest.data(), kSignerKeyId, SignerPair());
+            fs.Add(setDirectory + "Manifest.mft", manifest);
+            fs.Add(setDirectory + artifactPath, badImage);
+            const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
+            Require(result.code != nullptr && std::string(result.code) == "E-CORE-54", "内核镜像数据头错应返回 E-CORE-54，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
+            Require(result.text != nullptr && std::string(result.text) == "The kernel image data version isn't supported", "E-CORE-54 应带出内核数据检查的原因");
+        }
+    }
+
     // 用例：单调性——记录文件缺失与被回滚成旧纪元都不解除持久事实
     void CaseMonotonicFacts() {
         MemoryMedium medium(true);
@@ -539,6 +652,26 @@ namespace {
         Baleen::Core::BootState::Record readBack;
         Require(Baleen::Core::BootState::Read(medium, kStateOffset, kStateBytes, readBack) == Baleen::Core::BootState::ReadResult::Ok, "记录应能读回");
         Require(readBack.revocation.epoch == 6 && RV::IsKeyRevoked(readBack.revocation.revokedKeyMask, kSignerKeyId), "读回的吊销事实应与写入一致");
+    }
+
+    // 用例：内核装载跨度与引导器映像重叠必须在装载前拒绝（E-CORE-91）
+    void CaseKernelLoaderOverlap() {
+        uint8_t buildId[32];
+        std::memset(buildId, 0xAB, sizeof(buildId));
+        MemoryFileSystem fs;
+        fs.Add("/set/LikesProgram.os", BuildKernelImage(buildId));
+        Baleen::Core::KernelFacts facts;
+        bool missing = false;
+        // 镜像声明装载地址 0x200000、跨度 0x200；引导器区间覆盖装载地址时必须拒绝
+        const auto overlap = Baleen::Core::CheckKernelImage(fs, "/set/LikesProgram.os", buildId, nullptr, 0, 0x1FF000, 0x2000, facts, missing);
+        Require(overlap.code != nullptr && std::string(overlap.code) == "E-CORE-91", "与引导器重叠必须以 E-CORE-91 拒绝");
+        // 引导器区间紧邻装载区之后：不重叠，正常通过并带出事实
+        const auto adjacent = Baleen::Core::CheckKernelImage(fs, "/set/LikesProgram.os", buildId, nullptr, 0, 0x202000, 0x1000, facts, missing);
+        Require(adjacent.code == nullptr && !missing, "引导器区间相邻不重叠时必须通过");
+        Require(facts.loadAddress == 0x200000 && facts.imageBytes == 0x200, "通过后应带出镜像事实");
+        // loaderBytes 为 0 表示调用方没有引导器区间事实：不检查重叠
+        const auto unknown = Baleen::Core::CheckKernelImage(fs, "/set/LikesProgram.os", buildId, nullptr, 0, 0, 0, facts, missing);
+        Require(unknown.code == nullptr && !missing, "没有引导器区间事实时不应误报重叠");
     }
 
     // 用例：记录只有一个版本 1——往返一致；不是版本 1 的记录按损坏处理
@@ -615,9 +748,12 @@ int main() {
     Case("签名与自吊销", CaseSignatureVerify);
     Case("位图定位与并集", CaseKeyMaskAndMerge);
     Case("系统卷读取三态", CaseLoadResults);
+    Case("系统卷打开失败按不可用", CaseOpenFailureUnusable);
     Case("真实清单验证：吊销与下限", CaseManifestVerification);
+    Case("清单验签编号与顺序", CaseManifestFailureOrder);
     Case("单调性：文件缺失与回滚不解除", CaseMonotonicFacts);
     Case("记录版本：只有版本 1 且拒绝其它版本", CaseRecordVersions);
+    Case("内核装载跨度不与引导器重叠", CaseKernelLoaderOverlap);
     if (g_failures != 0) {
         std::cerr << "CheckRevocation: " << g_failures << " 项断言失败\n";
         return 1;

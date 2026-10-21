@@ -37,6 +37,8 @@ namespace Storage {
         Error Write(uint64_t offset, const void* buffer, uint32_t bytes) override;
         // 底层刷新
         Error Flush() override { return m_device != nullptr ? m_device->Flush() : Error::InvalidArgument; }
+        // 刷新原语能力随底层：未绑定时没有原语，绑定时不替底层做假设
+        bool HasFlushPrimitive() const override { return m_device != nullptr && m_device->HasFlushPrimitive(); }
 
     private:
         // 对齐与范围检查：偏移与长度按底层块大小对齐，区间内的 [offset, offset + bytes) 不越界

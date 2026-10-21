@@ -18,6 +18,7 @@
 #include <Diagnostics.hpp>
 #include <Ext4.hpp>
 #include <ImageHeader.hpp>
+#include <LayoutCheck.hpp>
 #include <LayoutDescriptor.hpp>
 #include <Libc.hpp>
 #include <LoadKernel.hpp>
@@ -91,16 +92,6 @@ namespace {
     constexpr Baleen::Diagnostic kFailBounceWindow{"E-CORE-15", "Find a bounce window below 1MiB"};
     constexpr Baleen::Diagnostic kFailBindDisk{"E-CORE-16", "Bind the disk service"};
     constexpr Baleen::Diagnostic kFailReadLayout{"E-CORE-17", "Read the layout descriptor"};
-    constexpr Baleen::Diagnostic kFailLayoutMagic{"E-CORE-18", "The layout descriptor magic doesn't match"};
-    constexpr Baleen::Diagnostic kFailLayoutVersion{"E-CORE-19", "The layout descriptor version isn't supported"};
-    constexpr Baleen::Diagnostic kFailLayoutHead{"E-CORE-20", "The layout descriptor header length isn't supported"};
-    constexpr Baleen::Diagnostic kFailLayoutBytes{"E-CORE-21", "The layout descriptor length doesn't match"};
-    constexpr Baleen::Diagnostic kFailLayoutFlags{"E-CORE-22", "The layout descriptor flags aren't supported"};
-    constexpr Baleen::Diagnostic kFailLayoutReserved{"E-CORE-23", "The layout descriptor reserved field isn't zero"};
-    constexpr Baleen::Diagnostic kFailLayoutChecksum{"E-CORE-24", "The layout descriptor checksum doesn't match"};
-    constexpr Baleen::Diagnostic kFailLayoutPathBytes{"E-CORE-25", "The layout descriptor kernel path length is invalid"};
-    constexpr Baleen::Diagnostic kFailLayoutPathAbsolute{"E-CORE-26", "The layout descriptor kernel path isn't absolute"};
-    constexpr Baleen::Diagnostic kFailLayoutVolumeBytes{"E-CORE-27", "The layout descriptor volume length is zero"};
     constexpr Baleen::Diagnostic kFailOpenVolume{"E-CORE-28", "Open the system volume view"};
     constexpr Baleen::Diagnostic kFailMountVolume{"E-CORE-29", "Mount the system volume"};
     constexpr Baleen::Diagnostic kFailVolumeUuid{"E-CORE-30", "The system volume identifier doesn't match the layout descriptor"};
@@ -170,21 +161,9 @@ namespace {
         return base == 0 ? nullptr : reinterpret_cast<uint8_t*>(base);
     }
 
-    // 校验布局描述的固定字段与校验和：不通过时返回带编号的原因
+    // 校验布局描述：判据、编号与 UEFI 侧共用 LayoutCheck 的一份实现
     Baleen::Diagnostic CheckLayoutBlock(const uint8_t* block) {
-        using Baleen::LayoutDescriptor;
-        if (Get32(block + LayoutDescriptor::kFieldMagic) != LayoutDescriptor::kMagic) return kFailLayoutMagic;
-        if (Get16(block + LayoutDescriptor::kFieldVersion) != LayoutDescriptor::kVersion) return kFailLayoutVersion;
-        if (Get16(block + LayoutDescriptor::kFieldHeaderBytes) != LayoutDescriptor::kHeaderBytes) return kFailLayoutHead;
-        if (Get32(block + LayoutDescriptor::kFieldLayoutBytes) != LayoutDescriptor::kLayoutBytes) return kFailLayoutBytes;
-        if ((Get32(block + LayoutDescriptor::kFieldFlags) & ~LayoutDescriptor::kKnownFlags) != 0) return kFailLayoutFlags;
-        if (Get16(block + LayoutDescriptor::kFieldReserved) != 0) return kFailLayoutReserved;
-        if (Get32(block + LayoutDescriptor::kFieldChecksum) != LayoutDescriptor::Checksum(block)) return kFailLayoutChecksum;
-        const uint32_t pathBytes = Get16(block + LayoutDescriptor::kFieldKernelPathBytes);
-        if (pathBytes == 0 || pathBytes > LayoutDescriptor::kKernelPathMaxBytes) return kFailLayoutPathBytes;
-        if (block[LayoutDescriptor::kFieldKernelPath] != '/') return kFailLayoutPathAbsolute;
-        if (Get64(block + LayoutDescriptor::kFieldVolumeBytes) == 0) return kFailLayoutVolumeBytes;
-        return Baleen::Diagnostic{};
+        return Baleen::Core::LayoutCheck::Check(block);
     }
 
     // 引导耗时：从 Stub 进入起算，换算用 Stub 校准的每毫秒计数；没有计时事实时只报本阶段
@@ -278,9 +257,8 @@ namespace {
         s_bootInfo.reserved0 = 0;
         for (uint32_t i = 0; i < 4; ++i) s_bootInfo.reserved[i] = 0;
         s_bootInfo.memoryMap = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(s_bootMemoryMap));
-        // 内核集身份：选中的集标识与试启动身份；没有集身份时按“未提供”填零
-        if (selected.verified) memcpy(s_bootInfo.kernelSetBuildId, selected.buildId, Boot::InfoLayout::kKernelSetBuildIdBytes);
-        else for (uint32_t i = 0; i < Boot::InfoLayout::kKernelSetBuildIdBytes; ++i) s_bootInfo.kernelSetBuildId[i] = 0;
+        // 内核集身份：选版成功的集标识与试启动身份；选版成功时集一定经过清单验签
+        memcpy(s_bootInfo.kernelSetBuildId, selected.buildId, Boot::InfoLayout::kKernelSetBuildIdBytes);
         s_bootInfo.attemptId = selected.attemptId;
         // —— 启动来源：布局描述给出的位置事实，加固件环境自己的介质事实 ——
         s_bootInfo.layoutOffset = LayoutDescriptor::kOffset;
@@ -420,8 +398,10 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     if (bounce == nullptr) Fail(kFailBounceWindow);
     // 介质块设备：读盘服务只接受低 1MiB 目的地，窗口在低地址里挑；容量按 LBA 的 32 位上限声明
     s_medium.Bind(handoff->readSectors, handoff->sectorBytes, bounce, Baleen::kBounceBytes, static_cast<uint64_t>(handoff->sectorBytes) << 32);
-    // 写能力：引导状态区的写入经 Stub 的写盘服务执行；介质不提供写服务时写入失败并按降级路径处理
-    s_medium.BindWrite(handoff->writeSectors);
+    // 写能力：引导状态区的写入经 Stub 的写盘服务执行；光盘等只读介质不绑定写服务——
+    // 交权块里的写服务入口存在不代表介质可写，直接绑定会让 Writable() 谎报可写，
+    // 选择器在空状态/回退路径上白试一次写并报 E-CORE-70；只读介质按“无记录”直接启动
+    if (handoff->media != static_cast<uint32_t>(Boot::Media::Cdrom)) s_medium.BindWrite(handoff->writeSectors);
     if (s_medium.BlockBytes() != handoff->sectorBytes || s_medium.BlockBytes() == 0) Fail(kFailBindDisk);
     if (const Storage::Error error = s_medium.Read(Baleen::LayoutDescriptor::kOffset, s_layoutBlock, sizeof(s_layoutBlock)); error != Storage::Error::Ok)
         Fail(kFailReadLayout, Storage::ErrorMessage(error));
@@ -429,6 +409,8 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     // 比对基准取**第 0 号块**而不是布局描述块：同一批载荷装出来的光盘与硬盘，布局描述块逐字节相同，
     // 拿它比对会把"刷别人"判成"刷自己"；第 0 号块带分区表或 ISO 结构，两者必然不同
     // 只在有端口时做这次核验（读一个空闲命令槽、只读不写）；核验不成立就按未覆盖处理
+    // 第 3 个参数既是比较长度，也是 AHCI 的 LBA 与扇区计数单位：ATA 按逻辑扇区计，
+    // 4Kn 介质上一次读 4096 字节只有 1 个逻辑扇区（换算在 DiskFlush 与 AhciCommand 里）
     if (Baleen::Core::DiskFlush::Probe() != Baleen::Core::DiskFlush::Path::None &&
         s_medium.Read(0, s_firstBlock, s_medium.BlockBytes()) == Storage::Error::Ok) {
         s_flushCovers = Baleen::Core::DiskFlush::CoversMedium(0, s_firstBlock, s_medium.BlockBytes());
@@ -497,22 +479,21 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
 
     // —— 选版：读引导状态记录，选出目标集并验证清单与签名 ——
     // 状态机与写入边界见 Docs/Specs/内核集更新与回滚.md 与 Baleen/引导状态记录.md；
-    // 清单与信任锚见 Docs/Specs/内核集清单与签名.md；只读介质与写失败按降级路径直启
+    // 清单与信任锚见 Docs/Specs/内核集清单与签名.md；只读介质与写失败按降级路径启动缺省集，
+    // 缺省集与其它集一样先验证清单与签名（没有未验证的直启回退）
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Selecting the kernel set");
     if (const Baleen::Diagnostic reason = Baleen::Core::SelectKernelSet(s_ext4, s_medium, stateOffset, stateBytes, s_kernelPath, Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldFlags), s_selected); reason.code != nullptr)
         Fail(reason);
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, s_selected.verified ? "The kernel set is verified" : "No kernel set identity; starting the image the layout names");
+    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The kernel set is verified");
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Set=");
-    if (s_selected.verified) {
+    {
         // 集标识按字节顺序的 64 位小写十六进制，与集目录名同一串字符
         static const char kHexDigits[] = "0123456789abcdef";
         for (uint32_t i = 0; i < 32; ++i) {
             const char text[3] = { kHexDigits[s_selected.buildId[i] >> 4], kHexDigits[s_selected.buildId[i] & 0x0f], '\0' };
             Print::Write(text);
         }
-    } else {
-        Print::Write("none");
     }
     Print::Write("\r\n");
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
@@ -524,7 +505,7 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Locating and checking the kernel image");
     Baleen::Core::KernelFacts kernelFacts;
     bool kernelMissing = false;
-    const Baleen::Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, s_selected.kernelPath, handoff->memoryMap, handoff->memoryMapCount, kernelFacts, kernelMissing);
+    const Baleen::Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, s_selected.kernelPath, s_selected.buildId, handoff->memoryMap, handoff->memoryMapCount, reinterpret_cast<uintptr_t>(__image_start), static_cast<uint64_t>(__bss_end - __image_start), kernelFacts, kernelMissing);
     if (kernelMissing) {
         Baleen::WriteDiagnostic(Baleen::PrintTargets::Tag::Warn, kWarnKernelMissing);
     } else if (kernelReason.code != nullptr) {

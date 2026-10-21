@@ -63,11 +63,11 @@ namespace Baleen {
                 uint8_t revokedKeyMask[kKeyMaskBytes] = {};      // 已吊销签名密钥位图
             };
 
-            // 读取结论：缺文件是正常形态，不可用要报 WARN 后按“没有记录”继续
+            // 读取结论：只有文件不存在是正常形态；存储层读不了按不可用报 WARN 后继续
             enum class LoadResult : uint8_t {
-                Missing,    // 没有可用的吊销记录：文件不存在或打不开
+                Missing,    // 记录文件不存在（NotFound）：正常形态，按“没有记录”处理
                 Applied,    // 记录合法并已解出事实，可以用它更新持久事实
-                Unusable,   // 文件在但记录不可用：长度、结构、签名者规则或签名不成立
+                Unusable,   // 文件在但记录不可用，或存储层读不了：长度、结构、签名者规则或签名不成立
             };
 
             // KeyId 是否在位图里：KeyId k 对应第 k-1 位、字节 k/8 内的第 (k-1)%8 位

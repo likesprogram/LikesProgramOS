@@ -1,5 +1,5 @@
 # Makefile
-#    CheckEfiBlockDevice —— Baleen UEFI 块设备适配 EfiBlockDevice 的宿主侧检查（C++20）
+#    CheckEfiBlockDevice —— Baleen UEFI 块设备适配与固件内存图的宿主侧检查（C++20）
 
 # 中间对象目录
 OBJ_DIR  ?= Obj
@@ -11,11 +11,13 @@ SRC_DIR  := Src
 UEFI_DIR := ../../../Packages/Baleen/Uefi
 # 存储抽象的接口
 COMMON_INC := ../../../Packages/Common/Include
+# Baleen 引导期公共部件的头文件：诊断编号与 BootInfo 契约，UefiMemory.cpp 直接包含
+BALEEN_COMMON_DIR := ../../../Packages/Baleen/Common
 
 # C++ 编译器
 CXX      ?= g++
-# 预处理选项：固件侧结构定义、被测类的头文件与共用存储接口
-CPPFLAGS ?= -I$(UEFI_DIR)/Include -I$(COMMON_INC)
+# 预处理选项：固件侧结构定义、被测类的头文件、共用存储接口与引导期公共头文件
+CPPFLAGS ?= -I$(UEFI_DIR)/Include -I$(COMMON_INC) -I$(BALEEN_COMMON_DIR)/Include
 # 编译选项：常见警告全开并视为错误
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 # 链接选项：链接器警告视为错误
@@ -23,8 +25,8 @@ LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/CheckEfiBlockDevice
-# 目标文件：main 是用例与假协议，EfiBlockDevice 取自 Baleen UEFI 的目标侧源码
-OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/EfiBlockDevice.o
+# 目标文件：main 是用例与假协议，EfiBlockDevice 与 UefiMemory 取自 Baleen UEFI 的目标侧源码
+OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/EfiBlockDevice.o $(OBJ_DIR)/UefiMemory.o
 
 vpath %.cpp $(SRC_DIR) $(UEFI_DIR)/$(SRC_DIR)
 

@@ -41,6 +41,8 @@ namespace Baleen {
             m_capacityBytes = 0;
             m_writable = false;
             m_removable = false;
+            // 新绑定的介质重新开始观察：上一块介质报过的"没有刷新原语"不能留给这一块
+            m_flushUnsupported = false;
             if (blockIo == nullptr || blockIo->media == nullptr) return Storage::Error::InvalidArgument;
             const BlockIoMedia* media = blockIo->media;
             if (media->mediaPresent == 0) return Storage::Error::NotFound;
@@ -138,22 +140,36 @@ namespace Baleen {
 
         bool EfiBlockDevice::HasFlushPrimitive() const {
             if (m_blockIo == nullptr) return false;
+            // 只读介质没有写缓存要刷：不能声称"提交是持久的"，否则选择器不会报 E-UEFI-71
+            if (!m_writable) return false;
             // REVISION2 起才有 FlushBlocks：更老的协议上那个成员不存在，不能碰
-            return m_blockIo->revision >= Baleen::Uefi::kBlockIoRevision2;
+            if (m_blockIo->revision < Baleen::Uefi::kBlockIoRevision2) return false;
+            // 固件对 FlushBlocks 报过 EFI_UNSUPPORTED：那次调用已经证明这块介质没有可用的刷新原语
+            return !m_flushUnsupported;
         }
 
         Storage::Error EfiBlockDevice::Flush() {
             if (m_blockIo == nullptr) return Storage::Error::NotSupported;
-            // 没有刷新原语（老协议版本，或固件对该服务报 Unsupported）时按"无缓存"通过：
-            // 这与 BIOS 侧完全同一口径——写入仍然成立，只是那次提交可能只落在设备缓存里，
-            // 掉电会让它回退。把"没有原语"当成"刷盘失败"会让整台机器在那种固件上永远做不出状态转换
-            if (!HasFlushPrimitive()) return Storage::Error::Ok;
+            // 只读介质没有写缓存要刷：按只读回报，不下发固件调用（只读判定先于版本判定）
+            if (!m_writable) return Storage::Error::ReadOnly;
+            // 没有刷新原语的时代（老协议版本）按"无缓存"通过：这与 BIOS 侧完全同一口径——
+            // 写入仍然成立，只是那次提交可能只落在设备缓存里，掉电会让它回退。
+            // 把"没有原语"当成"刷盘失败"会让整台机器在那种固件上永远做不出状态转换
+            if (m_blockIo->revision < Baleen::Uefi::kBlockIoRevision2) return Storage::Error::Ok;
             // 与读写同一条核对：介质不在位或已被换掉时不下发，交由调用方重新取介质事实
             if (m_blockIo->media == nullptr || m_blockIo->media->mediaPresent == 0) return Storage::Error::NotFound;
             if (m_blockIo->media->mediaId != m_mediaId) return Storage::Error::NotFound;
             const Baleen::Uefi::EfiStatus status = m_blockIo->flushBlocks(m_blockIo, m_mediaId);
-            if (status == Baleen::Uefi::kStatusUnsupported) return Storage::Error::Ok;
-            return MapStatus(status);
+            // 固件报 Unsupported = 这块介质没有可用的刷新原语：记下来，之后不再声称有原语；
+            // 本次提交仍按"无缓存"通过（与 BIOS 侧同一口径）
+            if (status == Baleen::Uefi::kStatusUnsupported) {
+                m_flushUnsupported = true;
+                return Storage::Error::Ok;
+            }
+            const Storage::Error error = MapStatus(status);
+            // 固件改口说刷成功：以实际能力为准，恢复"有刷新原语"的声称
+            if (error == Storage::Error::Ok) m_flushUnsupported = false;
+            return error;
         }
     }
 }

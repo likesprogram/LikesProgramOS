@@ -42,7 +42,8 @@ CXXFLAGS32 ?= -m32 $(COMMON_FLAGS)
 #   --image-base 非零：PE 头里 ImageBase 为 0 的镜像会被固件判为不受支持
 #   --enable-reloc-section：生成 .reloc；固件把映像装到别处时要靠它重定位，缺了同样加载失败
 #   --subsystem 10：EFI 应用
-LDFLAGS32  ?= -m i386pe --image-base 0x400000 --enable-reloc-section --subsystem 10 -nostdlib -e efi_main
+#   --no-insert-timestamp：PE 头不写构建时间，同一份输入产出同样的字节（可复现构建）
+LDFLAGS32  ?= -m i386pe --image-base 0x400000 --enable-reloc-section --subsystem 10 -nostdlib -e efi_main --no-insert-timestamp
 
 # x64 引导器的编译选项：本包与上游源码都按这套选项编 x64
 # -mno-red-zone 是固件环境的要求：本阶段中断是开着的，红色区域会被固件的中断处理打断
@@ -51,7 +52,7 @@ LDFLAGS32  ?= -m i386pe --image-base 0x400000 --enable-reloc-section --subsystem
 CXXFLAGS64 ?= -m64 -mno-red-zone $(COMMON_FLAGS) -MMD -MP -DBALEEN_STAGE_PREFIX='"E-UEFI"' \
               -I$(INC_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include -I$(CORE_DIR)/Include -I$(CORE_OUT)
 # 链接选项与 32 位同一套约束，只是目标格式换成 PE32+
-LDFLAGS64  ?= -m i386pep --image-base 0x400000 --enable-reloc-section --subsystem 10 -nostdlib -e efi_main
+LDFLAGS64  ?= -m i386pep --image-base 0x400000 --enable-reloc-section --subsystem 10 -nostdlib -e efi_main --no-insert-timestamp
 # 汇编选项：交接入口是 64 位代码，链进同一个 PE
 NASMFLAGS ?= -f elf64 -Werror
 
@@ -70,14 +71,17 @@ LOCAL_OBJS64 := $(addprefix $(OBJ_DIR)/,BootX64.o Console.o EfiBlockDevice.o Efi
 # 以及选版、清单验签、内核镜像校验与信任锚——后四项是与 BaleenCore 共用的同一份源码，
 # 按 x64 再编一份，诊断编号前缀由 CXXFLAGS64 里的 BALEEN_STAGE_PREFIX 换成 E-UEFI
 # 各源文件的对象名互不相同，因此与本地对象共用一个对象目录不会撞名
+# UEFI 侧不校验自身镜像头（镜像头字段校验 E-UEFI-40..51 在本阶段不可达），
+# 因此 ImageHeader.o 不链入：它带着三张按阶段排的编号表，链接进去会让死编号重新出现在二进制里
 SHARED_OBJS64 := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Error.o Path.o SubDevice.o FileSystem.o Diagnostics.o Ext4.o Libc.o \
                  LoadKernel.o SelectSet.o ManifestVerify.o TrustAnchor.o TrustAnchors.o \
-                 BootState.o Revocation.o KernelImage.o Sha256.o Sha512.o Ed25519.o ImageHeader.o BootMemory.o)
+                 BootState.o Revocation.o KernelImage.o Sha256.o Sha512.o Ed25519.o BootMemory.o)
 OBJS64    := $(LOCAL_OBJS64) $(SHARED_OBJS64)
 
-# Core 包的生成物：信任锚源与内嵌最低安全版本头。两个包各编一份，生成只有一处
-CORE_OUT          := $(CORE_DIR)/Out
-TRUST_ANCHORS_SRC := $(CORE_OUT)/TrustAnchors.cpp
+# Core 包的生成物：信任锚源/锚文本与内嵌最低安全版本头。两个包各编一份，生成只有一处
+CORE_OUT           := $(CORE_DIR)/Out
+TRUST_ANCHORS_SRC  := $(CORE_OUT)/TrustAnchors.cpp
+TRUST_ANCHORS_TEXT := $(CORE_OUT)/TrustAnchors.txt
 SECURITY_FLOOR_HPP := $(CORE_OUT)/SecurityFloor.hpp
 
 # —— ESP 镜像 ——
@@ -87,28 +91,38 @@ ESP_IMAGE := $(BIN_DIR)/Efi.img
 MAKE_PAYLOADS := ../../../Tools/Bin/MakePayloads
 
 .DEFAULT_GOAL := all
-.PHONY: all check clean help
+.PHONY: all check clean help core-generated
 
 all: $(ESP_IMAGE) $(EFI64) $(EFI32)
+
+# Core 生成物是真正的顺序依赖：每次构建先让 Core 的 Makefile 判断密钥、锚源、锚文本与
+# 内嵌下限是否要重做，而不是“文件不存在才子构建”。产物缺失、密钥换了、锚输入改了，
+# 都在这里刷新；所有对象与链接都 order-only 依赖它，因此不会用到上一轮的旧生成物
+core-generated:
+	@$(MAKE) -C $(CORE_DIR)
+
+# Core 生成物的兜底声明：旧 .d 文件把它们登记成对象的普通前提，没有规则时 make 会
+# 在 core-generated 之前按“没有规则可制作目标”退出。这里只声明“由 core-generated 产出”
+# 并核对存在，不另起一遍子 make——否则与 core-generated 并发时会同时写同一个 Out/。
+$(TRUST_ANCHORS_SRC) $(TRUST_ANCHORS_TEXT) $(SECURITY_FLOOR_HPP): core-generated
+	@test -f "$@" || { echo "缺少由 Core 生成的 $@（core-generated 没有产出它）"; exit 1; }
+
+# 信任锚源是生成物：编译规则显式给出（不靠通配 vpath 在生成前找源文件），
+# 源文件由 core-generated 保证已生成；后续构建的重新编译由 -MMD 写出的 .d 依赖驱动
+$(OBJ_DIR)/TrustAnchors.o: | $(OBJ_DIR) core-generated
+	$(CXX) $(CXXFLAGS64) -c -o $@ $(TRUST_ANCHORS_SRC)
 
 # 从本包、上游与 Core 生成物的目录里找源文件
 vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/Src $(COMMON_DIR)/Src/Storage $(BALEEN_COMMON_DIR)/Src $(CORE_DIR)/Src $(CORE_OUT)
 
 # x64 侧：本包源码与上游源码共用一条编译规则
-$(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
+# order-only 依赖 core-generated：编译前 Core 的锚源与内嵌下限一定已生成（或已确认最新）
+$(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR) core-generated
 	$(CXX) $(CXXFLAGS64) -c -o $@ $<
 
 # 交接入口：64 位汇编，与 C++ 对象一起链进同一个 PE
-$(OBJ_DIR)/EnterKernel.o: $(SRC_DIR)/EnterKernel.asm | $(OBJ_DIR)
+$(OBJ_DIR)/EnterKernel.o: $(SRC_DIR)/EnterKernel.asm | $(OBJ_DIR) core-generated
 	$(NASM) $(NASMFLAGS) $< -o $@
-
-# Core 包的生成物：缺了就现建一次（Core 的 Makefile 会连密钥与锚源一起处理）
-$(TRUST_ANCHORS_SRC) $(SECURITY_FLOOR_HPP):
-	@$(MAKE) -C $(CORE_DIR)
-
-# 首次构建时不等 .d：显式声明对生成物的依赖
-$(OBJ_DIR)/TrustAnchors.o: $(TRUST_ANCHORS_SRC)
-$(OBJ_DIR)/ManifestVerify.o: $(SECURITY_FLOOR_HPP)
 
 # 32 位提示件单独一条规则：它不引用任何上游头文件
 $(OBJ32): $(SRC_DIR)/BootIa32.cpp | $(OBJ_DIR)
@@ -119,7 +133,7 @@ $(EFI32): $(OBJ32) | $(BIN_DIR)
 	$(LD) $(LDFLAGS32) -o $@ $<
 
 # 直接链成 PE32+ 的 EFI 应用
-$(EFI64): $(OBJS64) | $(BIN_DIR)
+$(EFI64): $(OBJS64) | $(BIN_DIR) core-generated
 	$(LD) $(LDFLAGS64) -o $@ $(OBJS64)
 
 $(OBJ_DIR) $(BIN_DIR):
@@ -146,8 +160,14 @@ check: all
 	@strings "$(EFI64)" | grep -q "BALEENUEFI" || { echo "check: $(EFI64) 里没有阶段标签"; exit 1; }
 	@strings "$(EFI64)" | grep -q "E-UEFI-17" || { echo "check: $(EFI64) 里没有登记编号 E-UEFI-17"; exit 1; }
 	@strings "$(EFI64)" | grep -q "E-UEFI-78" || { echo "check: $(EFI64) 里没有登记编号 E-UEFI-78"; exit 1; }
-	@echo "check: $(EFI32) 是 PE32 EFI 应用（$$(wc -c < "$(EFI32)") 字节）"
-	@echo "check: $(EFI64) 是 PE32+ EFI 应用（$$(wc -c < "$(EFI64)") 字节）"
+	@command -v mdir >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1 || { echo "check: 缺少 mtools（mdir/mcopy），无法核对 $(ESP_IMAGE) 的内容"; exit 1; }
+	@mdir -i "$(ESP_IMAGE)" ::/EFI/BOOT >/dev/null || { echo "check: $(ESP_IMAGE) 里没有 \\EFI\\BOOT 目录"; exit 1; }
+	@mdir -i "$(ESP_IMAGE)" ::/EFI/BOOT | grep -q "BOOTX64" || { echo "check: $(ESP_IMAGE) 的 \\EFI\\BOOT 里没有 BOOTX64.EFI"; exit 1; }
+	@mdir -i "$(ESP_IMAGE)" ::/EFI/BOOT | grep -q "BOOTIA32" || { echo "check: $(ESP_IMAGE) 的 \\EFI\\BOOT 里没有 BOOTIA32.EFI"; exit 1; }
+	@mcopy -i "$(ESP_IMAGE)" ::/EFI/BOOT/BOOTX64.EFI - | cmp -s - "$(EFI64)" || { echo "check: $(ESP_IMAGE) 里的 BOOTX64.EFI 与 $(EFI64) 不一致"; exit 1; }
+	@mcopy -i "$(ESP_IMAGE)" ::/EFI/BOOT/BOOTIA32.EFI - | cmp -s - "$(EFI32)" || { echo "check: $(ESP_IMAGE) 里的 BOOTIA32.EFI 与 $(EFI32) 不一致"; exit 1; }
+	@echo "check: $(EFI32) 是 PE32 EFI 应用（$$(wc -c < "$(EFI32)") 字节）；ESP 内容与它逐字节一致"
+	@echo "check: $(EFI64) 是 PE32+ EFI 应用（$$(wc -c < "$(EFI64)") 字节）；ESP 内容与它逐字节一致"
 
 clean:
 	@test -n "$(OUT_DIR)" || { echo "clean: OUT_DIR 为空，拒绝执行"; exit 1; }
@@ -156,7 +176,7 @@ clean:
 help:
 	@printf '%s\n' 'Packages/Baleen/Uefi：UEFI 侧的固件应用' \
 	  '  make [all]  构建 $(EFI64)（x64 引导器）与 $(EFI32)（IA32 提示件）' \
-	  '  make check  复核两件产物是 PE / PE32+ EFI 应用且关键文本在位' \
+	  '  make check  复核两件产物是 PE / PE32+ EFI 应用且关键文本在位，并核对 ESP 内容与它们逐字节一致' \
 	  '  make clean  删除 $(OUT_DIR)/' \
 	  '  变量：OUT_DIR / CXX / LD / CXXFLAGS32 / CXXFLAGS64 / LDFLAGS32 / LDFLAGS64 可覆盖'
 

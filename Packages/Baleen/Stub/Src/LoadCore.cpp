@@ -33,6 +33,8 @@ namespace Baleen {
             // 位置字段都是 512 字节基准（值 = 字节偏移 / 512），按本地单位右移换算成本地 LBA
             constexpr uint32_t kBaseShift = 9;                  // 位置字段的基准单位：1 << 9 = 512 字节
             constexpr uint32_t kAreaMagic = 0x43534442;         // 'BDSC'，头部标记
+            constexpr uint32_t kFieldAreaVersion = 0x04;        // 头部内版本字段，取值是 kAreaVersion
+            constexpr uint32_t kAreaVersion = 1;                // 描述符区与各段共用的版本
             constexpr uint32_t kFieldAreaHeadBytes = 0x06;      // 头部内头长字段
             constexpr uint32_t kAreaHeadLen = 16;               // 头部固定长度
             constexpr uint32_t kFieldAreaLba = 0x08;            // 头部内本区起始位置，512 字节基准
@@ -70,6 +72,10 @@ namespace Baleen {
             constexpr Diagnostic kFailLoadArea{"E-STUB-35", "The BaleenCore load area isn't usable memory"};
             constexpr Diagnostic kFailBounceWindow{"E-STUB-36", "Find a bounce window below 1MiB"};
             constexpr Diagnostic kFailReadCore{"E-STUB-37", "Read BaleenCore"};
+            // 描述符区头部版本与头长字段必须取契约值：段序列从头部之后开始，这两个字段不符时
+            // 后面的偏移都没有解释意义，与标记不符同属“格式不匹配”
+            constexpr Diagnostic kFailDescriptorVersion{"E-STUB-38", "The CoreDescriptor version doesn't match"};
+            constexpr Diagnostic kFailDescriptorHeadBytes{"E-STUB-39", "The CoreDescriptor HeaderBytes doesn't match"};
 
             // 读盘自检、描述符与镜像头共用的扇区缓冲：整扇区读入，16 字节对齐是 EDD 的 DAP 前提
             uint8_t s_sector[kMaxSectorBytes] __attribute__((aligned(16)));
@@ -116,19 +122,26 @@ namespace Baleen {
 
             // 读取并校验描述符区：头部定段序列起点，按段长遍历、按标记找 BaleenCore 段
             // 描述符区扇区号由 IPL 经 ESI 交来（本地单位）；段内位置字段是 512 字节基准，先换算成本地 LBA
+            // 头部版本与头长按契约取值核对；段序列的偏移、段长与起止扇区一律按 32 位判定，
+            // 段长或偏移相加在 16 位里回绕会让遍历原地打转或越过读入的扇区缓冲
             Diagnostic ReadCoreDescriptor(uint32_t sectorBytes, uint32_t descriptorLba, uint32_t& fileLba, uint32_t& fileSectors) {
                 const uint32_t shift = BaseShift(sectorBytes);
                 if (_Bios_Read_Sectors(descriptorLba, 1, s_sector, sectorBytes) == 0) return kFailReadDescriptor;
                 if (Get32(s_sector) != kAreaMagic) return kFailDescriptorMagic;
-                if (Get16(s_sector + kFieldAreaHeadBytes) < kAreaHeadLen) return kFailDescriptorHead;
+                if (Get16(s_sector + kFieldAreaVersion) != kAreaVersion) return kFailDescriptorVersion;
+                const uint32_t headBytes = Get16(s_sector + kFieldAreaHeadBytes);
+                if (headBytes < kAreaHeadLen) return kFailDescriptorHead;
+                if (headBytes != kAreaHeadLen) return kFailDescriptorHeadBytes;
                 if ((Get32(s_sector + kFieldAreaLba) >> shift) != descriptorLba) return kFailDescriptorArea;
                 if ((Get32(s_sector + kFieldAreaEndLba) >> shift) < descriptorLba) return kFailDescriptorInverted;
                 // 段序列：从头部之后开始，按段长前进，按标记认段
-                uint32_t offset = Get16(s_sector + kFieldAreaHeadBytes);
+                // 段头与整段都必须落在本次读入的扇区缓冲内：只看 16 位偏移或 16 位段长都会回绕
+                uint32_t offset = headBytes;
                 for (;;) {
-                    if (offset + kSegmentHeadBytes > sectorBytes) return kFailDescriptorNoSegment;
+                    if (offset > sectorBytes - kSegmentHeadBytes) return kFailDescriptorNoSegment;
                     const uint32_t length = Get16(s_sector + offset + kFieldSegmentLength);
                     if (length < kSegmentHeadBytes) return kFailSegmentHead;
+                    if (length > sectorBytes - offset) return kFailSegmentRange;
                     if (Get32(s_sector + offset) == kCoreMagic) {
                         // 段长必须容下起止扇区，读取方按段内字段取位置
                         if (length < kSegmentHeadBytes + 8) return kFailSegmentRange;
@@ -141,6 +154,8 @@ namespace Baleen {
                 if (fileLba == 0) return kFailDescriptorLbaZero;
                 if (endLba < fileLba) return kFailDescriptorRange;
                 if (fileLba <= descriptorLba) return kFailDescriptorOverlap;
+                // 结束位置加一不得产生 32 位进位：未加一时就已是 0xFFFFFFFF，加一回到 0，扇区数会算成 0
+                if (endLba == 0xFFFFFFFFu) return kFailDescriptorRange;
                 fileSectors = endLba - fileLba + 1;
                 if (fileSectors > kCoreMaxBytes / sectorBytes) return kFailCoreBytesLimit;
                 return Diagnostic{};
@@ -151,6 +166,8 @@ namespace Baleen {
             Diagnostic ReadCoreHeader(uint32_t sectorBytes, uint32_t fileLba, uint32_t fileSectors, ImageFacts& facts) {
                 if (_Bios_Read_Sectors(fileLba, 1, s_sector, sectorBytes) == 0) return kFailReadHeader;
                 if (const Diagnostic reason = CheckImageHeader(s_sector, kCoreImageMagic, facts, ImageDiagStage::Stub); reason.code != nullptr) return reason;
+                // 扇区数上取整先核对加法溢出：ImageBytes 接近 32 位上限时直接加 sectorBytes-1 会回绕成小数
+                if (facts.imageBytes > 0xFFFFFFFFu - (sectorBytes - 1)) return kFailCoreBytesLimit;
                 if (((facts.imageBytes + (sectorBytes - 1)) >> SectorShift(sectorBytes)) != fileSectors) return kFailSectorCount;
                 if (facts.memoryBytes > kCoreMaxMemory) return kFailMemoryLimit;
                 return Diagnostic{};
@@ -165,7 +182,10 @@ namespace Baleen {
                 for (uint32_t done = 0; done < bytes; done += kBounceBytes, lba += bounceSectors) {
                     const uint32_t remain = bytes - done;
                     const uint32_t chunk = remain < kBounceBytes ? remain : kBounceBytes;
-                    if (_Bios_Read_Sectors(lba, chunk >> shift, reinterpret_cast<void*>(bounce), sectorBytes) == 0) return false;
+                    // 本批的起始 LBA 加块数不得产生 32 位进位：DAP 只带低 32 位，进位会绕回 0 号扇区
+                    const uint32_t sectors = chunk >> shift;
+                    if (lba > 0xFFFFFFFFu - (sectors - 1)) return false;
+                    if (_Bios_Read_Sectors(lba, sectors, reinterpret_cast<void*>(bounce), sectorBytes) == 0) return false;
                     CopyUp(reinterpret_cast<uint8_t*>(kCoreLoad + done), reinterpret_cast<uint8_t*>(bounce), chunk);
                 }
                 return true;

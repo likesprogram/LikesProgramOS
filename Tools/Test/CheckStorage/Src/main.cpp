@@ -44,7 +44,7 @@ namespace {
     namespace fs = std::filesystem;
 #endif
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 24;
+    constexpr unsigned kCaseCount = 25;
     // 已跑用例数
     unsigned g_ran = 0;
 
@@ -70,8 +70,8 @@ namespace {
     class FakeDevice final : public Storage::BlockDevice {
     public:
         // 建一个 capacityBytes 字节的设备；逻辑块大小由调用方给定，0 或非 2 的幂用于反向用例
-        FakeDevice(uint32_t blockBytes, uint64_t capacityBytes, bool writable = true)
-            : m_blockBytes(blockBytes), m_writable(writable), m_data(static_cast<std::size_t>(capacityBytes), 0) {}
+        FakeDevice(uint32_t blockBytes, uint64_t capacityBytes, bool writable = true, bool hasFlush = true)
+            : m_blockBytes(blockBytes), m_writable(writable), m_hasFlush(hasFlush), m_data(static_cast<std::size_t>(capacityBytes), 0) {}
         // 逻辑块大小，字节
         uint32_t BlockBytes() const override { return m_blockBytes; }
         // 设备容量，字节
@@ -101,6 +101,8 @@ namespace {
         }
         // 刷新：只计数
         Storage::Error Flush() override { ++m_flushes; return Storage::Error::Ok; }
+        // 刷新原语能力：由构造参数决定，供偏移视图的转发用例使用
+        bool HasFlushPrimitive() const override { return m_hasFlush; }
         // 清空动作计数，便于核对某个动作是否触及底层
         void ResetCounters() { m_reads = 0; m_writes = 0; m_flushes = 0; }
         // 读次数
@@ -125,6 +127,7 @@ namespace {
 
         uint32_t m_blockBytes = 0;             // 逻辑块大小，字节
         bool m_writable = false;               // 写能力
+        bool m_hasFlush = true;                // 底层是否提供刷新原语
         std::vector<std::uint8_t> m_data;      // 底层字节
         unsigned m_reads = 0;                  // 读次数
         unsigned m_writes = 0;                 // 写次数
@@ -326,6 +329,7 @@ namespace {
         Require(view.Read(0, buffer, 512) == Storage::Error::InvalidArgument, "未绑定时读应报参数非法");
         Require(view.Write(0, buffer, 512) == Storage::Error::InvalidArgument, "未绑定时写应报参数非法");
         Require(view.Flush() == Storage::Error::InvalidArgument, "未绑定时刷新应报参数非法");
+        Require(!view.HasFlushPrimitive(), "未绑定时不应声称有刷新原语");
     }
 
     // 用例：绑定的对齐与边界校验，任一项不通过都不留下绑定
@@ -372,6 +376,7 @@ namespace {
         Require(buffer[0] == first && buffer[511] == last, "读到的字节应来自底层对应偏移");
         Require(view.Flush() == Storage::Error::Ok, "刷新应转发到底层");
         Require(device.Flushes() == 1, "刷新应转发到底层一次");
+        Require(view.HasFlushPrimitive() == device.HasFlushPrimitive(), "刷新原语能力应随底层");
     }
 
     // 用例：区间读的非法参数与边界
@@ -477,6 +482,20 @@ namespace {
         Require(base.Open("dir/file", id) == Storage::Error::InvalidArgument, "非绝对路径应上报参数非法");
     }
 
+    // 用例：刷新原语能力转发（可写/只读/无原语三种底层）
+    void CaseSubDeviceFlushPrimitive() {
+        FakeDevice full(512, 4096, true, true);
+        Storage::SubDevice view;
+        Require(Storage::SubDevice::Open(full, 0, 512, view) == Storage::Error::Ok, "有原语的底层应能绑定");
+        Require(view.HasFlushPrimitive(), "有原语的底层应转发为有原语");
+        FakeDevice none(512, 4096, true, false);
+        Require(Storage::SubDevice::Open(none, 0, 512, view) == Storage::Error::Ok, "无原语的底层应能绑定");
+        Require(!view.HasFlushPrimitive(), "无原语的底层不应被视图补出原语");
+        FakeDevice readonly(512, 4096, false, true);
+        Require(Storage::SubDevice::Open(readonly, 0, 512, view) == Storage::Error::Ok, "只读底层应能绑定");
+        Require(view.HasFlushPrimitive(), "只读底层的能力也应原样转发");
+    }
+
     // 用例：按路径查询对象事实
     void CaseFileSystemStat() {
         FakeFileSystem fake;
@@ -509,6 +528,7 @@ namespace {
         Case("subdevice 绑定校验", CaseSubDeviceOpenChecks);
         Case("subdevice 块大小非法", CaseSubDeviceOpenBlockSize);
         Case("subdevice 绑定事实与转发", CaseSubDeviceFacts);
+        Case("subdevice 刷新原语转发", CaseSubDeviceFlushPrimitive);
         Case("subdevice 读的非法参数", CaseSubDeviceReadChecks);
         Case("subdevice 写与只读", CaseSubDeviceWriteChecks);
         Case("error 诊断文本", CaseErrorMessages);

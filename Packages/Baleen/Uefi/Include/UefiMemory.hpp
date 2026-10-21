@@ -4,8 +4,13 @@
     条目数组放在本阶段自己的静态存储里：内核入口按物理地址读它，并在建立页帧分配器时
     把 BootInfo 与这份数组所在的内存标为占用（见 Packages/LikesProgramOS/Core/Src/Memory.cpp），
     因此这里只如实上报固件事实，不做保留性扣减
-    哪些类型算可用：常规内存，以及退出启动服务之后归系统的启动服务内存与引导器内存；
-    运行期服务、ACPI NVS、MMIO 与持久内存都不上报为可用
+    条目有两种视角，按取图快照的用途选择：
+      - 退出启动服务之前：只有常规内存算可用；启动服务内存与引导器内存仍在固件手里，
+        不能当可写目标（本路径的内核镜像因此先放在 AllocatePages 分配的中转缓冲里，
+        不使用这份视角去核对固定装载地址）
+      - 退出启动服务之后：常规内存、启动服务内存与引导器内存都归系统使用；
+        运行期服务、ACPI NVS、MMIO 与持久内存始终不上报为可用
+        UEFI 装载路径用这份视角核对内核的固定装载跨度并构造 BootInfo
     取图缓冲是固件池内存，退出启动服务之前不释放：释放会改变内存图，让手上的 MapKey 作废
 */
 
@@ -29,7 +34,10 @@ namespace Baleen {
             // 取一次内存图，记下 MapKey 与描述符数；缓冲不够时按固件回报的长度重新分配后再取
             Diagnostic Capture(BootServices* bootServices);
             // 把最近一次取到的内存图转成条目数组，返回转换后的条目数；不调用固件服务
-            uint32_t Convert();
+            // afterExit 决定启动服务内存与引导器内存算不算可用：
+            // false = 退出前的当前归属视图（只有常规内存可用），true = 退出后交给系统的视图；
+            // UEFI 装载路径在 ExitBootServices 之后再转换并核对固定装载跨度，两种视角都从同一份快照转换
+            uint32_t Convert(bool afterExit);
             // 释放取图缓冲；退出启动服务之后调用无效（那时固件服务已不可用）
             void Release(BootServices* bootServices);
 

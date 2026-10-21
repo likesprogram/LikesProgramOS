@@ -42,7 +42,7 @@ namespace {
     // 收到终止信号时记下的信号号，主循环轮询它并退出
     volatile std::sig_atomic_t interrupted = 0;
     // 启动回归的用例总数，Execute 末尾核对，防止用例被误删
-    constexpr unsigned kCaseCount = 55;
+    constexpr unsigned kCaseCount = 59;
 
     // 信号处理：只记录信号号，不在处理函数里做其他事
     void OnSignal(int value) { interrupted = value; }
@@ -528,6 +528,9 @@ namespace {
                 const std::vector<Mutation> mutations{
                     // area-magic：魔数是 CD 候选探测的识别条件，破坏后 CD 以探测失败（5）结束，HDD 走头部校验（3）
                     {"area-magic", 0, 4, 0, cd ? "5" : "3"}, {"area-head-short", 6, 2, 4, "3"},
+                    // 头长取 0xFFFF：段遍历的起始偏移必须按 32 位判定并落在扇区缓冲内，
+                    // 16 位加法（+8）回绕后会把偏移 7 当成合法值继续读盘
+                    {"area-head-max", 6, 2, 0xFFFF, "3"},
                     {"area-sector", 8, 4, 1, "3"},
                     {"segment-magic", 16, 4, 0, "3"}, {"segment-length", 22, 2, 0, "3"},
                     {"stub-lba-zero", 24, 4, 0, "4"}, {"stub-lba-overlap", 24, 4, 1, "4"},
@@ -542,6 +545,15 @@ namespace {
                     const auto image = m_work / "bad.img";
                     WriteBytes(image, bad);
                     Case(media + " " + mutation.name + " -> " + mutation.code, image, media, mutation.code, cd);
+                }
+                // 段长写到 0xFFFF 且段标记写坏：遍历必须走完这一段的 32 位步进并在下一轮发现越界，
+                // 不能像 16 位加法那样回绕到扇区开头附近继续读（码 3，绝不进内核）
+                {
+                    auto bad = ReadBytes(base);
+                    PutLe(bad, 0x22000 + 16, 4, 0);
+                    PutLe(bad, 0x22000 + 22, 2, 0xFFFF);
+                    WriteBytes(m_work / "bad.img", bad);
+                    Case(media + " segment-length-beyond-buffer -> 3", m_work / "bad.img", media, "3", cd);
                 }
                 // 读盘失败：起止扇区一起改到介质之外，描述符校验通过、读盘失败
                 {

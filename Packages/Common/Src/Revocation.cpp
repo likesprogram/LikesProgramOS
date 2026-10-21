@@ -115,9 +115,15 @@ namespace Baleen {
 
             LoadResult Load(Storage::FileSystem& fs, const char* path, PublicKeyLookup lookup, SignatureVerify verify, Facts& facts, const char*& reason) {
                 Storage::FileId id;
-                if (fs.Open(path, id) != Storage::Error::Ok) {
-                    reason = kReasonFormat;
-                    return LoadResult::Missing;
+                // 只有“文件不存在”是正常的缺失形态；其它打开失败是存储层读不了，
+                // 不能当成“没有记录”静默略过——那会丢掉一条本可生效的吊销限制
+                if (const Storage::Error error = fs.Open(path, id); error != Storage::Error::Ok) {
+                    if (error == Storage::Error::NotFound) {
+                        reason = kReasonFormat;
+                        return LoadResult::Missing;
+                    }
+                    reason = kReasonUnreadable;
+                    return LoadResult::Unusable;
                 }
                 Storage::FileInfo info;
                 if (fs.Stat(path, info) != Storage::Error::Ok) {

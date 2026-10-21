@@ -4,7 +4,9 @@
     语义与 BIOS 侧的 BiosBlockDevice 对齐：偏移与长度按设备报告的块大小对齐，
     以整个设备（不是分区）为视图，块号从设备起点算——布局描述在介质字节偏移 0x20000，
     两种固件环境因此读到同一处字节
-    Flush 直接对应协议的 FlushBlocks：这是固件给出的真实刷新原语，不需要自建控制器路径
+    刷新原语就是固件给的 FlushBlocks，不需要自建控制器路径：只有可写介质、协议达到
+    REVISION2 且固件没对 FlushBlocks 报过 EFI_UNSUPPORTED 时才声称有原语——
+    "能不能声称持久"与"这次刷新返回什么"是两件事，选择器按前者决定要不要报 E-UEFI-71
     设备报告 IoAlign 大于 1 时，未对齐的调用方缓冲经内部对齐缓冲中转：
     中转按设备块大小成块搬运，不跨调用保留数据，也不改变块设备「偏移与长度按块对齐」的契约
     中转缓冲是固定长度的，因此块大小与对齐要求都以它为上限（4096）：超过的设备在绑定时就拒绝，
@@ -38,9 +40,11 @@ namespace Baleen {
             Storage::Error Read(uint64_t offset, void* buffer, uint32_t bytes) override;
             // 写 [offset, offset + bytes)；只读介质返回 ReadOnly
             Storage::Error Write(uint64_t offset, const void* buffer, uint32_t bytes) override;
-            // 刷新写缓存：直接下发协议的 FlushBlocks
+            // 刷新写缓存：未绑定报 NotSupported；只读介质报 ReadOnly；没有刷新原语时按"无缓存"通过
+            // 固件对 FlushBlocks 报 EFI_UNSUPPORTED 时记下"没有原语"，之后 HasFlushPrimitive 不再声称可刷新
             Storage::Error Flush() override;
-            // 固件报的协议版本低于 REVISION2 时没有 FlushBlocks：按"无缓存"处理，与 BIOS 侧同一口径
+            // 只有可写介质、协议达到 REVISION2、且固件没对 FlushBlocks 报过 EFI_UNSUPPORTED 时才为真
+            // 老协议没有 FlushBlocks 成员；只读介质没有写缓存要刷；这两种形态一律按"无缓存"处理
             bool HasFlushPrimitive() const override;
 
             // 是否已绑定
@@ -73,6 +77,8 @@ namespace Baleen {
             uint64_t m_capacityBytes = 0;       // 设备容量
             bool m_writable = false;            // 是否可写
             bool m_removable = false;           // 是否可移动介质
+            // 固件对 FlushBlocks 报过 EFI_UNSUPPORTED：之后不再声称有刷新原语（选择器据此报 E-UEFI-71）
+            mutable bool m_flushUnsupported = false;
             // 未对齐调用时的中转缓冲：不跨调用保留数据，只保证对齐与成块搬运
             alignas(kTransferBytes) uint8_t m_bounce[kTransferBytes] = {};
         };

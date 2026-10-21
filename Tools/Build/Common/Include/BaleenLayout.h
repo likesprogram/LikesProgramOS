@@ -41,7 +41,13 @@ namespace hostbuild {
     // 从 Ext4 镜像读卷标识（superblock 的 s_uuid）；镜像过小或魔数不符时报错
     std::array<uint8_t, 16> ReadExt4VolumeUuid(const std::string& path);
 
-    // 从模板读内核路径；模板的格式标记、版本或长度字段不符时报错
+    // 统一路径语法的宿主侧副本：以 / 起头、分量非空、不含 . 与 ..（结尾 / 与空分量同样拒绝）
+    // 判据的规格是 Docs/Specs/Common/文件系统抽象与VFS.md 3.5；目标侧对应实现是
+    // Packages/Baleen/Core/Include/LayoutCheck.hpp 的 PathValid(..., absolute=true)。
+    // 这里保留纯函数副本而不是 include 目标头，宿主工具链因此不沾 BALEEN_STAGE_PREFIX 等阶段宏
+    bool BaleenLayoutPathValid(const std::string& path);
+
+    // 从模板读内核路径；格式标记、版本、标志位、保留字段、尾部保留区或路径语法不符时报错
     std::string ReadTemplateKernelPath(const std::string& path);
 
     // 生成布局描述的完整 4096 字节块：读卷标识、核对参数、回填位置字段并算校验和

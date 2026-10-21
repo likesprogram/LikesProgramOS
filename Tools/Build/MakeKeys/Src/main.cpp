@@ -3,7 +3,8 @@
 
     开发期自签约定：密钥对放在仓库外（默认 .cache/Keys，已被忽略），首次生成后复用；
     私钥不进仓库、不进镜像；换锚 = 重新生成密钥并重建引导器，见 Docs/Specs/内核集清单与签名.md
-    --anchor-cpp 从公钥生成 C++ 源，供 BaleenCore 编译进镜像；同一份输入产出同样的源
+    --anchor-cpp 从公钥生成 C++ 源，供 BaleenCore 编译进镜像；--anchor-text 生成同一张锚表的
+    纯文本形态（每行 "<KeyId> <公钥 64 位十六进制>"），供 SignManifest 校验签名密钥在锚表里
     轮换窗口里的旧公钥由 --anchors 从进版本库的附加锚输入读入，与当前密钥合并成同一张表，
     这样“新旧两把公钥并存”由仓库里的输入复现，而不是靠本地构建产物
 */
@@ -46,7 +47,8 @@ namespace {
         std::cout <<
             "MakeKeys — 开发期 Ed25519 密钥生成与信任锚源导出\n"
             "\n"
-            "用法：MakeKeys --out <目录> [--key-id <n>] [--anchors <路径>] [--anchor-cpp <路径>]\n"
+            "用法：MakeKeys --out <目录> [--key-id <n>] [--anchors <路径>]\n"
+            "                [--anchor-cpp <路径>] [--anchor-text <路径>]\n"
             "\n"
             "  --out        密钥目录：Development.sec（32 字节种子，权限 600）与 Development.pub；\n"
             "               已存在时复用，不覆盖已有密钥\n"
@@ -55,6 +57,8 @@ namespace {
             "               '#' 开头与空行忽略；与当前密钥合并成同一张表，默认不读\n"
             "  --anchor-cpp 生成 C++ 源：定义 Baleen::Crypto 的 kTrustAnchors 与 kTrustAnchorCount；\n"
             "               路径可以只给文件名，此时写在当前目录\n"
+            "  --anchor-text 生成纯文本锚表：每行 \"<KeyId> <公钥 64 位十六进制>\"，按 KeyId 升序，\n"
+            "               与 --anchor-cpp 同源；供签名工具核对“签名密钥确实在锚表里”\n"
             "\n"
             "开发期密钥只用于本地构建与回归；发布密钥离线保管，不进仓库、不进镜像\n";
     }
@@ -197,6 +201,23 @@ namespace {
         text += "}\n";
         WriteFile(path, reinterpret_cast<const uint8_t*>(text.data()), text.size(), 0644);
     }
+
+    // 生成纯文本锚表：与 C++ 源同源的同一张表，每行 "<KeyId> <公钥 64 位十六进制>"，按 KeyId 升序
+    // 格式与 --anchors 输入一致，因此这份文本可以被签名工具直接读回核对；同一组输入产出同样的文本
+    void WriteAnchorText(const fs::path& path, const std::vector<AnchorEntry>& entries) {
+        std::string text;
+        static const char kDigits[] = "0123456789abcdef";
+        for (const auto& entry : entries) {
+            text += std::to_string(entry.keyId);
+            text += ' ';
+            for (const uint8_t byte : entry.publicKey) {
+                text += kDigits[byte >> 4];
+                text += kDigits[byte & 0x0f];
+            }
+            text += '\n';
+        }
+        WriteFile(path, reinterpret_cast<const uint8_t*>(text.data()), text.size(), 0644);
+    }
 }
 
 // 入口：解析参数，生成或复用密钥并可选导出锚源
@@ -204,6 +225,7 @@ int main(int argc, char** argv) {
     try {
         fs::path outDir;
         fs::path anchorCpp;
+        fs::path anchorText;
         fs::path anchors;
         uint64_t keyId = 1;
         for (int i = 1; i < argc; ++i) {
@@ -217,6 +239,7 @@ int main(int argc, char** argv) {
                 return 0;
             } else if (arg == "--out") outDir = next("--out");
             else if (arg == "--anchor-cpp") anchorCpp = next("--anchor-cpp");
+            else if (arg == "--anchor-text") anchorText = next("--anchor-text");
             else if (arg == "--anchors") anchors = next("--anchors");
             else if (arg == "--key-id") keyId = hostbuild::ParseNumber(next("--key-id"), "密钥编号（--key-id）");
             else throw std::runtime_error("无法识别的参数：" + arg);
@@ -226,7 +249,7 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (keyId < 1 || keyId > 255) throw std::runtime_error("--key-id 必须在 1..255 内");
-        if (!anchors.empty() && anchorCpp.empty()) throw std::runtime_error("--anchors 只用于生成锚源，须与 --anchor-cpp 一起使用");
+        if (!anchors.empty() && anchorCpp.empty() && anchorText.empty()) throw std::runtime_error("--anchors 只用于生成锚表，须与 --anchor-cpp 或 --anchor-text 一起使用");
         fs::create_directories(outDir);
 
         const fs::path seedPath = outDir / kSeedName;
@@ -251,19 +274,26 @@ int main(int argc, char** argv) {
         // 公钥文件与种子派生结果保持一致
         WriteFile(publicPath, publicKey.data(), publicKey.size(), 0644);
 
-        if (!anchorCpp.empty()) {
+        if (!anchorCpp.empty() || !anchorText.empty()) {
             // 附加锚输入：轮换窗口里仍要承认的旧公钥，进版本库；与当前密钥合并成同一张表
             const std::vector<AnchorEntry> extra = anchors.empty() ? std::vector<AnchorEntry>{} : ReadAnchors(anchors);
             const std::vector<AnchorEntry> entries = MergeAnchors(static_cast<uint8_t>(keyId), publicKey, extra);
-            // 路径可以只给文件名：没有父目录时不建目录，避免把空路径当目录创建
-            if (!anchorCpp.parent_path().empty()) fs::create_directories(anchorCpp.parent_path());
-            WriteAnchorCpp(anchorCpp, entries);
             std::string ids;
             for (const auto& entry : entries) {
                 if (!ids.empty()) ids += "、";
                 ids += std::to_string(entry.keyId);
             }
-            std::cout << "MakeKeys：已生成信任锚源 " << anchorCpp.string() << "（" << entries.size() << " 条；KeyId " << ids << "）\n";
+            // 路径可以只给文件名：没有父目录时不建目录，避免把空路径当目录创建
+            if (!anchorCpp.empty()) {
+                if (!anchorCpp.parent_path().empty()) fs::create_directories(anchorCpp.parent_path());
+                WriteAnchorCpp(anchorCpp, entries);
+                std::cout << "MakeKeys：已生成信任锚源 " << anchorCpp.string() << "（" << entries.size() << " 条；KeyId " << ids << "）\n";
+            }
+            if (!anchorText.empty()) {
+                if (!anchorText.parent_path().empty()) fs::create_directories(anchorText.parent_path());
+                WriteAnchorText(anchorText, entries);
+                std::cout << "MakeKeys：已生成信任锚文本 " << anchorText.string() << "（" << entries.size() << " 条；KeyId " << ids << "）\n";
+            }
             // 吊销的前提检查：签名吊销记录必须由一把未被吊销的密钥签，锚表里只有一把密钥时，
             // 泄露之后没有任何密钥能签这份记录——所以第二把要在轮换窗口就装进设备，这里只警告不失败
             if (entries.size() < 2) {

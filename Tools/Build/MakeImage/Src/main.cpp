@@ -132,7 +132,7 @@ namespace {
             "  --esp PATH               混合镜像的 ESP 分区内容（必须 FAT16）\n"
             "  --system-volume PATH     系统卷镜像（Ext4）：作为连续 ISO 文件存放，并写 Ext4 分区项\n"
             "  --iso-name NAME          系统卷在 ISO 内的文件名，默认取源文件名\n"
-            "  --layout PATH            布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用 /LikesProgram/System/LikesProgram.os（见 Docs/Specs/Common/系统卷布局.md）\n"
+            "  --layout PATH            布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用旧扁平路径 /LikesProgram/System/LikesProgram.os（选版启用的引导器会拒绝，见 E-CORE-84）\n"
             "  --kernel-path PATH       覆盖内核路径（卷内绝对路径），优先于模板\n"
             "  --file ISO路径=宿主路径   附加文件，可重复（中间目录自动建立）\n"
             "  --raw 宿主路径[@偏移]     原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
@@ -374,6 +374,10 @@ namespace {
             if (options.degrade_without_record) spec.flags |= Baleen::LayoutDescriptor::kFlagDegradeWithoutRecord;
             if (!options.kernel_path.empty()) spec.kernel_path = options.kernel_path;
             else if (!options.layout.empty()) spec.kernel_path = ReadTemplateKernelPath(options.layout);
+            // 选版启用的引导器只接受 KernelSets/<BuildId>/<相对路径> 形态：默认模板的旧扁平路径
+            // 会生成无法通过选版的镜像，这里提前告警而不是静默产出
+            if (spec.kernel_path.find("/KernelSets/") == std::string::npos)
+                std::cerr << "MakeImage: 警告：布局描述的内核路径推不出 KernelSets/<BuildId>/ 形态，选版启用的引导器会拒绝启动（E-CORE-84）：" << spec.kernel_path << "\n";
             const std::vector<uint8_t> block = BuildBaleenLayout(spec);
             image.Write(BaleenLayout::kWriteOffset, block);
             layoutKernelPath = spec.kernel_path;

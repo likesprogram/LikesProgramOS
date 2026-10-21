@@ -114,7 +114,7 @@ namespace {
             "  --descs DIR               描述符段产物目录（默认 Packages/Baleen/Common/Out/Descs）\n"
             "  --esp PATH                ESP 的 FAT16 镜像（含 \\EFI\\BOOT\\BOOTX64.EFI），0 号分区\n"
             "  --system-volume PATH      Ext4 系统卷镜像，1 号分区\n"
-            "  --layout PATH             布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用 /LikesProgram/System/LikesProgram.os（见 Docs/Specs/Common/系统卷布局.md）\n"
+            "  --layout PATH             布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用旧扁平路径 /LikesProgram/System/LikesProgram.os（选版启用的引导器会拒绝，见 E-CORE-84）\n"
             "  --kernel-path PATH        覆盖内核路径（卷内绝对路径），优先于模板\n"
             "  --raw 宿主路径[@偏移]      原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
             "  --stub-unchecked          免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
@@ -303,6 +303,10 @@ int main(int argc, char** argv) {
             if (options.degrade_without_record) spec.flags |= Baleen::LayoutDescriptor::kFlagDegradeWithoutRecord;
             if (!options.kernel_path.empty()) spec.kernel_path = options.kernel_path;
             else if (!options.layout.empty()) spec.kernel_path = ReadTemplateKernelPath(options.layout);
+            // 选版启用的引导器只接受 KernelSets/<BuildId>/<相对路径> 形态：默认模板的旧扁平路径
+            // 会生成无法通过选版的镜像，这里提前告警而不是静默产出
+            if (spec.kernel_path.find("/KernelSets/") == std::string::npos)
+                std::cerr << "TestInstaller: 警告：布局描述的内核路径推不出 KernelSets/<BuildId>/ 形态，选版启用的引导器会拒绝启动（E-CORE-84）：" << spec.kernel_path << "\n";
             const std::vector<uint8_t> block = BuildBaleenLayout(spec);
             image.Write(BaleenLayout::kWriteOffset, block);
             layoutKernelPath = spec.kernel_path;

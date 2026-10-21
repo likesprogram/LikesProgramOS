@@ -114,6 +114,12 @@ namespace Baleen {
         constexpr uint32_t kMemoryBootServicesData = 4;    // 启动服务数据
         constexpr uint32_t kMemoryConventional = 7;        // 常规内存：固件自己也不占用的空闲 RAM
 
+        // 页分配方式：按任意空闲地址分配，或只按指定物理地址分配
+        // 内核镜像先读进按任意地址分配的固件缓冲；固定装载地址要等退出启动服务、
+        // 固件内存交给系统之后才能写入
+        constexpr uint32_t kAllocateAnyPages = 0;
+        constexpr uint32_t kAllocateAddress = 2;
+
         // 结束节点的类型与子类型
         constexpr uint8_t kDevicePathEndType = 0x7F;
         constexpr uint8_t kDevicePathEndSubType = 0xFF;
@@ -124,8 +130,10 @@ namespace Baleen {
             TableHeader header;              // 表头
             void* raiseTpl;                  // 0  RaiseTPL
             void* restoreTpl;                // 1  RestoreTPL
-            void* allocatePages;             // 2  AllocatePages
-            void* freePages;                 // 3  FreePages
+            // 分配物理页：内核镜像先放进按任意地址分配的中转缓冲；
+            // 镜像数据声明的固定装载地址在退出启动服务之后才写，不能假设那块内存空闲
+            EfiStatus (BALEEN_EFIAPI *allocatePages)(uint32_t allocType, uint32_t memoryType, uint64_t pages, uint64_t* memory);
+            EfiStatus (BALEEN_EFIAPI *freePages)(uint64_t memory, uint64_t pages);   // 3  FreePages
             // 按物理地址取内存图：MapKey 是本次内存图的身份，退出启动服务时必须原样交回
             EfiStatus (BALEEN_EFIAPI *getMemoryMap)(uint64_t* mapBytes, MemoryDescriptor* map, uint64_t* mapKey, uint64_t* descriptorBytes, uint32_t* descriptorVersion);
             // 按字节分配池内存；退出启动服务之前必须释放（本阶段分配的内存图缓冲由本阶段自己管）
@@ -156,6 +164,8 @@ namespace Baleen {
             EfiStatus (BALEEN_EFIAPI *exitBootServices)(EfiHandle imageHandle, uint64_t mapKey);
         };
 
+        static_assert(offsetof(BootServices, allocatePages) == 40, "AllocatePages 的偏移已变");
+        static_assert(offsetof(BootServices, freePages) == 48, "FreePages 的偏移已变");
         static_assert(offsetof(BootServices, getMemoryMap) == 56, "GetMemoryMap 的偏移已变");
         static_assert(offsetof(BootServices, allocatePool) == 64, "AllocatePool 的偏移已变");
         static_assert(offsetof(BootServices, freePool) == 72, "FreePool 的偏移已变");

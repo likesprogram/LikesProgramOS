@@ -27,6 +27,9 @@ DESC_AREA_END_LBA    EQU 12          ; 本区结束扇区，4 字节小端，含
 DESC_AREA_HEAD_LEN   EQU 16          ; 头部固定长度，段序列从它之后开始
 DESC_SEG_LEN         EQU 6           ; 段内段长，2 字节小端，含段头
 DESC_SEG_HEAD_BYTES  EQU 8           ; 段头长度
+; 段遍历的迭代上限：段头 8 字节、偏移每轮至少前进一个段头，最长缓冲 4096 字节，
+; 因此能容纳的段数不超过 4096 / DESC_SEG_HEAD_BYTES；显式上限让畸形段序列也一定停下
+DESC_SEG_WALK_MAX    EQU (4096 / DESC_SEG_HEAD_BYTES)
 DESC_SEG_LBA         EQU 8           ; 段内载荷起始扇区，4 字节小端
 DESC_SEG_END_LBA     EQU 12          ; 段内载荷结束扇区，4 字节小端，含
 DESC_BOOT_MAGIC      EQU 0x52445342  ; 'BSDR'，Stub 段标记

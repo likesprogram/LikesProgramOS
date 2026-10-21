@@ -46,10 +46,10 @@ namespace {
     // 集根与集内内核产物名：与系统卷包的落点约定一致
     constexpr const char* kSetRoot = "/LikesProgram/System/KernelSets/";
     constexpr const char* kKernelName = "LikesProgram.os";
-    // 选版启用前的扁平落点：没有 KernelSets/ 标记，按缺省集直启
+    // 选版启用前的扁平落点：不再是可直启形态，选择器必须拒绝
     constexpr const char* kFlatKernelPath = "/LikesProgram/System/LikesProgram.os";
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 48;
+    constexpr unsigned kCaseCount = 60;
     // 已跑用例数
     unsigned g_ran = 0;
 
@@ -93,8 +93,10 @@ namespace {
     }
     // 集目录：集根加集标识
     std::string SetDirectory(const uint8_t* buildId) { return std::string(kSetRoot) + IdText(buildId); }
-    // 集内内核镜像路径
-    std::string KernelPath(const uint8_t* buildId) { return SetDirectory(buildId) + "/" + kKernelName; }
+    // 集内某个产物的完整卷内路径：集目录 + 清单登记的相对路径
+    std::string ArtifactPath(const uint8_t* buildId, const std::string& relative) { return SetDirectory(buildId) + "/" + relative; }
+    // 集内内核镜像路径（清单登记在集目录根上的默认形态）
+    std::string KernelPath(const uint8_t* buildId) { return ArtifactPath(buildId, kKernelName); }
     // 干净的消息摘要：夹具用集标识派生，只要求逐字节稳定
     void FillDigest(uint8_t digest[32], const uint8_t* buildId) {
         for (unsigned i = 0; i < 32; ++i) digest[i] = static_cast<uint8_t>(buildId[i] ^ 0x5Au);
@@ -110,33 +112,40 @@ namespace {
     }
 
     // 内存块设备：承载状态区域，记录读写次数并支持失败注入
+    // 逻辑块大小可配置：默认 512（512e），4Kn 用例取 4096；读写按与真实适配器相同的
+    // 块设备契约校验偏移与长度，未按块对齐一律 InvalidArgument
     class MemoryMedium final : public Storage::BlockDevice {
     public:
-        // 构造：容量与可写性
-        MemoryMedium(uint64_t bytes, bool writable) : m_bytes(static_cast<std::size_t>(bytes), 0), m_writable(writable) {}
-        // 逻辑块大小：状态区域按 512 的整数倍对齐，这里取 512
-        uint32_t BlockBytes() const override { return 512; }
+        // 构造：容量、可写性与逻辑块大小
+        MemoryMedium(uint64_t bytes, bool writable, uint32_t blockBytes = 512)
+            : m_bytes(static_cast<std::size_t>(bytes), 0), m_blockBytes(blockBytes), m_writable(writable) {
+            Require(blockBytes != 0 && (blockBytes & (blockBytes - 1)) == 0, "夹具逻辑块大小必须是 2 的幂");
+        }
+        // 逻辑块大小
+        uint32_t BlockBytes() const override { return m_blockBytes; }
         // 设备容量
         uint64_t CapacityBytes() const override { return m_bytes.size(); }
         // 是否可写
         bool Writable() const override { return m_writable; }
-        // 读一段介质内容
+        // 读一段介质内容：未按块对齐的请求按契约拒绝
         Storage::Error Read(uint64_t offset, void* buffer, uint32_t bytes) override {
+            if (!InRange(offset, bytes)) return Storage::Error::InvalidArgument;
+            if (!Aligned(offset, bytes)) return Storage::Error::InvalidArgument;
             m_events.push_back('R');
             ++m_reads;
             if (m_failRead) return Storage::Error::Io;
-            if (!InRange(offset, bytes)) return Storage::Error::InvalidArgument;
             std::memcpy(buffer, m_bytes.data() + offset, bytes);
             return Storage::Error::Ok;
         }
-        // 写一段介质内容；m_dropWrite 模拟“写返回成功但没有落盘”
+        // 写一段介质内容：未按块对齐的请求按契约拒绝；m_dropWrite 模拟“写返回成功但没有落盘”
         Storage::Error Write(uint64_t offset, const void* buffer, uint32_t bytes) override {
+            if (!InRange(offset, bytes)) return Storage::Error::InvalidArgument;
+            if (!Aligned(offset, bytes)) return Storage::Error::InvalidArgument;
             m_events.push_back('W');
             ++m_writes;
             m_lastWriteBytes = bytes;
             m_lastWriteOffset = offset;
             if (!m_writable) return Storage::Error::ReadOnly;
-            if (!InRange(offset, bytes)) return Storage::Error::InvalidArgument;
             if (m_failWrite) return Storage::Error::Io;
             if (m_dropWrite) return Storage::Error::Ok;
             std::memcpy(m_bytes.data() + offset, buffer, bytes);
@@ -184,7 +193,10 @@ namespace {
     private:
         // 偏移与长度是否落在介质内
         bool InRange(uint64_t offset, uint32_t bytes) const { return offset <= m_bytes.size() && bytes <= m_bytes.size() - offset; }
+        // 偏移与长度是否都按逻辑块对齐：块设备契约的硬要求
+        bool Aligned(uint64_t offset, uint32_t bytes) const { return (offset % m_blockBytes) == 0 && (bytes % m_blockBytes) == 0; }
         Bytes m_bytes;              // 介质内容
+        uint32_t m_blockBytes;      // 逻辑块大小
         bool m_writable;            // 是否可写
         bool m_failRead = false;    // 读失败注入
         bool m_failWrite = false;   // 写失败注入
@@ -199,8 +211,20 @@ namespace {
         std::vector<char> m_events; // 操作序列
     };
 
-    // 空文件系统：选版只把 FileSystem 转交给清单验证，替身不使用它
+    // 空文件系统：选版只把 FileSystem 转交给清单验证与吊销记录加载，替身不使用它
+    // 默认所有路径都不存在（NotFound）：模拟空卷没有吊销记录；错误注入用于“吊销记录打不开”用例
     class NullFileSystem final : public Storage::FileSystem {
+    public:
+        // 设置 Open 的返回：NotFound 是空卷的正常形态，其它取值模拟存储层读不了
+        void SetOpenError(Storage::Error error) { m_openError = error; }
+        // 打开：按注入的结论返回，默认 NotFound
+        Storage::Error Open(const char* path, Storage::FileId& id) override {
+            (void)path;
+            (void)id;
+            return m_openError;
+        }
+    private:
+        Storage::Error m_openError = Storage::Error::NotFound;   // Open 的返回结论
     };
 
     // 夹具登记的一条集：目录、标识与清单事实
@@ -211,6 +235,7 @@ namespace {
         uint32_t artifacts = 1;     // 产物条目数
         uint8_t signerKeyId = 1;    // 清单的签名密钥编号
         bool verified = true;       // 清单验证是否通过
+        std::string kernelPath = kKernelName;   // 清单 .os 条目的相对路径（可在子目录）
         Baleen::Diagnostic failure{};   // 验证不通过时的原因
     };
 
@@ -233,8 +258,8 @@ namespace {
     // 选版夹具：内存介质、清单验证替身与诊断记录器
     class Fixture {
     public:
-        // 构造：可写性，并把自己登记为替身的当前夹具
-        explicit Fixture(bool writable = true) : m_medium(kMediumBytes, writable) { s_current = this; }
+        // 构造：可写性与逻辑块大小，并把自己登记为替身的当前夹具
+        explicit Fixture(bool writable = true, uint32_t blockBytes = 512) : m_medium(kMediumBytes, writable, blockBytes) { s_current = this; }
         // 析构：撤掉当前夹具
         ~Fixture() { s_current = nullptr; }
         // 不允许拷贝：介质与记录是独占的
@@ -244,12 +269,15 @@ namespace {
         static Fixture* Current() { return s_current; }
         // 夹具介质
         MemoryMedium& Medium() { return m_medium; }
-        // 登记一条集：验证默认通过
-        void AddSet(const uint8_t* buildId, uint64_t securityVersion) {
+        // 注入吊销记录打开失败：模拟系统卷读不了签名吊销记录
+        void SetRevocationOpenError(Storage::Error error) { m_fileSystem.SetOpenError(error); }
+        // 登记一条集：验证默认通过；artifactPath 是清单 .os 条目的相对路径
+        void AddSet(const uint8_t* buildId, uint64_t securityVersion, const char* artifactPath = kKernelName) {
             SetEntry entry;
             entry.directory = SetDirectory(buildId);
             std::memcpy(entry.buildId, buildId, sizeof(entry.buildId));
             entry.securityVersion = securityVersion;
+            entry.kernelPath = artifactPath;
             m_sets.push_back(entry);
         }
         // 让一条已登记的集验证失败：给稳定编号与原因文本
@@ -287,6 +315,11 @@ namespace {
                 facts.securityVersion = entry.securityVersion;
                 facts.artifactCount = entry.artifacts;
                 facts.manifestBytes = 0x100;
+                // 生产读取方把清单 .os 条目的相对路径带回；这里按登记值填，选版必须原样使用
+                Require(entry.kernelPath.size() <= KernelSet::ManifestLayout::kEntryPathMaxBytes, "夹具产物路径超过上限");
+                std::memcpy(facts.kernelPath, entry.kernelPath.data(), entry.kernelPath.size());
+                facts.kernelPath[entry.kernelPath.size()] = 0;
+                facts.kernelPathBytes = static_cast<uint16_t>(entry.kernelPath.size());
                 return Baleen::Diagnostic{};
             }
             return Baleen::Diagnostic{"E-CORE-61", "Read the kernel set manifest"};
@@ -359,7 +392,7 @@ namespace {
         return record;
     }
 
-    // 夹具侧的副本构造：按规格第二节的字节表拼接 2048 字节副本，校验和用夹具自己的 CRC-32
+    // 夹具侧的槽位构造：按规格第二节的字节表拼接一个 512 字节槽位，校验和用夹具自己的 CRC-32
     // 生产代码不会产生字段违规的记录，构造这类副本是为了核对读取方的逐项校验
     Bytes RawCopy(const Record& record, uint8_t stateValue, uint8_t flags, uint32_t reserved, bool checksumCorrect) {
         Bytes copy(BootState::kCopyBytes, 0);
@@ -389,19 +422,24 @@ namespace {
     // 重算一份原始副本的校验和：改过字段的副本要重新修校验和，才是在测字段校验而不是校验和校验
     void FixChecksum(Bytes& copy) { Put32(copy, 0x0EC, FixtureCrc32(copy.data(), 0x0EC)); }
 
-    // 把一份原始副本放进指定副本槽
+    // 把一份原始槽位写进指定的槽位偏移
     void PutCopy(Fixture& fixture, uint64_t copyOffset, const Bytes& copy) {
         Require(copy.size() == BootState::kCopyBytes, "原始副本长度不符");
         fixture.Medium().Patch(kStateOffset + copyOffset, copy.data(), static_cast<uint32_t>(copy.size()));
     }
 
-    // 核对选中集：目录、内核路径、标识、已验证与试启动身份
-    void RequireSelected(const Baleen::Core::SelectedSet& selected, const uint8_t* buildId, uint64_t attemptId) {
+    // 核对选中集：目录、指定内核路径、标识、已验证与试启动身份
+    void RequireSelectedPath(const Baleen::Core::SelectedSet& selected, const uint8_t* buildId, const std::string& kernelPath, uint64_t attemptId) {
         Require(std::string(selected.setDirectory) == SetDirectory(buildId), "选中的集目录不符：" + std::string(selected.setDirectory));
-        Require(std::string(selected.kernelPath) == KernelPath(buildId), "选中的内核路径不符：" + std::string(selected.kernelPath));
+        Require(std::string(selected.kernelPath) == kernelPath, "选中的内核路径不符：" + std::string(selected.kernelPath));
         Require(std::memcmp(selected.buildId, buildId, 32) == 0, "选中的集标识不符");
         Require(selected.verified, "选中的集未经清单验证");
         Require(selected.attemptId == attemptId, "试启动身份不符：" + std::to_string(selected.attemptId));
+    }
+
+    // 核对选中集：清单 .os 在集目录根上的默认形态
+    void RequireSelected(const Baleen::Core::SelectedSet& selected, const uint8_t* buildId, uint64_t attemptId) {
+        RequireSelectedPath(selected, buildId, KernelPath(buildId), attemptId);
     }
 
     // 核对夹具里出现过的诊断编号与条数
@@ -423,7 +461,7 @@ namespace {
 
     // —— 记录读写：副本选择、写入顺序、损坏与写失败 ——
 
-    // 空区域按“无记录”处理：缺省集直启、不写盘、无诊断
+    // 空区域按“无记录”处理：缺省集直启；清单版本为 0、没有可记事实时不写盘、无诊断
     void CaseEmptyArea() {
         Fixture fixture;
         const auto defaultId = Id(0x0D);
@@ -434,6 +472,32 @@ namespace {
         RequireSelected(selected, defaultId.data(), 0);
         Require(fixture.Medium().Writes() == 0, "空区域不该写盘");
         Require(fixture.Diagnostics().empty(), "空区域不该有诊断");
+    }
+
+    // 空区域首次启动持久化缺省集事实：缺省集一旦验证通过，把已见版本与吊销并集钉进一条新记录
+    void CaseEmptyAreaPersistsFacts() {
+        Fixture fixture;
+        const auto defaultId = Id(0x0D);
+        fixture.AddSet(defaultId.data(), 5);
+        Baleen::Core::SelectedSet first;
+        const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), first);
+        Require(reason.code == nullptr, "空区域启动失败：" + Text(reason));
+        RequireSelected(first, defaultId.data(), 0);
+        Require(fixture.Medium().Writes() == 1, "有非零事实时空区域必须以一次提交持久化");
+        Record record;
+        Require(fixture.ReadRecord(record) == BootState::ReadResult::Ok, "持久化后必须能读出记录");
+        Require(record.state == State::Confirmed, "持久化记录必须是 Confirmed");
+        Require(record.generation == 1, "空区域首次持久化的代次必须是 1");
+        Require(record.seenSecurityVersion == 5, "持久化记录必须保存已见最高版本");
+        Require(std::memcmp(record.confirmedBuildId, defaultId.data(), 32) == 0, "持久化记录必须把验证过的缺省集钉为已知良好集");
+        Require(std::memcmp(record.confirmedManifestDigest, Id(0x00).data(), 32) != 0, "持久化记录必须带上缺省集的清单摘要");
+        Require(std::memcmp(record.candidateBuildId, Id(0x00).data(), 32) == 0 && record.attemptId == 0, "持久化记录的候选与尝试身份必须为零");
+        // 第二次选版走 Confirmed 路径：不再多写，也不再报“没有已知良好集”
+        Baleen::Core::SelectedSet second;
+        Require(fixture.Select(KernelPath(defaultId.data()).c_str(), second).code == nullptr, "第二次选版失败");
+        RequireSelected(second, defaultId.data(), 0);
+        Require(fixture.Medium().Writes() == 1, "第二次选版不该再写记录");
+        for (const auto& line : fixture.Diagnostics()) Require(line.code != "E-CORE-59", "第二次选版不该再报没有已知良好集");
     }
 
     // 没有状态区域按“无记录”处理：缺省集直启
@@ -449,7 +513,7 @@ namespace {
         Require(fixture.Medium().Writes() == 0, "没有状态区域不该写盘");
     }
 
-    // 读状态区域失败按“无记录”处理：缺省集直启
+    // 读状态区域失败按致命原因停机：设备事实未知，不能当成“无记录”按零事实启动
     void CaseStateReadFailure() {
         Fixture fixture;
         const auto defaultId = Id(0x0D);
@@ -457,9 +521,44 @@ namespace {
         fixture.Medium().FailRead(true);
         Baleen::Core::SelectedSet selected;
         const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected);
-        Require(reason.code == nullptr, "读失败返回了致命原因：" + Text(reason));
+        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-89", "读失败必须以 E-CORE-89 停机：" + Text(reason));
+        Require(selected.setDirectory[0] == '\0', "读失败时不得定下目标集");
+        Require(fixture.Medium().Writes() == 0, "读失败时不得写盘");
+        Require(fixture.Calls().empty(), "读失败时不得进入清单验证");
+    }
+
+    // 状态区域参数非法按致命原因停机：长度不足或起点未按块对齐都在读写介质之前拒绝
+    void CaseInvalidStateAreaStops() {
+        Fixture fixture;
+        const auto defaultId = Id(0x0D);
+        fixture.AddSet(defaultId.data(), 0);
+        Baleen::Core::SelectedSet selected;
+        const auto shortReason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected, 0, kStateOffset, BootState::kAreaBytes - 1);
+        Require(shortReason.code != nullptr && std::string(shortReason.code) == "E-CORE-90", "长度不足的状态区域必须以 E-CORE-90 停机：" + Text(shortReason));
+        Require(selected.setDirectory[0] == '\0', "参数非法时不得定下目标集");
+        const auto unalignedReason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected, 0, kStateOffset + BootState::kCopyBytes / 2);
+        Require(unalignedReason.code != nullptr && std::string(unalignedReason.code) == "E-CORE-90", "起点未按块对齐的状态区域必须以 E-CORE-90 停机：" + Text(unalignedReason));
+        Require(selected.setDirectory[0] == '\0', "参数非法时不得定下目标集");
+        Require(fixture.Medium().Writes() == 0 && fixture.Medium().Reads() == 0, "参数检查必须发生在读写介质之前");
+    }
+
+    // 吊销记录打开失败报持久化边界：不能当成“没有记录”静默略过，WARN 后继续选版
+    void CaseRevocationOpenFailureWarns() {
+        Fixture fixture;
+        const auto defaultId = Id(0x0D);
+        fixture.AddSet(defaultId.data(), 0);
+        fixture.SetRevocationOpenError(Storage::Error::Io);
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected);
+        Require(reason.code == nullptr, "吊销记录读不了不应阻止启动：" + Text(reason));
         RequireSelected(selected, defaultId.data(), 0);
-        Require(fixture.Medium().Writes() == 0, "读失败不该写盘");
+        RequireDiagnostic(fixture, "E-CORE-75");
+        bool detailGiven = false;
+        for (const auto& line : fixture.Diagnostics()) {
+            if (line.code == "E-CORE-75") detailGiven = !line.detail.empty();
+        }
+        Require(detailGiven, "E-CORE-75 必须带上存储层给出的原因");
+        Require(fixture.Medium().Writes() == 0, "没有可记事实时不该写状态记录");
     }
 
     // 首次写入落槽位 A（第一个未写过的槽位）、代次为 1，写入前区域必须是空的
@@ -781,7 +880,7 @@ namespace {
         RequireDiagnostic(fixture, "E-CORE-70");
     }
 
-    // 写失败：不落盘、另一份副本字节不变
+    // 写失败：不落盘、已有有效槽位字节不变
     void CaseWriteFailureKeepsOtherCopy() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -792,7 +891,7 @@ namespace {
         Require(!fixture.WriteRecord(CandidateRecord(State::Pending, Id(0x22).data(), confirmed.data(), BootState::kDefaultTries), generation), "写失败必须返回不成立");
         Require(fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes) == copyA, "写失败不该改动当前有效副本");
         const Bytes copyB = fixture.Medium().Slice(kStateOffset + BootState::kCopyBytes, 4);
-        Require(std::memcmp(copyB.data(), "\0\0\0\0", 4) == 0, "写失败不该在另一份副本留下内容");
+        Require(std::memcmp(copyB.data(), "\0\0\0\0", 4) == 0, "写失败不该在别的槽位留下内容");
     }
 
     // 读回校验失败：写“成功”但没落盘，按写失败处理
@@ -901,6 +1000,28 @@ namespace {
         Require(read.generation == 2, "接受写入的代次必须是 2");
         Fixture empty;
         Require(!empty.AcceptSeenVersion(1, generation), "没有记录时不得接受");
+    }
+
+    // 确认提交保留已试次数：triesDone 是“这一版试过几次”的审计账，转正时不清零
+    void CaseConfirmKeepsTriesDone() {
+        Fixture fixture;
+        const auto candidate = Id(0x22);
+        Record trying = CandidateRecord(State::Trying, candidate.data(), nullptr, BootState::kDefaultTries);
+        trying.triesDone = 2;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(trying, generation), "Trying 记录写入失败");
+        Require(generation == 1, "Trying 首次写入的代次必须是 1");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Trying, "Trying 记录必须读得回来");
+        Require(read.attemptId == generation && read.triesDone == 2, "Trying 的尝试身份应取写入代次、已试次数保持 2");
+        uint64_t confirmedGeneration = 0;
+        Require(BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, read.attemptId, confirmedGeneration), "身份相符的确认应成功");
+        Require(confirmedGeneration == generation + 1, "确认写入的代次必须加一");
+        Record after;
+        Require(fixture.ReadRecord(after) == BootState::ReadResult::Ok && after.state == State::Confirmed, "确认后记录必须是 Confirmed");
+        Require(after.triesDone == 2, "确认提交不得清零已试次数");
+        Require(after.attemptId == 0 && after.triesRemaining == 0, "确认后尝试身份与剩余次数应清零");
+        Require(std::memcmp(after.confirmedBuildId, candidate.data(), 32) == 0, "确认应把候选转成已知良好集");
     }
 
     // 掉电演练：整份副本只落下一部分时，读取方必须仍然拿到一份完整有效副本，不判损坏
@@ -1036,6 +1157,52 @@ namespace {
         const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
         Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-64", "必须把清单验证的原因原样返回：" + Text(reason));
         Require(fixture.Medium().Writes() == 1, "验证失败不该写记录");
+    }
+
+    // 代次耗尽按致命原因停机：写不进新记录时不能只报 WARN 继续，否则状态区域永远无法推进
+    void CaseGenerationExhaustedStops() {
+        // 已确认集合：清单安全版本更高，选版要抬升已见版本——提交写不成立，代次耗尽必须 FATAL
+        {
+            Fixture fixture;
+            const auto confirmed = Id(0x11);
+            fixture.AddSet(confirmed.data(), 5);
+            Record record = ConfirmedRecord(confirmed.data());
+            record.generation = BootState::kGenerationMax;
+            PutCopy(fixture, 0, RawCopy(record, static_cast<uint8_t>(State::Confirmed), 0, 0, true));
+            Baleen::Core::SelectedSet selected;
+            const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+            Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-92", "代次耗尽必须以 E-CORE-92 停机：" + Text(reason));
+            RequireDiagnostic(fixture, "E-CORE-70", 0);
+            Require(fixture.Medium().Writes() == 0, "代次耗尽时不该发生写调用");
+        }
+        // 只读介质上同样按耗尽停机：耗尽判定先于写能力，不能退化成普通写失败 WARN
+        {
+            Fixture fixture(false);
+            const auto confirmed = Id(0x11);
+            fixture.AddSet(confirmed.data(), 5);
+            Record record = ConfirmedRecord(confirmed.data());
+            record.generation = BootState::kGenerationMax;
+            PutCopy(fixture, 0, RawCopy(record, static_cast<uint8_t>(State::Confirmed), 0, 0, true));
+            Baleen::Core::SelectedSet selected;
+            const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+            Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-92", "只读介质上的代次耗尽也必须以 E-CORE-92 停机：" + Text(reason));
+            Require(fixture.Medium().Writes() == 0, "只读介质不该发生写调用");
+        }
+        // 回退缺省集的写回同样适用：Failed 记录到代次上限时也必须 FATAL
+        {
+            Fixture fixture;
+            const auto candidate = Id(0x22);
+            const auto defaultId = Id(0x0D);
+            fixture.AddSet(defaultId.data(), 5);
+            Record failed = CandidateRecord(State::Failed, candidate.data(), nullptr, 0);
+            failed.generation = BootState::kGenerationMax;
+            PutCopy(fixture, 0, RawCopy(failed, static_cast<uint8_t>(State::Failed), 0, 0, true));
+            Baleen::Core::SelectedSet selected;
+            const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected);
+            Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-92", "回退缺省集的写回耗尽必须以 E-CORE-92 停机：" + Text(reason));
+            RequireDiagnostic(fixture, "E-CORE-70", 0);
+            Require(fixture.Medium().Writes() == 0, "代次耗尽时不该发生写调用");
+        }
     }
 
     // 损坏记录：不猜测目标集，以 E-CORE-69 停机
@@ -1275,16 +1442,142 @@ namespace {
         RequireDiagnostic(fixture, "E-CORE-59");
     }
 
-    // 一次提交只写一份副本，而一份副本就是一个 512 字节扇区：多扇区写被打断时不会波及另一份
-    void CaseCommitIsSingleSector() {
-        static_assert(BootState::kCopyBytes == 512, "一份副本必须是一个 512 字节扇区");
-        static_assert(BootState::kRecordBytes <= BootState::kCopyBytes, "记录必须落在一份副本内");
+    // 回退缺省集时保留原状态，把缺省集带来的已见版本抬升进记录
+    void CaseFallbackLiftsSeenVersion() {
+        Fixture fixture;
+        const auto candidate = Id(0x22);
+        const auto defaultId = Id(0x0D);
+        fixture.AddSet(defaultId.data(), 5);
+        Record failed = CandidateRecord(State::Failed, candidate.data(), nullptr, 0);
+        failed.seenSecurityVersion = 2;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(failed, generation), "Failed 记录写入失败");
+        Require(generation == 1 && fixture.Medium().Writes() == 1, "铺底记录必须只写一次、代次为 1");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected);
+        Require(reason.code == nullptr, "回退缺省集失败：" + Text(reason));
+        RequireSelected(selected, defaultId.data(), 0);
+        RequireDiagnostic(fixture, "E-CORE-59");
+        Require(fixture.Medium().Writes() == 2, "抬升已见版本必须再写一份记录");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "抬升后的记录必须可读");
+        Require(read.state == State::Failed, "回退写回必须保持原状态");
+        Require(read.generation == 2, "写回记录的代次必须是 2");
+        Require(read.seenSecurityVersion == 5, "写回记录必须抬升已见最高版本");
+        Require(std::memcmp(read.confirmedBuildId, Id(0x00).data(), 32) == 0, "没有已知良好集时必须保持全零");
+    }
+
+    // 512 字节逻辑块：一次提交只写一份槽位（512 字节），多扇区写被打断时不会波及另一份
+    void CaseCommitWritesOneSlot() {
+        static_assert(BootState::kCopyBytes == 512, "一份槽位固定 512 字节");
+        static_assert(BootState::kRecordBytes <= BootState::kCopyBytes, "记录必须落在一份槽位内");
         Fixture fixture;
         uint64_t generation = 0;
         Require(fixture.WriteRecord(ConfirmedRecord(Id(0x11).data()), generation), "写入失败");
         Require(fixture.Medium().Writes() == 1, "一次提交只允许一次写调用");
-        Require(fixture.Medium().LastWriteBytes() == BootState::kCopyBytes, "写的长度必须正好是一份副本");
-        Require(fixture.Medium().LastWriteOffset() % BootState::kCopyBytes == 0, "副本落点必须按副本长度对齐");
+        Require(fixture.Medium().LastWriteBytes() == BootState::kCopyBytes, "512 字节块上的提交长度必须正好是一份槽位");
+        Require(fixture.Medium().LastWriteOffset() % BootState::kCopyBytes == 0, "槽位落点必须按槽位长度对齐");
+    }
+
+    // 4Kn 介质（4096 字节逻辑块）：提交必须整块落盘，槽位布局、环形与掉电语义不变
+    // 旧实现固定只写 512 字节：块设备契约判 InvalidArgument，4Kn 上所有状态转换都失败（E-CORE-70）
+    void CaseFourKnCommit() {
+        static_assert(BootState::kAreaBytes == 4096, "4Kn 用例要求状态区域恰好等于一个逻辑块");
+        Fixture fixture(true, 4096);
+        const auto confirmed = Id(0x11);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "4Kn 上首次提交失败");
+        Require(fixture.Medium().Writes() == 1, "4Kn 上一次提交只允许一次写调用");
+        Require(fixture.Medium().LastWriteBytes() == 4096, "4Kn 上的提交长度必须正好是一个 4096 字节逻辑块");
+        Require(fixture.Medium().LastWriteOffset() == kStateOffset, "4Kn 上首次提交的落点必须是状态区域起点");
+        // 填满八槽环形：每次整块读—改—写都只改目标槽位，其余槽位必须保持有效
+        for (uint32_t slot = 1; slot < BootState::kSlots; ++slot) {
+            Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "4Kn 上第 " + std::to_string(slot + 1) + " 次提交失败");
+            Require(generation == slot + 1, "4Kn 上代次必须逐次加一");
+            Require(fixture.Medium().LastWriteBytes() == 4096, "4Kn 上每次提交都必须写一个逻辑块");
+            Require(fixture.Medium().LastWriteOffset() == kStateOffset, "4Kn 上读—改—写的落点必须是包含目标槽位的整块起点");
+            const auto inspection = fixture.InspectRecords();
+            for (uint32_t other = 0; other <= slot; ++other) {
+                Require(inspection.slots[other].status == BootState::CopyStatus::Valid, "4Kn 整块提交不得破坏已有的其它槽位");
+            }
+            Require(inspection.result == BootState::ReadResult::Ok && inspection.record.generation == generation, "4Kn 上读取必须取最高代次");
+        }
+        // 真正的状态机写入：Pending 的候选验证失败 → 写 Failed 并回退缺省集
+        // 旧实现在这一步因 512 字节写被拒而只报 E-CORE-70，状态停在 Pending
+        const auto candidate = Id(0x22);
+        const auto defaultId = Id(0x0D);
+        Fixture selectFixture(true, 4096);
+        selectFixture.AddSet(defaultId.data(), 0);
+        uint64_t selectGeneration = 0;
+        Record pending = CandidateRecord(State::Pending, candidate.data(), nullptr, BootState::kDefaultTries);
+        Require(selectFixture.WriteRecord(pending, selectGeneration), "4Kn 上写入 Pending 失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = selectFixture.Select(KernelPath(defaultId.data()).c_str(), selected);
+        Require(reason.code == nullptr, "4Kn 上候选失败后应回退缺省集：" + Text(reason));
+        RequireDiagnostic(selectFixture, "E-CORE-72");
+        Require(selectFixture.Medium().LastWriteBytes() == 4096, "4Kn 上的状态转换也必须整块提交");
+        Record after;
+        Require(selectFixture.ReadRecord(after) == BootState::ReadResult::Ok, "4Kn 上 Failed 记录应可读");
+        Require(after.state == State::Failed && after.generation == selectGeneration + 1, "4Kn 上候选失败必须真的写出 Failed");
+        RequireSelected(selected, defaultId.data(), 0);
+    }
+
+    // 4Kn 介质的维护动作：按有效记录修复、整片清零同样按整块落盘
+    void CaseFourKnMaintenance() {
+        Fixture fixture(true, 4096);
+        const auto confirmed = Id(0x11);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "4Kn 上首次写入失败");
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "4Kn 上第二次写入失败");
+        // 写坏代次较小的槽位 A，槽位 B 完好：修复必须把 A 重建出来
+        Bytes slotA = fixture.Medium().Slice(kStateOffset, BootState::kCopyBytes);
+        slotA[0x008] ^= 0xFF;
+        fixture.Medium().Patch(kStateOffset, slotA.data(), static_cast<uint32_t>(slotA.size()));
+        uint64_t repaired = 0;
+        Require(fixture.RepairArea(repaired), "4Kn 上按有效记录修复失败");
+        const auto inspection = fixture.InspectRecords();
+        for (uint32_t slot = 0; slot < BootState::kSlots; ++slot) {
+            Require(inspection.slots[slot].status == BootState::CopyStatus::Valid, "4Kn 修复后全部槽位必须有效");
+        }
+        Require(fixture.Medium().LastWriteBytes() == 4096, "4Kn 上的修复必须整块落盘");
+        // 清零：整片区域一次写零，回到出厂形态
+        Require(fixture.ClearArea(), "4Kn 上清零失败");
+        Record empty;
+        Require(fixture.ReadRecord(empty) == BootState::ReadResult::Empty, "4Kn 清零后必须按空区域处理");
+        Require(fixture.Medium().LastWriteBytes() == 4096, "4Kn 上的清零必须整块落盘");
+        Require(fixture.Medium().LastWriteOffset() == kStateOffset, "4Kn 上清零的落点必须是状态区域起点");
+    }
+
+    // 2048 字节逻辑块：一次提交是包含目标槽位的 2048 字节块，块内其它槽位字节原样保留
+    void CaseWideBlockRmw2048() {
+        Fixture fixture(true, 2048);
+        const auto confirmed = Id(0x11);
+        uint64_t generation = 0;
+        for (uint32_t slot = 0; slot < BootState::kSlots; ++slot) {
+            Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "2048 字节块上第 " + std::to_string(slot + 1) + " 次提交失败");
+            Require(generation == slot + 1, "2048 字节块上代次必须逐次加一");
+            Require(fixture.Medium().LastWriteBytes() == 2048, "2048 字节块上提交长度必须是一个逻辑块");
+            Require(fixture.Medium().LastWriteOffset() % 2048 == 0, "2048 字节块上提交落点必须按块对齐");
+            const auto inspection = fixture.InspectRecords();
+            for (uint32_t other = 0; other <= slot; ++other) {
+                Require(inspection.slots[other].status == BootState::CopyStatus::Valid, "整块读—改—写不得破坏块内其它槽位");
+            }
+            Record read;
+            Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.generation == generation, "2048 字节块上读取必须取最高代次");
+        }
+    }
+
+    // 状态区域起点未按逻辑块对齐、长度不足一个区域：参数非法，必须在碰介质之前拒绝
+    void CaseUnalignedStateArea() {
+        Fixture fixture(true, 4096);
+        const uint64_t unaligned = kStateOffset + BootState::kCopyBytes;
+        Record read;
+        Require(BootState::Read(fixture.Medium(), unaligned, kStateBytes, read) == BootState::ReadResult::InvalidArea, "未按块对齐的状态区域必须判参数非法");
+        uint64_t generation = 0;
+        Require(!BootState::Write(fixture.Medium(), unaligned, kStateBytes, ConfirmedRecord(Id(0x11).data()), generation), "未按块对齐的状态区域必须拒绝写入");
+        Require(!BootState::Clear(fixture.Medium(), unaligned, kStateBytes), "未按块对齐的状态区域必须拒绝清零");
+        Require(fixture.Medium().Reads() == 0 && fixture.Medium().Writes() == 0, "对齐检查必须发生在读写介质之前");
+        Require(BootState::Read(fixture.Medium(), kStateOffset, BootState::kAreaBytes - 1, read) == BootState::ReadResult::InvalidArea, "长度不足的状态区域必须判参数非法");
     }
 
     // 已试次数只增：每次试启动前进一次，次数用尽转 Failed 时保留；候选换新时清零
@@ -1341,26 +1634,78 @@ namespace {
         }
     }
 
-    // 选版启用前的扁平缺省落点：直启、不读状态区域、不验证清单
-    void CaseFlatDefaultPath() {
+    // 扁平落点（没有 KernelSets/ 标记）是选版启用前的形态：选择器必须拒绝，绝不直启未验签的路径
+    void CaseFlatPathRejected() {
         Fixture fixture;
         Baleen::Core::SelectedSet selected;
         const auto reason = fixture.Select(kFlatKernelPath, selected);
-        Require(reason.code == nullptr, "扁平落点选版失败：" + Text(reason));
-        Require(std::string(selected.kernelPath) == kFlatKernelPath, "扁平落点必须原样直启");
-        Require(!selected.verified, "扁平落点没有集身份，不做清单验证");
-        Require(selected.attemptId == 0, "扁平落点没有试启动身份");
-        Require(fixture.Medium().Reads() == 0, "扁平落点不该读状态区域");
-        Require(fixture.Calls().empty(), "扁平落点不该做清单验证");
+        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-84", "扁平落点必须以 E-CORE-84 拒绝：" + Text(reason));
+        Require(!selected.verified, "拒绝时不能声称集已验证");
+        Require(selected.kernelPath[0] == '\0', "拒绝时不该定下装载路径");
+        Require(fixture.Medium().Reads() == 0 && fixture.Medium().Writes() == 0, "拒绝前不该碰状态区域");
+        Require(fixture.Calls().empty(), "扁平落点不得进入清单验证（也不得跳过它直启）");
     }
 
-    // 缺省路径过长：以 E-CORE-69 停机，不碰介质
+    // 清单把 .os 放在子目录：装载路径必须取清单登记的路径，不能固定拼 <集>/LikesProgram.os
+    void CaseManifestKernelSubdirectory() {
+        // 缺省集：布局路径指向子目录里的 .os，选择结果必须用同一条路径
+        const auto defaultId = Id(0x0D);
+        Fixture fixture;
+        fixture.AddSet(defaultId.data(), 0, "Boot/LikesProgram.os");
+        Baleen::Core::SelectedSet selected;
+        const std::string layoutPath = ArtifactPath(defaultId.data(), "Boot/LikesProgram.os");
+        Require(fixture.Select(layoutPath.c_str(), selected).code == nullptr, "子目录缺省集选版失败");
+        RequireSelectedPath(selected, defaultId.data(), layoutPath, 0);
+
+        // 已知良好集：Confirmed 记录的集把 .os 放在子目录，选择结果同样取清单路径
+        const auto confirmed = Id(0x11);
+        Fixture confirmedFixture;
+        confirmedFixture.AddSet(defaultId.data(), 0);
+        confirmedFixture.AddSet(confirmed.data(), 2, "Boot/Kernel.os");
+        uint64_t generation = 0;
+        Record record = ConfirmedRecord(confirmed.data());
+        Require(confirmedFixture.WriteRecord(record, generation), "Confirmed 记录写入失败");
+        Baleen::Core::SelectedSet confirmedSelected;
+        const std::string defaultPath = KernelPath(defaultId.data());
+        Require(confirmedFixture.Select(defaultPath.c_str(), confirmedSelected).code == nullptr, "子目录良好集选版失败");
+        RequireSelectedPath(confirmedSelected, confirmed.data(), ArtifactPath(confirmed.data(), "Boot/Kernel.os"), 0);
+
+        // 候选集：Pending 的集把 .os 放在子目录，写 Trying 后装载路径同样取清单路径
+        const auto candidate = Id(0x22);
+        Fixture candidateFixture;
+        candidateFixture.AddSet(defaultId.data(), 0);
+        candidateFixture.AddSet(candidate.data(), 4, "Boot/Candidate.os");
+        uint64_t pendingGeneration = 0;
+        Record pending = CandidateRecord(State::Pending, candidate.data(), nullptr, BootState::kDefaultTries);
+        Require(candidateFixture.WriteRecord(pending, pendingGeneration), "Pending 记录写入失败");
+        Baleen::Core::SelectedSet candidateSelected;
+        const std::string candidateDefaultPath = KernelPath(defaultId.data());
+        Require(candidateFixture.Select(candidateDefaultPath.c_str(), candidateSelected).code == nullptr, "子目录候选集选版失败");
+        Require(candidateSelected.attemptId != 0, "候选试启动身份必须非零");
+        RequireSelectedPath(candidateSelected, candidate.data(), ArtifactPath(candidate.data(), "Boot/Candidate.os"), candidateSelected.attemptId);
+    }
+
+    // 布局路径指向集内的另一个文件：清单登记的 .os 才是唯一装载路径，不一致必须拒绝（不能“验 A 装 B”）
+    void CaseLayoutArtifactMismatch() {
+        const auto defaultId = Id(0x0D);
+        Fixture fixture;
+        fixture.AddSet(defaultId.data(), 0);
+        Baleen::Core::SelectedSet selected;
+        const std::string wrongPath = ArtifactPath(defaultId.data(), "Other.os");
+        const auto reason = fixture.Select(wrongPath.c_str(), selected);
+        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-85", "布局路径与清单产物不符必须以 E-CORE-85 拒绝：" + Text(reason));
+        Require(std::string(selected.kernelPath).empty(), "拒绝时不该定下装载路径");
+        // 清单本身仍然通过验证：拒绝点在“布局路径与已验证产物不符”，不是验签失败
+        Require(fixture.Calls().size() == 1, "布局路径不符时应先完成清单验证再判定");
+    }
+
+    // 缺省路径过长：以 E-CORE-84 停机，不碰介质
     void CaseDefaultPathTooLong() {
         Fixture fixture;
         const std::string path(600, 'a');
         Baleen::Core::SelectedSet selected;
         const auto reason = fixture.Select(path.c_str(), selected);
-        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-69", "过长路径必须以 E-CORE-69 停机：" + Text(reason));
+        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-84", "过长路径必须以 E-CORE-84 停机：" + Text(reason));
         Require(fixture.Medium().Reads() == 0 && fixture.Medium().Writes() == 0, "过长路径不该碰介质");
     }
 
@@ -1385,8 +1730,11 @@ namespace {
     // 依次跑全部用例
     void Execute() {
         Case("空区域按无记录处理", CaseEmptyArea);
+        Case("空区域首次启动持久化缺省集事实", CaseEmptyAreaPersistsFacts);
         Case("没有状态区域按无记录处理", CaseNoStateArea);
-        Case("读状态区域失败按无记录处理", CaseStateReadFailure);
+        Case("读状态区域失败按致命原因停机", CaseStateReadFailure);
+        Case("状态区域参数非法按致命原因停机", CaseInvalidStateAreaStops);
+        Case("吊销记录打开失败报持久化边界", CaseRevocationOpenFailureWarns);
         Case("首次写入落槽位 A", CaseFirstWriteLandsInCopyA);
         Case("第二次写入落槽位 B", CaseSecondWriteRotatesToCopyB);
         Case("槽位环形推进与最旧槽位复用", CaseWriteRotatesThroughSlots);
@@ -1406,12 +1754,14 @@ namespace {
         Case("人工接受只允许下调已见版本", CaseAcceptSeenVersion);
         Case("发布候选：首次写入与保留既有状态", CasePublishCandidate);
         Case("提交确认：比较再提交", CaseConfirmAttempt);
+        Case("确认提交保留已试次数", CaseConfirmKeepsTriesDone);
         Case("掉电演练：逐字节截断不破坏有效记录", CasePowerLossDrill);
         Case("写入顺序为写-刷盘-读回", CaseWriteFlushReadOrder);
         Case("刷盘失败按写失败降级", CaseFlushFailure);
         Case("Confirmed 选已知良好集", CaseConfirmedSelects);
         Case("Confirmed 抬升已见最高版本", CaseConfirmedLiftsSeenVersion);
         Case("Confirmed 验证失败返回致命原因", CaseConfirmedVerifyFailure);
+        Case("代次耗尽按致命原因停机", CaseGenerationExhaustedStops);
         Case("损坏记录不猜测目标集", CaseCorruptRecordStops);
         Case("Pending 进入候选并写 Trying", CasePendingStartsCandidate);
         Case("Trying 未确认按剩余次数重试", CaseTryingRetries);
@@ -1424,13 +1774,20 @@ namespace {
         Case("写不成立不进入候选", CaseCandidateWriteFailure);
         Case("Failed 直接选已知良好集", CaseFailedSelectsConfirmed);
         Case("Failed 且无良好集回退缺省集", CaseFailedWithoutConfirmed);
-        Case("提交是单扇区写", CaseCommitIsSingleSector);
+        Case("回退缺省集抬升已见版本", CaseFallbackLiftsSeenVersion);
+        Case("512 字节块上提交是单槽位写", CaseCommitWritesOneSlot);
+        Case("4Kn 介质按整块提交状态", CaseFourKnCommit);
+        Case("4Kn 介质维护动作按整块落盘", CaseFourKnMaintenance);
+        Case("2048 字节块介质读改写槽位", CaseWideBlockRmw2048);
+        Case("状态区域未按块对齐即拒绝", CaseUnalignedStateArea);
         Case("无刷新原语时报告持久化边界", CaseNoFlushPrimitiveReported);
         Case("写中途断电：撕裂槽位永不选中", CaseTornCommitNeverChosen);
         Case("七个槽位半条记录仍可读", CaseTornHeadsElsewhereStillReads);
         Case("已试次数只增", CaseTriesDoneAdvances);
         Case("记录损坏的收场与介质策略位", CaseDegradeWithoutRecordPolicy);
-        Case("扁平缺省落点直启", CaseFlatDefaultPath);
+        Case("扁平落点被拒绝", CaseFlatPathRejected);
+        Case("子目录 .os 按清单路径装载", CaseManifestKernelSubdirectory);
+        Case("布局路径与清单产物不符", CaseLayoutArtifactMismatch);
         Case("缺省路径过长停机", CaseDefaultPathTooLong);
         Require(g_ran == kCaseCount, "内部回归用例数量不符");
         std::cout << "CheckSelect: " << g_ran << " 项用例全部通过" << std::endl;

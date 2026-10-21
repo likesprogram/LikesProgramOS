@@ -33,6 +33,7 @@ BIN  := $(BIN_DIR)/CheckRevocation
 # 目标侧与宿主侧的密码学各有同名实现，按对象名区分
 OBJS := $(OBJ_DIR)/main.o \
         $(OBJ_DIR)/Revocation.target.o $(OBJ_DIR)/BootState.target.o $(OBJ_DIR)/KernelImage.target.o \
+        $(OBJ_DIR)/LoadKernel.target.o $(OBJ_DIR)/BootMemory.target.o \
         $(OBJ_DIR)/ManifestVerify.target.o $(OBJ_DIR)/TrustAnchor.target.o \
         $(OBJ_DIR)/Error.target.o $(OBJ_DIR)/Path.target.o $(OBJ_DIR)/FileSystem.target.o \
         $(OBJ_DIR)/Sha256.target.o $(OBJ_DIR)/Ed25519.target.o $(OBJ_DIR)/Sha512.target.o \
@@ -56,6 +57,12 @@ $(OBJ_DIR)/BootState.target.o: $(COMMON_DIR)/$(SRC_DIR)/BootState.cpp | $(OBJ_DI
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 $(OBJ_DIR)/KernelImage.target.o: $(COMMON_DIR)/$(SRC_DIR)/KernelImage.cpp | $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+
+$(OBJ_DIR)/LoadKernel.target.o: $(CORE_DIR)/$(SRC_DIR)/LoadKernel.cpp | $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+
+$(OBJ_DIR)/BootMemory.target.o: $(BALEEN_COMMON_DIR)/$(SRC_DIR)/BootMemory.cpp | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 $(OBJ_DIR)/Error.target.o: $(COMMON_DIR)/$(SRC_DIR)/Storage/Error.cpp | $(OBJ_DIR)

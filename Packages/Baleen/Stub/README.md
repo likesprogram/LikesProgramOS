@@ -77,7 +77,7 @@ Stub 分两步核对，任一项不通过都停机，不跳转：
 
 | 块内偏移 | 字段 | 含义 |
 | --- | --- | --- |
-| `0x00` | Magic / Version / Bytes | `0x484E4C42`（`BLNH`）/ `4` / `84`；BaleenCore 先核对这三项再读取其余字段 |
+| `0x00` | Magic / Version / Bytes | `0x484E4C42`（`BLNH`）/ `1` / `84`；BaleenCore 先核对这三项再读取其余字段 |
 | `0x0C` | Drive | 启动驱动器的 BIOS 号，即 IPL 交权时的 `DL` |
 | `0x10` | Media / SectorBytes | 介质编号（同 `Boot::Media`）与本地扇区大小，读盘的块数以后者为单位 |
 | `0x18` | CoreBytes / CoreSectors | BaleenCore 的文件字节数与按扇区上取整后的读入跨度 |
@@ -218,8 +218,8 @@ IPL 没有验头不等于缺陷，这是现有边界。Stub 因自身头、BSS�
 | BaleenCore 的镜像内结构 | 完整性头与入口前缀已定（2.3，与 Stub 同构）；头之后的代码、段、重定位与对齐仍由 BaleenCore 后续自行定义 |
 | Stub 实模式服务 | 磁盘服务含读盘与裸块写盘：写盘按同样的窗口约束执行 `AH=43h`、失败即返回，只服务引导状态区；读盘服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转；两层读盘回退与 HDD 的 `AH=02h` 回退是项目的有界重试策略，不承诺无 EDD 或任意几何的机器都能读完整段。A20 与模式识别由 `Packages/Common` 的 `Platform::Cpu` 提供 |
 | Baleen 构建元数据 | BuildId 的派生规则、输入与规范化编码已定（第五节与 [PackImage 说明](../../../Tools/Build/PackImage/README.md)）；统一清单与 UEFI 携带方式仍未定 |
-| 验证与认证 | Baleen 镜像自身的执行前认证依赖固件信任链，无密钥摘要不是信任根；项目自有的签名与信任锚定义在内核集层，见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)，选版与清单验签由 BaleenCore 承担（见 [BaleenCore 职责与当前实现](../Core/README.md)），UEFI 侧随该路径实现；头字段与摘要的构建期、运行期检查见第三、四节，行为回归见第六节的 `CheckStub` |
-| BaleenCore / UEFI 的上层职责 | `BaleenLayout.bin` 详细格式与位置、Ext4 实现、内核集验证和选版需要各自的后续实现；验证、选版与状态记录的规格见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)与[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md) |
+| 验证与认证 | Baleen 镜像自身的执行前认证依赖固件信任链，无密钥摘要不是信任根；项目自有的签名与信任锚定义在内核集层，见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)，选版与清单验签由 BaleenCore 与 UEFI 侧各自承担（两侧复用同一份 `SelectSet` / `ManifestVerify` 实现，见 [BaleenCore 职责与当前实现](../Core/README.md) 与 [UEFI 侧说明](../Uefi/README.md)）；头字段与摘要的构建期、运行期检查见第三、四节，行为回归见第六节的 `CheckStub` |
+| BaleenCore / UEFI 的上层职责 | `BaleenLayout.bin` 的格式与位置、Ext4 只读实现、内核集验证与选版已由 BaleenCore 与 UEFI 侧各自落地（UEFI 复用同一份实现）；剩余未定项随发布工程与用户空间阶段确定。验证、选版与状态记录的规格见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)与[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md) |
 
 不得仅为满足头格式而在 `Stub/Out/Bin/` 生成同名空壳或停机件，让顶层“真实产物优先”逻辑误把它当成正式实现。`Tools/Build/MakePayloads` 生成的占位 BaleenCore 是一段真正的 32 位映像：它带完整性与头入口，经 Stub 校验头与摘要后被装入，再经交权块调用 Stub 的控制台打印标识后停机，用来证明定位、装载、校验与交权真的走通；它不是 BaleenCore 实现，不代表 Baleen 已能引导内核。
 

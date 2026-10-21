@@ -201,9 +201,11 @@ namespace {
             case ReadResult::Ok: return "有效";
             case ReadResult::Empty: return "空区域";
             case ReadResult::Corrupt: return "损坏";
-            case ReadResult::Unavailable: return "不可读";
+            case ReadResult::NoRegion: return "无状态区域";
+            case ReadResult::IoError: return "读取失败";
+            case ReadResult::InvalidArea: return "区域参数非法";
         }
-        return "不可读";
+        return "未知结论";
     }
 
     // 副本结论的可读写法
@@ -274,6 +276,8 @@ namespace {
         std::cout << "\n  区域结论：" << ResultName(inspection.result) << "\n";
         if (inspection.result != ReadResult::Ok) {
             if (inspection.result == ReadResult::Corrupt) std::cout << "  没有可用记录：不猜目标集，可用 --repair 修复或 --clear 清零\n";
+            else if (inspection.result == ReadResult::IoError) std::cout << "  读取状态区域失败：检查介质与 --offset/--bytes，未确认前不要清零或修复\n";
+            else if (inspection.result == ReadResult::InvalidArea) std::cout << "  状态区域参数非法：核对 --offset 对齐与 --bytes 不小于 4096\n";
             return;
         }
         const auto& record = inspection.record;

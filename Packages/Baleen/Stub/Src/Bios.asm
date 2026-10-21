@@ -15,10 +15,13 @@
 ;    读盘分两层：批量 EDD 请求各自最多 READ_TRIES 次尝试；某批耗尽后不整体放弃，
 ;    而是从原始 LBA 与目标地址起把整段范围逐扇区重读，每个单扇区请求独立计尝试，
 ;    HDD 且 LBA<63 时可在 EDD 失败后退回 CHS；全部尝试有界，失败只返回 0，不停机
+;    批量与逐扇区请求都按 DAP 的段:偏移口径裁剪 64KiB 窗口：段基址取目的地线性地址 >> 4，
+;    16 位偏移 + 本批字节数不得超过 0xFFFF，批次边界与固件写入边界因此只有一套口径
 ;    设备复位只在失败重试路径里发，预算按每次 _Bios_Read_Sectors 调用重置：
 ;    一次调用至多复位一次，长读盘不会因为开局失误就用光整段范围的复位机会
 ;    每次读盘调用进入时清空失败记录，失败时写入失败请求的 LBA、块数、固件 AH 与阶段，
-;    记录由 C++ 侧按 Contract.inc 的 READ_FAIL_* 读取并显示；成功返回的调用不留现场
+;    记录由 C++ 侧按 Contract.inc 的 READ_FAIL_* 读取并显示；成功返回的调用同样清空记录：
+;    重试成功时早期尝试写下的现场不能留给下一次无关失败补报
 
 BITS 32
 
@@ -226,7 +229,7 @@ _Bios_Read_Sectors:
     POP ESI
     POP EBX
     POP EBP
-    RET
+    JMP Bios_Service_Return            ; 成功返回前清空失败现场
 .Reject:
     ; 参数非法：记录本次请求，未走固件所以没有 AH 状态；这里是 32 位平坦段，
     ; 记录直接写，不调用 16 位实模式侧的保存例程
@@ -302,7 +305,7 @@ _Bios_Write_Sectors:
     POP ESI
     POP EBX
     POP EBP
-    RET
+    JMP Bios_Service_Return            ; 成功返回前清空失败现场
 .Reject:
     MOV EAX, [Bios_Count]
     MOV [_Bios_Read_Failure + READ_FAIL_COUNT], EAX
@@ -315,6 +318,21 @@ _Bios_Write_Sectors:
     POP ESI
     POP EBX
     POP EBP
+    RET
+
+; 读盘与写盘服务的共同返回：成功返回前清空失败现场，返回值保持 1
+; 重试路径可能已经写下早期尝试的失败记录，成功后这些记录不再属于任何失败请求；
+; 留着会让下一次无关失败或失败诊断补报旧现场。返回值与失败语义都不变
+Bios_Service_Return:
+    TEST EAX, EAX
+    JZ .Done
+    XOR EAX, EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_LBA], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_COUNT], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_STATUS], EAX
+    MOV [_Bios_Read_Failure + READ_FAIL_PHASE], EAX
+    MOV EAX, 1
+.Done:
     RET
 
 ; 电传输出：cdecl 参数为以 0 结尾的字符串，成功返回 1，失败 0
@@ -480,20 +498,14 @@ Real_Read:
     MOV EAX, BLOCK_MAX
 .Batch:
     MOV [Bios_Blocks], EAX
-    ; 本批目的地 = dest + 已搬块数 × 扇区大小；批起始地址决定它落在哪个 64KiB 窗口
+    ; 本批目的地 = dest + 已搬块数 × 扇区大小；批起始地址决定 DAP 的段基址与 16 位偏移
     MOV EAX, [Bios_Done]
     IMUL EAX, DWORD [Bios_Sect]
     ADD EAX, [Bios_Dest]
     MOV [Bios_Block_Dest], EAX
-    ; 本批不得跨 64KiB 窗口，否则 DAP 的 16 位偏移会绕回；超出就把批裁小
-    MOV ECX, [Bios_Block_Dest]
-    AND ECX, 0xFFFF
-    MOV EDX, WINDOW_BYTES
-    SUB EDX, ECX                        ; 本窗口内还剩多少字节
-    MOV EBX, [Bios_Sect]
-    MOV EAX, EDX
-    XOR EDX, EDX
-    DIV EBX                             ; 满打满算能放多少扇区
+    ; 本批不得越过 DAP 的 64KiB 窗口尾：段基址 = 线性地址 >> 4，16 位偏移只剩低 4 位，
+    ; 偏移 + 本批字节数超过 0xFFFF 会被固件按 16 位偏移回绕写到错误位置；超出就把批裁小
+    CALL Real_Window_Fit
     TEST EAX, EAX
     JZ .Fail                            ; 连一个扇区都放不下：显式失败，不静默截断
     CMP EAX, [Bios_Blocks]
@@ -547,13 +559,10 @@ Real_Read_Fallback:
     ADD EAX, [Bios_Orig_Dest]
     MOV [Bios_Block_Dest], EAX
     MOV DWORD [Bios_Blocks], 1
-    ; 单扇区同样不得跨 64KiB 窗口：批量路径只裁剪过已处理的批次，这里要自己挡
-    MOV ECX, [Bios_Block_Dest]
-    AND ECX, 0xFFFF
-    MOV EDX, WINDOW_BYTES
-    SUB EDX, ECX
-    CMP EDX, [Bios_Sect]
-    JB .Window
+    ; 单扇区同样走 DAP 的段:偏移窗口口径：放不下时固件会按 16 位偏移回绕
+    CALL Real_Window_Fit
+    TEST EAX, EAX
+    JZ .Window
     MOV BYTE [Bios_Tries], READ_TRIES
 .Retry:
     CALL Real_Fill_Dap
@@ -651,14 +660,7 @@ Real_Write:
     IMUL EAX, DWORD [Bios_Sect]
     ADD EAX, [Bios_Dest]
     MOV [Bios_Block_Dest], EAX
-    MOV ECX, [Bios_Block_Dest]
-    AND ECX, 0xFFFF
-    MOV EDX, WINDOW_BYTES
-    SUB EDX, ECX
-    MOV EBX, [Bios_Sect]
-    MOV EAX, EDX
-    XOR EDX, EDX
-    DIV EBX
+    CALL Real_Window_Fit
     TEST EAX, EAX
     JZ .Fail
     CMP EAX, [Bios_Blocks]
@@ -690,6 +692,20 @@ Real_Write:
     MOV DWORD [_Bios_Read_Failure + READ_FAIL_STATUS], 0
     MOV BYTE [Bios_Ok], 0
     JMP Real_Leave
+
+; 按 DAP 的段:偏移口径算本批最多可搬多少扇区：DAP 的段基址取目的地线性地址 >> 4，
+; 16 位偏移只剩低 4 位；偏移 + 本批字节数不得超过 0xFFFF，超过时固件按 16 位偏移回绕，
+; 数据会写到窗口起点而不是批终点。批大小与 DAP 因此只有一套边界口径
+; 入：Bios_Block_Dest、Bios_Sect；出：EAX = 可搬扇区数（0 表示一个都放不下）；改写 EBX、EDX
+Real_Window_Fit:
+    MOV EBX, [Bios_Block_Dest]
+    AND EBX, 0xF                        ; 段内偏移 = 线性地址低 4 位（段基址取其余高位）
+    MOV EAX, WINDOW_BYTES - 1
+    SUB EAX, EBX                        ; 本窗口内还能放多少字节
+    MOV EBX, [Bios_Sect]
+    XOR EDX, EDX
+    DIV EBX                             ; 满打满算能放多少扇区
+    RET
 
 ; 按 Bios_Lba、Bios_Blocks、Bios_Block_Dest 填 EDD 的 DAP
 ; 偏移字段只有 16 位，段基址取线性地址 >> 4：目的地必须 16 字节对齐且不跨窗口

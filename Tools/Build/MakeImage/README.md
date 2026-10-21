@@ -57,8 +57,8 @@ MakeImage --out LikesProgram.iso \
 | `--esp PATH` | 混合镜像的 ESP 分区内容：**必须是 FAT16**，同一份写到 1 MiB 与 8 MiB 两处 |
 | `--system-volume PATH` | 构建期装配好的 Ext4 系统卷镜像，作为连续 ISO 文件存放，并写 Ext4 分区项 |
 | `--iso-name NAME` | 系统卷在 ISO 内的名字，默认取源文件名；规格未固定该名字，见上 |
-| `--layout PATH` | 布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；缺省用 `/LikesProgram/System/LikesProgram.os`（见 [系统卷布局](../../../Docs/Specs/Common/系统卷布局.md)） |
-| `--kernel-path PATH` | 覆盖内核路径（卷内绝对路径），优先于模板 |
+| `--layout PATH` | 布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；缺省用旧扁平路径 `/LikesProgram/System/LikesProgram.os`，该形态会被选版启用的引导器拒绝（`E-CORE-84`），此时本工具打印警告；正式组装请用 `--kernel-path` 指向 `KernelSets/<BuildId>/` 里的清单 `.os` 条目（见 [内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)）。模板按布局描述的格式与保留区校验，未知标志位、保留字段或尾部保留区非零会被拒绝 |
+| `--kernel-path PATH` | 覆盖内核路径（卷内绝对路径），优先于模板；须符合统一路径语法（以 `/` 起头、分量非空、不含 `.` 与 `..`） |
 | `--file ISO路径=宿主路径` | 附加文件，可重复；中间目录自动建立 |
 | `--raw 宿主路径[@偏移]` | 原始载荷，可重复；偏移须 4096 对齐，省略则自动分配 |
 | `--sector-bytes N` | Ext4 分区项（`0x83`）的 LBA 单位：`512`（默认）或 `4096`；0xEF 项固定按 512 单位写（双 ESP 布局需要），ISO 结构仍为 2048 字节块 |

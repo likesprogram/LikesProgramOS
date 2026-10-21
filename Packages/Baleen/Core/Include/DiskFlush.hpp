@@ -45,12 +45,17 @@ namespace Baleen {
             // 一条路径失败不影响另一条；超时有界，绝不无限等待
             Result Flush();
 
-            // 可刷新的端口是不是**启动介质所在**的设备：把同一段字节经 AHCI 直读一次，
+            // 可刷新的端口是不是**启动介质所在**的设备：把同一个逻辑扇区经 AHCI 直读一次，
             // 与调用方经固件读到的内容比对，相同才算覆盖
+            // sectorBytes 是逻辑扇区大小（启动介质块大小：512e 为 512、4Kn 为 4096），
+            // 既是要读回的字节数，也是 AHCI 的 LBA 与扇区计数的换算单位——ATA 的这两个
+            // 字段按逻辑扇区计，不按固定的 512 字节计
+            // 调用方的块大小必须与设备逻辑扇区一致（INT 13h 的扇区单位由设备报告）；
+            // 不一致时命令或比对失败，按未覆盖返回，方向保守（绝不谎报覆盖）
             // 只读一个空闲命令槽、不下发任何写命令；传统 IDE 路径不做这项核验，一律按未覆盖返回
             // 用途见 Docs/Specs/Baleen/引导状态记录.md 第五节：刷不到自己写的介质，
             // 那次提交就只有设备缓存的保证，调用方必须把这条边界报出来
-            bool CoversMedium(uint64_t byteOffset, const uint8_t* expected, uint32_t bytes);
+            bool CoversMedium(uint64_t byteOffset, const uint8_t* expected, uint32_t sectorBytes);
         }
     }
 }

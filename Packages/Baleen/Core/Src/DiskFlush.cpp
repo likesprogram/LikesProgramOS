@@ -8,6 +8,7 @@
 */
 
 #include <DiskFlush.hpp>
+#include <AhciCommand.hpp>
 #include <LayoutDescriptor.hpp>
 
 #include <stddef.h>
@@ -59,8 +60,6 @@ namespace Baleen {
                 // 命令槽数量与命令头长度
                 constexpr uint32_t kCommandSlots = 32;
                 constexpr uint32_t kCommandHeaderBytes = 32;
-                // H2D 寄存器 FIS 的长度，单位 DWORD
-                constexpr uint32_t kFisDwords = 5;
                 // 设备存在且通信已建立（PxSSTS.DET = 3）
                 constexpr uint32_t kDeviceReady = 0x03;
                 // 端口签名：ATA 设备；ATAPI 是 0xEB140101，一律跳过
@@ -176,10 +175,11 @@ namespace Baleen {
                     s_commandTable[15] = 0x80;   // 控制字节同样置 C
                     const uint32_t tableAddress = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(s_commandTable));
 
-                    // 命令头：用固件列表里的空闲槽，不重设 PxCLB
+                    // 命令头按 AHCI 1.3.1 第 4.2.2 节：DW0 的 bit4:0 是 CFL、bit31:16 是 PRDTL；
+                    // DW1 是 PRDBC，由 HBA 写回，软件下发前置 0
                     volatile uint32_t* header = reinterpret_cast<volatile uint32_t*>(static_cast<uintptr_t>(listAddress + slot * kCommandHeaderBytes));
-                    header[0] = kFisDwords << 16;   // CFL = 5；W、P、A 与 PMP 全 0
-                    header[1] = 0;                  // PRDTL = 0
+                    header[0] = AhciCommand::HeaderDw0(AhciCommand::kFisDwords, 0);   // CFL = 5、PRDTL = 0
+                    header[1] = AhciCommand::HeaderDw1();                            // PRDBC = 0
                     header[2] = tableAddress;       // CTBA 低 32 位
                     header[3] = 0;                  // CTBA 高 32 位
 
@@ -200,18 +200,20 @@ namespace Baleen {
 
                 // 经 AHCI 读一段介质：READ DMA EXT + 一个 PRDT 条目，轮询等待，超时有界
                 // 只读一个空闲槽；此阶段没有分页，缓冲的线性地址就是 DMA 要的物理地址
-                bool IssueAhciRead(uint32_t base, uint32_t slot, uint64_t byteOffset, uint8_t* buffer, uint32_t bytes) {
+                // LBA 与扇区计数按 sectorBytes（逻辑扇区大小）换算，不按固定的 512 字节
+                bool IssueAhciRead(uint32_t base, uint32_t slot, uint64_t byteOffset, uint8_t* buffer, uint32_t bytes, uint32_t sectorBytes) {
                     if (bytes == 0 || bytes > kDmaByteLimit) return false;
+                    AhciCommand::Transfer transfer;
+                    if (!AhciCommand::PlanTransfer(byteOffset, bytes, sectorBytes, transfer)) return false;
                     const uint32_t listAddress = _Cpu_Read32(base + kPortCommandList);
                     if (listAddress == 0) return false;
-                    const uint64_t lba = byteOffset / 512;
-                    if ((byteOffset % 512) != 0 || (bytes % 512) != 0) return false;
 
                     for (uint32_t i = 0; i < sizeof(s_commandTable); ++i) s_commandTable[i] = 0;
-                    // H2D 寄存器 FIS（20 字节）：READ DMA EXT，LBA48，扇区数按 512 字节计
+                    // H2D 寄存器 FIS（20 字节）：READ DMA EXT，LBA48，LBA 与扇区数按逻辑扇区计
                     // 字段顺序按 ATA 规范：命令、特征低、LBA 7:0 / 15:8 / 23:16、设备、LBA 31:24 / 39:32 / 47:40、
                     // 特征高、扇区数低 / 高、ICC、控制——设备寄存器在 byte 7，LBA 的第 4 个字节在 byte 8
-                    const uint32_t sectors = bytes / 512;
+                    const uint64_t lba = transfer.lba;
+                    const uint32_t sectors = transfer.sectors;
                     s_commandTable[0] = 0x27;                                  // FIS 类型：H2D 寄存器
                     s_commandTable[1] = 0x80;                                  // C = 1：这是一条命令
                     s_commandTable[2] = kCommandReadDmaExt;                    // 命令
@@ -237,8 +239,8 @@ namespace Baleen {
 
                     const uint32_t tableAddress = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(s_commandTable));
                     volatile uint32_t* header = reinterpret_cast<volatile uint32_t*>(static_cast<uintptr_t>(listAddress + slot * kCommandHeaderBytes));
-                    header[0] = kFisDwords << 16;   // CFL = 5；W = 0 表示设备→主机
-                    header[1] = 1;                  // PRDTL = 1
+                    header[0] = AhciCommand::HeaderDw0(AhciCommand::kFisDwords, 1);   // CFL = 5、PRDTL = 1
+                    header[1] = AhciCommand::HeaderDw1();                            // PRDBC = 0，由 HBA 写回
                     header[2] = tableAddress;
                     header[3] = 0;
 
@@ -386,8 +388,8 @@ namespace Baleen {
                 return Path::None;
             }
 
-            bool CoversMedium(uint64_t byteOffset, const uint8_t* expected, uint32_t bytes) {
-                if (expected == nullptr || bytes == 0 || bytes > sizeof(s_compare)) return false;
+            bool CoversMedium(uint64_t byteOffset, const uint8_t* expected, uint32_t sectorBytes) {
+                if (expected == nullptr || sectorBytes == 0 || sectorBytes > sizeof(s_compare)) return false;
                 // 只走 AHCI：传统 IDE 路径没有做身份核验的机制，按"未覆盖"返回（保守方向，绝不谎报覆盖）
                 for (uint32_t device = 0; device < kPciDevices; ++device) {
                     for (uint32_t function = 0; function < kPciFunctions; ++function) {
@@ -407,10 +409,10 @@ namespace Baleen {
                             const uint32_t base = abar + kPortBase + port * kPortStride;
                             uint32_t slot = 0;
                             if (!PortFlushable(base, slot)) continue;
-                            for (uint32_t i = 0; i < bytes; ++i) s_compare[i] = 0;
-                            if (!IssueAhciRead(base, slot, byteOffset, s_compare, bytes)) continue;
+                            for (uint32_t i = 0; i < sectorBytes; ++i) s_compare[i] = 0;
+                            if (!IssueAhciRead(base, slot, byteOffset, s_compare, sectorBytes, sectorBytes)) continue;
                             // 读得回来且逐字节相同：这个端口上的设备就是启动介质
-                            if (SameBytes(s_compare, expected, bytes)) return true;
+                            if (SameBytes(s_compare, expected, sectorBytes)) return true;
                         }
                     }
                 }

@@ -1,15 +1,15 @@
 # CheckEfiBlockDevice
 
-宿主侧 C++20 检查工具：核对 Baleen UEFI 的块设备适配——把 `EFI_BLOCK_IO_PROTOCOL` 包成 `Storage::BlockDevice` 的那一层（`Packages/Baleen/Uefi/Src/EfiBlockDevice.cpp`）。编译后输出 `Tools/Bin/CheckEfiBlockDevice`。**手工执行，不构成默认构建依赖**；用例、模拟介质与假协议都内嵌在源码里。
+宿主侧 C++20 检查工具：核对 Baleen UEFI 的块设备适配——把 `EFI_BLOCK_IO_PROTOCOL` 包成 `Storage::BlockDevice` 的那一层（`Packages/Baleen/Uefi/Src/EfiBlockDevice.cpp`）——以及固件内存图的捕获与转换（`Packages/Baleen/Uefi/Src/UefiMemory.cpp`）。编译后输出 `Tools/Bin/CheckEfiBlockDevice`。**手工执行，不构成默认构建依赖**；用例、模拟介质、假协议与假启动服务都内嵌在源码里。
 
 ```sh
 make -C Tools/Test/CheckEfiBlockDevice
 Tools/Bin/CheckEfiBlockDevice
 ```
 
-工具按宿主选项编译**目标侧的同一份源码**（不做第二份参考解析），底层是就地构造的假块设备协议：三个动作由本工具的静态函数实现，按与固件同一套调用约定（`BALEEN_EFIAPI`，即 ms_abi）声明，背后是一块 64 KiB 的内存介质。协议替身按固件语义核对介质标识、介质在位、块数整倍数、缓冲对齐与范围——**这样「未对齐缓冲经内部对齐缓冲中转」那条路径才真的被走到**，而不是只看返回值。
+工具按宿主选项编译**目标侧的同一份源码**（`EfiBlockDevice.cpp` 与 `UefiMemory.cpp`，不做第二份参考解析）。块设备部分的底层是就地构造的假块设备协议：三个动作由本工具的静态函数实现，按与固件同一套调用约定（`BALEEN_EFIAPI`，即 ms_abi）声明，背后是一块 64 KiB 的内存介质。协议替身按固件语义核对介质标识、介质在位、块数整倍数、缓冲对齐与范围——**这样「未对齐缓冲经内部对齐缓冲中转」那条路径才真的被走到**，而不是只看返回值。内存图部分由假启动服务表驱动：`getMemoryMap`、`allocatePool`、`freePool` 三个成员同样按 `BALEEN_EFIAPI` 声明，取图缓冲用宿主堆代替固件池，脚本可以制造 `EFI_BUFFER_TOO_SMALL`、池分配失败与不合规的描述符长度。
 
-## 检查内容（20 项用例）
+## 检查内容（25 项用例）
 
 **Bind（6 项）**：
 
@@ -32,9 +32,13 @@ Tools/Bin/CheckEfiBlockDevice
 - 只读介质报 `ReadOnly` 且不触及协议（只读判定在参数校验之后：空缓冲仍先报 `InvalidArgument`）；可写介质上各类非法参数报 `InvalidArgument` 且不下发
 - 写落到模拟介质的对应偏移、不碰相邻字节、能原样读回，最后一块可写
 
-**Flush（1 项）**：
+**Flush（5 项）**：
 
-- 状态映射：成功 → `Ok`、`EFI_UNSUPPORTED` → `NotSupported`、`EFI_DEVICE_ERROR` → `Io`、`EFI_NO_MEDIA` → `NotFound`、`EFI_WRITE_PROTECTED` → `ReadOnly`、`EFI_NOT_READY` → `Io`；每次刷新都下发一次，介质指针消失时报 `NotFound` 且不下发
+- 状态映射：成功 → `Ok`、`EFI_UNSUPPORTED` → `Ok`（固件没有刷新原语，按无缓存通过，与 BIOS 侧同一口径）、`EFI_DEVICE_ERROR` → `Io`、`EFI_NO_MEDIA` → `NotFound`、`EFI_WRITE_PROTECTED` → `ReadOnly`、`EFI_NOT_READY` → `Io`；每次刷新都下发一次，介质指针消失时报 `NotFound` 且不下发
+- 老协议版本（`0x00010000`）没有 `FlushBlocks` 成员：报没有刷新原语，按无缓存通过，绝不调用那个不存在的成员
+- 协议有 `FlushBlocks` 但固件对本次刷新报 `EFI_UNSUPPORTED`：同样按无缓存通过；真正的设备错误仍按 `Io` 上报
+- 只读介质（`readOnly = 1`）没有写缓存要刷：`HasFlushPrimitive()` 为 false，`Flush()` 报 `ReadOnly` 且不下发协议；只读判定先于版本判定
+- 可写 REV2 介质上固件对 `FlushBlocks` 报 `EFI_UNSUPPORTED`：调用前 `HasFlushPrimitive()` 为 true，`Flush()` 按无缓存通过并撤回声称，之后 `HasFlushPrimitive()` 为 false（选择器据此在提交状态后报 `E-CORE-71` / `E-UEFI-71`）；再次刷新仍按无缓存通过，固件改口刷成功后恢复声称
 
 **对齐中转（3 项）**：
 
@@ -46,6 +50,12 @@ Tools/Bin/CheckEfiBlockDevice
 
 - 介质在两次调用之间被拔掉：读、写与刷新都报 `NotFound` 且不下发，插回后不必重新绑定即可恢复
 - 块大小 8192（超过中转上限 4096）且要求对齐时：绑定直接拒绝（`NotSupported`），未绑定时的读写报 `NotSupported` 且不触及协议
+
+**固件内存图（3 项）**：
+
+- 退出启动服务前后两种可用性视角：同一份退出前的快照，退出前只有常规内存（type 7）算可用；退出后常规内存、LoaderCode/LoaderData 与 BootServicesCode/BootServicesData 归系统，运行期服务、ACPI NVS 与 MMIO 始终不可用。两种视角都核对起址、按页数换算的长度与属性有效位，且只取一次图
+- `EFI_BUFFER_TOO_SMALL` 重取：首次取图按脚本回报所需长度，随后释放旧缓冲（`freePool` 1 次）、按更长缓冲重新分配（`allocatePool` 2 次）并重取成功；MapKey 取成功那次的约定值，旧缓冲确实被释放，用例结束新缓冲也归还
+- 参数与格式拒绝：`Allocate(nullptr)`、池分配失败、未分配就 `Capture` 都报 `E-UEFI-79`；固件回报的描述符长度 16 字节（小于 `MemoryDescriptor` 的 40 字节）时 `Capture` 报 `E-UEFI-81`；恢复合规长度后同一份缓冲可继续取图
 
 ## 曾经的偏差点与现在的取值
 
@@ -60,6 +70,7 @@ Tools/Bin/CheckEfiBlockDevice
 ## 不覆盖的路径
 
 - 真实 OVMF 固件的协议实现与 `Baleen` 引导链的接线：由实机启动路径覆盖，本工具只检查这一层怎么调用协议、怎么解释返回值
+- 内核装载前按地址占住跨度（`BootServices::AllocatePages`）与 `BootX64` 的取图、退出启动服务流程：属固件应用层的流程，由实机启动路径覆盖；本工具只检查 `MemoryMap` 自身对取图结果的解释与错误映射
 - `BALEEN_EFIAPI` 在真机上的参数传递：本工具用同一属性声明替身，宿主上验证的是参数与返回值的语义，不是寄存器约定本身
 - 并发与中断上下文：这一层没有同步设施，也没有可重入要求
 

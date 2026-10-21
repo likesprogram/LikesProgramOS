@@ -52,8 +52,8 @@ TestInstaller --out LikesProgram.hdd \
 | `--descs DIR` | 描述符段产物目录（默认 `Packages/Baleen/Common/Out/Descs`）；头部与各段拆开，本工具只回填起止位置 |
 | `--esp PATH` | ESP 的 FAT 镜像（含 `\EFI\BOOT\BOOTX64.EFI`），落到 0 号分区 |
 | `--system-volume PATH` | 构建期装配好的 Ext4 系统卷镜像，落到 1 号分区 |
-| `--layout PATH` | 布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；缺省用 `/LikesProgram/System/LikesProgram.os`（见 [系统卷布局](../../../Docs/Specs/Common/系统卷布局.md)） |
-| `--kernel-path PATH` | 覆盖内核路径（卷内绝对路径），优先于模板 |
+| `--layout PATH` | 布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；缺省用旧扁平路径 `/LikesProgram/System/LikesProgram.os`，该形态会被选版启用的引导器拒绝（`E-CORE-84`），此时本工具打印警告；正式组装请用 `--kernel-path` 指向 `KernelSets/<BuildId>/` 里的清单 `.os` 条目（见 [内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)）。模板按布局描述的格式与保留区校验，未知标志位、保留字段或尾部保留区非零会被拒绝 |
+| `--kernel-path PATH` | 覆盖内核路径（卷内绝对路径），优先于模板；须符合统一路径语法（以 `/` 起头、分量非空、不含 `.` 与 `..`） |
 | `--raw 宿主路径[@偏移]` | 原始载荷，可重复；偏移须 4096 对齐且不与已安排区重叠 |
 | `--sector-bytes N` | Ext4 分区项（`0x83`）的 LBA 单位：`512`（默认）或 `4096`；0xEF 项固定按 512 单位写（双 ESP 布局需要），载荷一律 4096 对齐 |
 | `--degrade-without-record` | 布局描述里置“记录损坏时退到缺省集”的策略位（默认不置位）：不置位时记录损坏就停机等人工（`E-CORE-69`），置位时按缺省集启动并报 `E-CORE-56`，代价见[布局描述](../../../Docs/Specs/Baleen/布局描述.md) |

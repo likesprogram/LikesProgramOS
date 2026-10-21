@@ -8,6 +8,7 @@
 #include <BaleenLayout.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -27,6 +28,7 @@ namespace hostbuild {
         constexpr std::size_t kFieldStateOffset = Baleen::LayoutDescriptor::kFieldStateOffset;
         constexpr std::size_t kFieldStateBytes = Baleen::LayoutDescriptor::kFieldStateBytes;
         constexpr std::size_t kFieldPathBytes = Baleen::LayoutDescriptor::kFieldKernelPathBytes;
+        constexpr std::size_t kFieldReserved = Baleen::LayoutDescriptor::kFieldReserved;
         constexpr std::size_t kFieldPath = Baleen::LayoutDescriptor::kFieldKernelPath;
         constexpr std::size_t kFieldChecksum = Baleen::LayoutDescriptor::kFieldChecksum;
         constexpr std::size_t kPathMaxBytes = Baleen::LayoutDescriptor::kKernelPathMaxBytes;
@@ -66,12 +68,35 @@ namespace hostbuild {
             return value;
         }
 
-        // 校验内核路径的形式：非空、以 / 起头、不超过字段宽度
-        void CheckKernelPath(const std::string& path) {
-            if (path.empty()) throw std::runtime_error("布局描述的内核路径不能为空");
-            if (path.size() > kPathMaxBytes) throw std::runtime_error("布局描述的内核路径超过 " + std::to_string(kPathMaxBytes) + " 字节");
-            if (path[0] != '/') throw std::runtime_error("布局描述的内核路径必须是卷内绝对路径：" + path);
+        // 把 32 位值写成 0x 前缀的八位十六进制，供标志位报错使用
+        std::string Hex32(uint32_t value) {
+            char text[11] = {};
+            std::snprintf(text, sizeof(text), "0x%08X", value);
+            return text;
         }
+
+        // 校验内核路径：长度不超过字段宽度，语法与引导侧统一路径一致（绝对路径、分量非空、无 . 与 ..）
+        void CheckKernelPath(const std::string& path) {
+            if (path.size() > kPathMaxBytes) throw std::runtime_error("布局描述的内核路径超过 " + std::to_string(kPathMaxBytes) + " 字节");
+            if (!BaleenLayoutPathValid(path)) throw std::runtime_error("布局描述的内核路径不符合统一路径语法（须为卷内绝对路径、分量非空、不含 . 与 ..）：" + path);
+        }
+    }
+
+    bool BaleenLayoutPathValid(const std::string& path) {
+        const std::size_t bytes = path.size();
+        if (bytes == 0 || path[0] != '/') return false;
+        // 只有 "/" 的路径没有路径分量
+        if (bytes == 1) return false;
+        std::size_t begin = 1;
+        for (std::size_t i = begin; i <= bytes; ++i) {
+            if (i < bytes && path[i] != '/') continue;
+            const std::size_t component = i - begin;
+            if (component == 0) return false;
+            if (component == 1 && path[begin] == '.') return false;
+            if (component == 2 && path[begin] == '.' && path[begin + 1] == '.') return false;
+            begin = i + 1;
+        }
+        return true;
     }
 
     std::array<uint8_t, 16> ReadExt4VolumeUuid(const std::string& path) {
@@ -91,6 +116,16 @@ namespace hostbuild {
         if (Get16Le(block.data() + 4) != kVersion) throw std::runtime_error("布局描述模板的版本不支持：" + path);
         if (Get16Le(block.data() + 6) != kHeaderBytes) throw std::runtime_error("布局描述模板的头部长度不符：" + path);
         if (Get32Le(block.data() + 8) != kLayoutBytes) throw std::runtime_error("布局描述模板的有效长度不符：" + path);
+        // 标志位、保留字段与尾部保留区按引导侧的同一套判据核对：模板带出未知位或非零保留字节，
+        // 说明它不是本格式写入方产出的字节，拒绝而不是猜测
+        const uint32_t unknownFlags = Get32Le(block.data() + kFieldFlags) & ~Baleen::LayoutDescriptor::kKnownFlags;
+        if (unknownFlags != 0) throw std::runtime_error("布局描述模板包含未定义的标志位 " + Hex32(unknownFlags) + "：" + path);
+        if (Get16Le(block.data() + kFieldReserved) != 0) throw std::runtime_error("布局描述模板的保留字段非零：" + path);
+        // 模板可以只带有效内容（不足一个块），此时尾部按不存在处理；带出来的尾部字节必须全 0
+        const std::size_t tailEnd = std::min<std::size_t>(block.size(), static_cast<std::size_t>(BaleenLayout::kBlockBytes));
+        for (std::size_t i = kLayoutBytes; i < tailEnd; ++i) {
+            if (block[i] != 0) throw std::runtime_error("布局描述模板的尾部保留区非零，偏移 " + Hex32(static_cast<uint32_t>(i)) + "：" + path);
+        }
         const uint16_t pathBytes = Get16Le(block.data() + kFieldPathBytes);
         if (pathBytes == 0 || pathBytes > kPathMaxBytes) throw std::runtime_error("布局描述模板的内核路径长度非法：" + path);
         const std::string kernel(block.begin() + kFieldPath, block.begin() + kFieldPath + pathBytes);
@@ -99,6 +134,10 @@ namespace hostbuild {
     }
 
     std::vector<uint8_t> BuildBaleenLayout(const BaleenLayoutSpec& spec) {
+        // 标志位：只接受已定义的位；未定义的位会让引导侧按格式不符拒绝（E-CORE-22 / E-UEFI-22），
+        // 生成器提前报错，避免产出一份目标侧不接受的布局描述
+        const uint32_t unknownFlags = spec.flags & ~Baleen::LayoutDescriptor::kKnownFlags;
+        if (unknownFlags != 0) throw std::runtime_error("布局描述包含未定义的标志位 " + Hex32(unknownFlags) + "（已定义位 " + Hex32(Baleen::LayoutDescriptor::kKnownFlags) + "）");
         CheckKernelPath(spec.kernel_path);
         if (spec.volume_image.empty()) throw std::runtime_error("布局描述需要系统卷镜像以读取卷标识");
         if (spec.volume_bytes == 0) throw std::runtime_error("布局描述的系统卷长度必须非 0");
@@ -106,6 +145,7 @@ namespace hostbuild {
         if (spec.state_bytes > 0xFFFFFFFFull) throw std::runtime_error("布局描述的引导状态区域长度超出 32 位");
         const std::array<uint8_t, kExt4UuidBytes> uuid = ReadExt4VolumeUuid(spec.volume_image);
 
+        // 整块先清零：有效内容之后的尾部 [0x144, 0x1000) 保持全 0，与引导侧校验一致
         std::vector<uint8_t> block(BaleenLayout::kBlockBytes, 0);
         Put32Le(block.data(), kMagic);
         Put16Le(block.data() + 4, kVersion);
