@@ -31,6 +31,7 @@ namespace Kernel {
         if (ReadU32(image + Layout::kFieldFlags) != Layout::kFlags) return "The kernel image data flags aren't supported";
         if (ReadU16(image + Layout::kFieldDigestAlgorithm) != Layout::kDigestSha256) return "The kernel image digest algorithm isn't supported";
         if (ReadU16(image + Layout::kFieldBuildIdBytes) != Layout::kBuildIdBytes) return "The kernel image build id length isn't supported";
+        if (ReadU16(image + Layout::kFieldModuleMajor) == 0) return "The kernel image module major is zero";
         for (uint32_t i = 0; i < Layout::kReservedBytes; ++i) {
             if (image[Layout::kFieldReserved + i] != 0) return "The kernel image data reserved bytes aren't zero";
         }
@@ -62,6 +63,7 @@ namespace Kernel {
         uint32_t buildId = 0;
         for (uint32_t i = 0; i < 4; ++i) buildId = (buildId << 8) | image[Layout::kFieldBuildId + i];
         facts.buildId = buildId;
+        facts.moduleMajor = ReadU16(image + Layout::kFieldModuleMajor);
         return nullptr;
     }
 }

@@ -43,7 +43,7 @@ namespace Baleen {
             }
 
             // 统一路径语法：分量非空、不含 . 与 ..；absolute 为真时要求以 / 起头
-            // 规则与 Docs/Specs/Common/文件系统抽象与VFS.md 3.5 一致，清单条目路径与布局路径共用
+            // 清单条目路径与布局路径共用这套规则
             inline bool PathValid(const uint8_t* path, uint32_t bytes, bool absolute) {
                 if (bytes == 0) return false;
                 uint32_t begin = 0;

@@ -1,5 +1,6 @@
 /* UefiMemory.cpp
-    MemoryMap 的实现：分配取图缓冲、反复取图、把描述符转成 BootInfo 的条目
+    MemoryMap 的实现：分配取图缓冲、反复取图、把描述符转成 BootInfo 的条目；
+    UefiAllocator 的实现：交接缓冲的页分配、逐段归还与失败路径的整体回收
 */
 
 #include <UefiMemory.hpp>
@@ -100,6 +101,51 @@ namespace Baleen {
             m_mapBytes = 0;
             m_descriptorBytes = 0;
             m_key = 0;
+        }
+
+        bool UefiAllocator::Allocate(uint32_t bytes, Baleen::Core::PreloadSpan& span) {
+            span = Baleen::Core::PreloadSpan{};
+            if (m_bootServices == nullptr || m_bootServices->allocatePages == nullptr) return false;
+            if (bytes == 0 || m_count >= kMaxSpans) return false;
+            const uint64_t pages = (static_cast<uint64_t>(bytes) + kPageBytes - 1) / kPageBytes;
+            // 上界取低 4GiB 的最高字节：固件把整段分配在它之下，页对齐后必然整段落在恒等映射里
+            uint64_t address = kLowMemoryLimit - 1;
+            if (IsError(m_bootServices->allocatePages(kAllocateMaxAddress, kMemoryLoaderData, pages, &address)) || address == 0) return false;
+            const uint64_t total = pages * kPageBytes;
+            // 固件承诺“分配在给定地址之下”，这里再自核一次：整段在低 4GiB 内且不回绕
+            if (address >= kLowMemoryLimit || total > kLowMemoryLimit - address) {
+                m_bootServices->freePages(address, pages);
+                return false;
+            }
+            span.phys = address;
+            // 引导期固件按恒等映射运行，物理地址可直接当可写指针用（与内核镜像中转缓冲同一写法）
+            span.data = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(address));
+            span.bytes = bytes;
+            m_spans[m_count].phys = address;
+            m_spans[m_count].pages = static_cast<uint32_t>(pages);
+            ++m_count;
+            return true;
+        }
+
+        void UefiAllocator::Release(const Baleen::Core::PreloadSpan& span) {
+            for (uint32_t i = 0; i < m_count; ++i) {
+                if (m_spans[i].phys != span.phys) continue;
+                const uint32_t pages = m_spans[i].pages;
+                for (uint32_t j = i + 1; j < m_count; ++j) m_spans[j - 1] = m_spans[j];
+                --m_count;
+                if (m_bootServices != nullptr && m_bootServices->freePages != nullptr && pages != 0)
+                    m_bootServices->freePages(span.phys, pages);
+                return;
+            }
+        }
+
+        void UefiAllocator::ReleaseAll() {
+            for (uint32_t i = m_count; i > 0; --i) {
+                const Span& record = m_spans[i - 1];
+                if (m_bootServices != nullptr && m_bootServices->freePages != nullptr && record.pages != 0)
+                    m_bootServices->freePages(record.phys, record.pages);
+            }
+            m_count = 0;
         }
     }
 }

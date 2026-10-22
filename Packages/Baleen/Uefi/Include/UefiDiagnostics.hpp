@@ -1,8 +1,8 @@
 /* UefiDiagnostics.hpp
     UEFI 阶段的失败诊断编号：本包各处共用的稳定编号与文本
 
-    编号登记与含义见 Docs/Specs/Baleen/失败诊断编号.md 第四节；16..30、32、55 与 58 与
-    BaleenCore 同号异前缀（同一含义、同一序号、同一句话，只换阶段前缀），76 起是 UEFI 侧
+    16..30、32、55 与 58 与 BaleenCore 同号异前缀（同一含义、同一序号、同一句话，只换
+    阶段前缀），76 起是 UEFI 侧
     独有的检查，不参与同号异前缀
     共享实现（SelectSet / ManifestVerify / LoadKernel）自带前缀宏，本头只管本包自己判定的那些
 */

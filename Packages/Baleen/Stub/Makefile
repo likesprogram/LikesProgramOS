@@ -60,11 +60,13 @@ NASMFLAGS ?= -f elf32 -Werror -I$(INC_DIR)/ -I$(SHARE_DIR)/
 # 链接选项：无运行库并按 Stub.ld 的固定布局；build-id 是额外的落盘节，不要，链接器警告视为错误
 LDFLAGS   ?= -m elf_i386 -nostdlib -T Stub.ld --build-id=none --fatal-warnings
 
-# 本包目标文件：LoadCore.cpp 是 BaleenCore 装载机制，SelfCheck.cpp 是自身完整性自检，Stub_asm.o 与同名 C++ 源以 _asm 后缀区分
-LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Stub.o LoadCore.o SelfCheck.o Stub_asm.o Bios.o)
-# 上游目标文件
+# 本包目标文件：LoadCore.cpp 是 BaleenCore 装载机制，SelfCheck.cpp 是自身完整性自检，
+# Sha256.o 取自 Common 的共享目标代码（按本包 32 位选项再编一份），
+# Stub_asm.o 与同名 C++ 源以 _asm 后缀区分
+LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Stub.o LoadCore.o SelfCheck.o Stub_asm.o Bios.o Sha256.o)
+# 上游目标文件；目标侧 SHA-256 已提升为 Common 的共享目标代码，不再取 Baleen/Common 的旧副本
 COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o)
-BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o ImageHeader.o BootMemory.o ReadFailure.o)
+BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o ImageHeader.o BootMemory.o ReadFailure.o)
 
 # 链接产物与交付镜像
 STUB_ELF  := $(BIN_DIR)/BaleenStub.elf
@@ -102,6 +104,12 @@ $(PACK_IMAGE):
 	@$(MAKE) -C ../../../Tools/Build/PackImage
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(PROBE_DEFINES) -c $< -o $@
+
+# 目标侧 SHA-256 来自 Common 的共享目标代码（Packages/Common/Src/Sha256.cpp）：
+# 按本包 32 位选项再编一份，共享头里的 Baleen 兼容视图让 ImageHeader.o 直接按同一布局编译
+$(OBJ_DIR)/Sha256.o: $(COMMON_DIR)/Src/Sha256.cpp
 	@mkdir -p $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) $(PROBE_DEFINES) -c $< -o $@
 

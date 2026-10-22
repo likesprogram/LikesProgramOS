@@ -1,0 +1,36 @@
+# BootClosure.def
+#   引导闭包成员表：顺序号与逻辑名的单点定义
+#
+#   MakeContract 读取本文件生成内核期望集表与 MakeManifest 的预装条目来源：
+#   预装列表 Modules.list 的条目顺序、Baleen 的列表完整性核对、内核 E-KRN-55
+#   的完整性判定都按本文件，不允许在别处维护第二份成员表
+#
+#   一行一个成员，字段以单个空格分隔：
+#     closure <顺序> <逻辑名>
+#   顺序取 1..13 连续升序，即预装顺序、期望集顺序与同层拓扑次序；
+#   逻辑名是 [A-Z][A-Za-z0-9]*，参与 ModuleId 派生
+#   （SHA-256("LPMOD01" || 逻辑名 ASCII) 前 16 字节），
+#   同时是模块文件名主名：Modules/<逻辑名>.<major>.<minor>.<patch>.osm
+#   逻辑名与顺序都不得改动——改名等于换一个模块，旧修订的保留文件与依赖表全部失配
+#
+#   排序必须满足依赖拓扑（提供者先于消费者）；同层成员由文件行序决定，
+#   行序即注册顺序，不依赖哈希值排序。成员固定 13 个，发行配置不能裁剪；
+#   增删成员必须同步 Docs/Specs/模块修订与更新.md 第四节与
+#   Docs/Specs/内核架构与自举闭包.md 2.2，并重签清单
+#
+#   顺序按依赖：DevModel → DriverLoader → 启动驱动 → Vfs → 文件系统。
+#   UsbCore/Xhci/UsbHub/UsbStorage 是一条链，按链序声明
+
+closure 1 DevModel
+closure 2 DriverLoader
+closure 3 AtaPio
+closure 4 Ahci
+closure 5 Nvme
+closure 6 UsbCore
+closure 7 Xhci
+closure 8 UsbHub
+closure 9 UsbStorage
+closure 10 Vfs
+closure 11 Ext4
+closure 12 ISO9660
+closure 13 FAT32File

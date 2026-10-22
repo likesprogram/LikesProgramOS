@@ -38,4 +38,4 @@ make clean-all       # 连同 Core 的产物一起清理
 
 系统卷由 `mke2fs -d` 从卷根副本就地写入，不挂载、不需要 root；卷大小、卷标识与内核路径都可按顶层模板覆盖（见 `make help`）。内核集落在 `/LikesProgram/System/KernelSets/<BuildId>/`，当前集的卷内路径写进 `Out/KernelPath`，由顶层组装器传给 MakeImage / TestInstaller 回填布局描述；`KERNEL_PATH` 变量已不再使用，落点由 `BuildId` 决定。
 
-`LikesProgram.os` 现在是内核的原生引导镜像本体：内核镜像数据加第一阶段代码。`.os` 作为容器（`kind` 元数据、同集 `.osm` 与构建清单）的内部格式随[模块与驱动装载](../../Docs/Specs/模块与驱动装载.md)与[内核集更新与回滚](../../Docs/Specs/内核集更新与回滚.md)的阶段确定（构建清单的字节表与签名已由[内核集清单与签名](../../Docs/Specs/内核集清单与签名.md)定义），届时本包按同一布局升级产物形态；卷内落点从扁平路径迁移到集目录形态同样随该阶段进行。
+`LikesProgram.os` 现在是内核核心的原生引导镜像本体：内核镜像数据加内核核心代码，镜像数据里的 `ModuleMajor` 是发布线。构建链按**发布线身份**组织：本包先产出 `BuildId` 与 `Digest` 全零的原型，`MakeManifest` 在系统卷组装期派生发布线 `BuildId`、写入最终 `.os`、生成 `Modules.list` 与清单；集目录名与卷内路径都由该 `BuildId` 推出，模块补丁不改变它。`Modules/` 的落点、13 个引导闭包模块的打包与集目录、模块修订与版本保留已由 P5 的 M1（打包与构建链接入）、M2（修订快照与选择）与 M5/M6（真实模块与运行期夹具）落地（见[模块修订与更新](../../Docs/Specs/模块修订与更新.md)、[内核模块容器](../../Docs/Specs/内核模块容器.md)与[内核架构与自举闭包](../../Docs/Specs/内核架构与自举闭包.md)）。`.os` 作为容器的 `kind` 元数据格式属于后续容器阶段，本文不提前定义。

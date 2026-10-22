@@ -4,7 +4,6 @@
     两种镜像同构：文件偏移 0 起是 16 位近跳转前缀与保留区，0x10 起是 128 字节头，
     0x90 起是早期入口；只有格式标记不同（Stub 为 BLNSTUB、BaleenCore 为 BLNCORE），
     字段偏移、固定取值与摘要覆盖区间完全一致
-    字节表与自引用处理见 Packages/Baleen/Stub/README.md 第三、四节
     本文件只做机制：校验失败只回报带编号的原因，打印与停机由调用方决定
     同一原因在检测阶段各有编号（Stub 阶段 E-STUB-40 起、BaleenCore 阶段 E-CORE-40 起、
     UEFI 阶段 E-UEFI-40 起）：编号标识在哪个阶段查出什么，序号在三个阶段一致
@@ -54,7 +53,7 @@ namespace Baleen {
         static constexpr uint32_t kDigestFileEnd = kDigestFileOffset + kDigestBytes; // 0x70
     };
 
-    // 两种镜像的格式标记，含终止零：布局同构，标记与各自的结构文档独立
+    // 两种镜像的格式标记，含终止零：布局同构，两套标记互相独立
     constexpr uint8_t kStubImageMagic[8] = { 'B', 'L', 'N', 'S', 'T', 'U', 'B', 0 };
     constexpr uint8_t kCoreImageMagic[8] = { 'B', 'L', 'N', 'C', 'O', 'R', 'E', 0 };
 

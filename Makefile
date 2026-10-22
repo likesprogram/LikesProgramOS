@@ -20,21 +20,24 @@
 #                                 与 run 同一套位置参数，区别只在画面：run 不开窗口，
 #                                 run-win 开本地窗口（QEMU 挑可用的 gtk/sdl，Bochs 用 wx）
 #                                 例：make run-win hdd qemu built bios / make run-win iso qemu built uefi
-#      make deliverables          构建默认两份镜像与全部验收变体（4Kn、降级、三份吊销/防回滚现场）
-#      make variants              只构建验收变体镜像
-#      make reproducible-check    两次 clean-all + 全量构建并比对交付物 sha256；
+#      make deliverables          构建默认两份镜像与全部验证变体（4Kn、降级、三份吊销/防回滚现场）
+#      make variants              只构建验证变体镜像
+#      make reproducible-check    两次 clean-all + 全量构建并比对 51 份交付物 sha256；
 #                                 要求 .cache/Keys/Development.sec 已存在（外部密钥输入，不自动生成）
 #                                 日志与两份哈希清单留在 /tmp/repro-check-*
 #      make clean                 删除顶层 Out/；make clean-all 连同子包与两类工具的产物
 #
 #      make check-all [WITH_BOOT=1]
-#                                 把验证收成一条命令：宿主侧 9 个检查工具串行执行，输出一张
-#                                 “通过/失败 + 用例计数”表；WITH_BOOT=1 再跑十档启动矩阵
-#                                 （BIOS 六档：HDD / ISO / HDD 当 U 盘 / ISO 写入 U 盘 × QEMU，
-#                                 HDD / CD × Bochs；UEFI 四档：HDD / ISO / U 盘 / 4Kn U 盘 × OVMF；
-#                                 32 位 UEFI 固件可用时再加 IA32 提示件档、共十一档），
-#                                 每档抽三列：进内核 / 刷新路径 / 诊断编号
-#                                 ACCEPT=1 的工业验收另有失败注入、NVMe/4Kn 与吊销/防回滚三档
+#                                 把验证收成一条命令：宿主侧 30 个检查工具（994 例）串行执行，
+#                                 输出一张“通过/失败 + 用例计数”表；WITH_BOOT=1 再跑十二档
+#                                 启动矩阵（BIOS 六档：HDD / ISO / HDD 当 U 盘 / ISO 写入 U 盘 ×
+#                                 QEMU，HDD / CD × Bochs；UEFI 五档：HDD / ISO / U 盘 / 4Kn U 盘 /
+#                                 4Kn NVMe × OVMF；32 位 UEFI 固件可用时再加 IA32 提示件档），
+#                                 再跑运行期模块 4 档与引导状态演练 19 档；矩阵每档九列：
+#                                 进内核 / 刷新路径 / 诊断编号 / 预装 / 闭包 Init / 挂卷 /
+#                                 清单 / ISO 源 / 运行期；ACCEPT=1 的扩展验证另加失败注入
+#                                 （旧注入 11 档 + Baleen 交接包 6 档 + 坏容器/Init 失败 2 档）、
+#                                 NVMe/4Kn 控制器与吊销/防回滚三档
 #                                 证据目录用 EVIDENCE_DIR=<Out 之外的目录> 指定，转成脚本
 #                                 的 --evidence；镜像批次与各自的 sha256 会先打到 stdout
 #                                 输出落 Out/check/ —— **它是构建产物，不是证据目录**：
@@ -73,9 +76,9 @@ DESC_DIR      ?= Packages/Baleen/Common/Out/Descs
 # 所有子包的 Makefile
 SUBPACKAGE_MAKEFILES := $(wildcard Packages/*/Makefile Packages/*/*/Makefile)
 # 构建期宿主工具目录：默认构建与镜像组装依赖它们，缺失会直接失败
-TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/MakeKeys Tools/Build/MakeManifest Tools/Build/SignManifest Tools/Build/MakeRevocation
+TOOL_DIRS := Tools/Build/MakeImage Tools/Build/TestInstaller Tools/Build/MakePayloads Tools/Build/PackImage Tools/Build/MakeKeys Tools/Build/MakeManifest Tools/Build/SignManifest Tools/Build/MakeRevocation Tools/Build/MakeContract Tools/Build/PackModule
 # 测试与回归工具目录：手工执行，不进入默认构建
-TEST_TOOL_DIRS := Tools/Test/CheckIpl Tools/Test/CheckStub Tools/Test/CheckStorage Tools/Test/CheckExt4 Tools/Test/CheckCrypto Tools/Test/CheckSelect Tools/Test/CheckMemory Tools/Test/CheckRevocation Tools/Test/CheckEfiBlockDevice Tools/Test/RunBootCase
+TEST_TOOL_DIRS := Tools/Test/CheckIpl Tools/Test/CheckStub Tools/Test/CheckStorage Tools/Test/CheckExt4 Tools/Test/CheckCrypto Tools/Test/CheckSelect Tools/Test/CheckMemory Tools/Test/CheckRevocation Tools/Test/CheckEfiBlockDevice Tools/Test/CheckOsm Tools/Test/CheckPreload Tools/Test/CheckRevision Tools/Test/CheckHandoff Tools/Test/CheckScreen Tools/Test/CheckObjects Tools/Test/CheckContainer Tools/Test/CheckRegistry Tools/Test/CheckDependency Tools/Test/CheckRelocation Tools/Test/CheckLoader Tools/Test/CheckDevModel Tools/Test/CheckVfs Tools/Test/CheckExt4Module Tools/Test/CheckNvme Tools/Test/CheckUsbCore Tools/Test/CheckXhci Tools/Test/CheckIso9660 Tools/Test/CheckFat32 Tools/Test/CheckUsbHub Tools/Test/CheckUsbStorage Tools/Test/RunBootCase
 # 维护工具目录：面向介质与状态的运维动作，手工执行，不进入默认构建
 MAINTAIN_TOOL_DIRS := Tools/Maintain/FixBootState
 
@@ -113,10 +116,10 @@ export SOURCE_DATE_EPOCH
 KEY_ID ?= 1
 export KEY_ID
 
-# —— 交付物与验收变体 ——
+# —— 交付物与验证变体 ——
 # 默认交付：光盘与整盘镜像
 IMAGES := $(ISO) $(HDD)
-# 验收变体镜像：CheckAll 默认按这些路径读取（脚本的 --image-* 选项可覆盖）
+# 验证变体镜像：CheckAll 默认按这些路径读取（脚本的 --image-* 选项可覆盖）
 # 4Kn：同一批载荷按 4096 单位组装分区表；degrade：布局描述置“记录损坏退缺省集”策略位；
 # revocation-*：卷内放进对应的吊销记录，分别验证 E-CORE-66 / E-CORE-75 / E-CORE-74
 IMAGE_4KN              := $(OUT_DIR)/LikesProgram.4kn.hdd
@@ -125,6 +128,54 @@ IMAGE_REVOCATION_FLOOR := $(OUT_DIR)/LikesProgram.revocation-floor.hdd
 IMAGE_REVOCATION_BAD   := $(OUT_DIR)/LikesProgram.revocation-bad.hdd
 IMAGE_REVOCATION_KEY   := $(OUT_DIR)/LikesProgram.revocation-key.hdd
 VARIANT_IMAGES := $(IMAGE_4KN) $(IMAGE_DEGRADE) $(IMAGE_REVOCATION_FLOOR) $(IMAGE_REVOCATION_BAD) $(IMAGE_REVOCATION_KEY)
+
+# —— 运行期模块夹具变体（G6d 验证用，不进正式交付集）——
+# 三个变体各对应一条证据：runtime-fault（Fault 必需模块 Init 失败 → E-KRN-81 + 等待复位）、
+# runtime-optional（Optional 默认版 Init 失败 → WARN E-KRN-83 不重启）、
+# runtime-optional-ok（Optional 的 OPTIONAL_INIT_OK 成功版 → runtime module init ok 并继续）。
+# 系统卷由 Packages/LikesProgramOS 的 RUNTIME_MODULES 变体卷构建：运行期 .osm 以清单 Type=2
+# 与 Modules.list 条目进测试变体集（列表是内核侧完整模块清单，Baleen 只预装闭包成员）；
+# 正式镜像（$(IMAGES)）与交付集不含 Fault/Optional
+RUNTIME_FIXTURE_DIR     := $(OUT_DIR)/Runtime
+RUNTIME_MODULES_SRC_DIR ?= Packages/KernelModules/Out/Modules
+RUNTIME_OPTIONAL_OK_OSM ?= Packages/KernelModules/Optional/Out/Ok/Modules/Optional.1.0.0.osm
+IMAGE_RUNTIME_FAULT       := $(OUT_DIR)/LikesProgram.runtime-fault.hdd
+IMAGE_RUNTIME_OPTIONAL    := $(OUT_DIR)/LikesProgram.runtime-optional.hdd
+IMAGE_RUNTIME_OPTIONAL_OK := $(OUT_DIR)/LikesProgram.runtime-optional-ok.hdd
+RUNTIME_IMAGES := $(IMAGE_RUNTIME_FAULT) $(IMAGE_RUNTIME_OPTIONAL) $(IMAGE_RUNTIME_OPTIONAL_OK)
+
+# —— 同集两修订夹具（G6d 验证用）——
+# 修订 1 = 正式构建的修订快照（集暂存目录里的 Manifest.mft / Modules.list 拷到 Revision1Stage）；
+# 修订 2 = 同一集目录里按 MODULE_REVISION=2 另生成并签名的清单与列表（模块文件相同）。
+# 两份快照都进同一个集目录：Baleen 按 BootState.ModuleRevision 选回退目标修订，内核串口打印 Rev=<n>
+REVISION1_STAGE  := $(OUT_DIR)/Revision1Stage
+REVISION2_DIR    := $(OUT_DIR)/Revision2
+REVISION2_VOLUME := $(REVISION2_DIR)/LikesProgram.img
+IMAGE_REVISION2  := $(OUT_DIR)/LikesProgram.rev2.hdd
+REVISION_IMAGES  := $(IMAGE_REVISION2)
+
+# —— T7.1 故障注入测试变体（仅扩展验证，不进交付集）——
+# ① Baleen 交接包故障注入：用 FAULT_INJECT=1..6 单独编一份 BaleenCore，交给内核的交接事实
+#    在交接前被故意弄坏（交接包缺失/清单坏/记录错/BuildId/主版门/摘要）；断言落在内核 E-KRN-5x
+# ② 合法签名 + 故意坏容器：改一个闭包模块字节后重新生成并签名清单，Baleen 会把它送进内核
+BALEEN_FAULT_DIR   := $(OUT_DIR)/FaultCore
+BALEEN_FAULT_IDS   := 1 2 3 4 5 6
+BALEEN_FAULT_CORES := $(foreach id,$(BALEEN_FAULT_IDS),$(BALEEN_FAULT_DIR)/$(id)/Bin/BaleenCore.bin)
+BALEEN_FAULT_IMAGES := $(foreach id,$(BALEEN_FAULT_IDS),$(OUT_DIR)/LikesProgram.fault-$(id).hdd)
+IMAGE_FAULT_CONTAINER := $(OUT_DIR)/LikesProgram.fault-container.hdd
+IMAGE_FAULT_INIT      := $(OUT_DIR)/LikesProgram.fault-init.hdd
+FAULT_VOLUME_DIR      := $(OUT_DIR)/FaultVolumes
+INJECT_IMAGES := $(BALEEN_FAULT_IMAGES) $(IMAGE_FAULT_CONTAINER) $(IMAGE_FAULT_INIT)
+
+# —— UEFI 自建控制器路径验证变体（仅 ACCEPT，不进交付集）——
+# 强制路径的 BOOTX64.EFI：即使固件有块协议也走 PCI 自建的 AHCI / NVMe 只读路径；
+# ESP 单独组装，镜像分别按 512 与 4096 单位组装，覆盖 AHCI HDD 与 NVMe 4Kn 两档
+CONTROLLER_UEFI_OUT := Packages/Baleen/Uefi/Out/Controller
+CONTROLLER_BOOTX64  := $(CONTROLLER_UEFI_OUT)/Bin/BOOTX64.EFI
+CONTROLLER_ESP      := $(OUT_DIR)/ControllerEfi.img
+IMAGE_CONTROLLER      := $(OUT_DIR)/LikesProgram.controller.hdd
+IMAGE_CONTROLLER_4KN  := $(OUT_DIR)/LikesProgram.controller-4kn.hdd
+CONTROLLER_IMAGES := $(IMAGE_CONTROLLER) $(IMAGE_CONTROLLER_4KN)
 
 # —— 吊销/防回滚变体的输入与中间产物 ——
 # 开发期签名密钥：仓库外的外部输入，缺失时由 MakeKeys 生成一次后复用
@@ -246,7 +297,7 @@ RUN_WINDOWED := $(filter run-win,$(MAKECMDGOALS))
 RUN_LABEL := $(if $(RUN_WINDOWED),run-win,run)
 
 .DEFAULT_GOAL := all
-.PHONY: all images deliverables variants iso hdd packages tools core-generated test-tools maintain-tools compile-db payloads payload-report run run-win run-check run-uefi check-all reproducible-check clean clean-all help qemu bochs built usb bios uefi
+.PHONY: all images deliverables variants iso hdd packages modules tools core-generated contract-generated test-tools maintain-tools compile-db payloads payload-report run run-win run-check run-uefi check-all reproducible-check clean clean-all help qemu bochs built usb bios uefi
 
 # 默认目标
 all: images
@@ -254,10 +305,10 @@ all: images
 # 两份镜像
 images: $(ISO) $(HDD)
 
-# 全部交付物：默认两份镜像 + 验收变体
+# 全部交付物：默认两份镜像 + 验证变体
 deliverables: images variants
 
-# 验收变体镜像：4Kn、降级策略位与三份吊销/防回滚现场
+# 验证变体镜像：4Kn、降级策略位与三份吊销/防回滚现场
 variants: $(VARIANT_IMAGES)
 
 # 只构建光盘镜像
@@ -268,9 +319,15 @@ hdd: $(HDD)
 # run 的实参：作为目标出现时不做任何事（hdd/iso 本身是要构建的镜像目标）
 qemu bochs built usb bios uefi: ;
 
+# 构建并打包全部 .osm 模块包：ELF 在 Packages/KernelModules/Out/<模块>/，
+# .osm 在 Packages/KernelModules/Out/Modules/（系统卷包的默认模块来源 MODULES_SRC_DIR）
+modules: tools contract-generated
+	@$(MAKE) -C Packages/KernelModules package
+
 # 跑 Packages 下已有的子 Makefile
 # 先建 Tools/Build 的构建期工具：子包会在构建途中用它们，并行构建同一个工具会互相踩
-packages: tools
+# modules 先于遍历：KernelModules 在遍历顺序里排在 LikesProgramOS 之前，但显式依赖更稳
+packages: tools contract-generated modules
 	@for mk in $(SUBPACKAGE_MAKEFILES); do echo "== $(MAKE) -C $$(dirname $$mk)"; $(MAKE) -C "$$(dirname $$mk)" || exit 1; done
 
 # 构建 Tools/Build 下的构建期工具
@@ -282,8 +339,13 @@ tools:
 core-generated: tools
 	@$(MAKE) -C Packages/Baleen/Core
 
+# 生成契约头与表：MakeContract 读 Packages/Common/Contract/ 的私有输入，产物落 Packages/Common/Out/Contract/
+# 模块与内核的契约消费方（M4/M5 起）依赖生成物；当前先接进验证链，保证干净树上也有
+contract-generated: tools
+	@Tools/Bin/MakeContract
+
 # 构建 Tools/Test 下的测试与回归工具：手工执行，不进入默认构建
-test-tools: core-generated
+test-tools: core-generated contract-generated
 	@for dir in $(TEST_TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
 
 # 构建 Tools/Maintain 下的维护工具：手工执行，不进入默认构建
@@ -291,21 +353,22 @@ maintain-tools:
 	@for dir in $(MAINTAIN_TOOL_DIRS); do echo "== $(MAKE) -C $$dir"; $(MAKE) -C "$$dir" || exit 1; done
 
 # —— 验证：一条命令跑完宿主侧全部检查，可选追加启动矩阵 ——
-# 前提：test-tools 先把 9 个检查工具建到 Tools/Bin；WITH_BOOT=1 时再建出默认镜像与全部验收变体
+# 前提：test-tools 先把 30 个检查工具建到 Tools/Bin；WITH_BOOT=1 时再建出默认镜像与全部验证变体
 # （4Kn / 降级 / 吊销三档都在依赖里：脚本默认按 Out/ 下的变体路径读镜像）
 # 参数经 CHECK_ALL_ARGS 透传，如 CHECK_ALL_ARGS="--timeout 120"
 # EVIDENCE_DIR=<Out 之外的目录> 转成脚本的 --evidence，把验证记录留到构建产物之外
-# ACCEPT=1 是工业验收：启动矩阵与状态演练之外再跑失败注入、4Kn 与 NVMe 控制器、
+# ACCEPT=1 是扩展验证：启动矩阵与状态演练之外再跑失败注入、4Kn 与 NVMe 控制器、
 # 引导状态机多轮与吊销/防回滚三档
 EVIDENCE_DIR ?= $(EVIDENCE)
 CHECK_ALL_DEPS := test-tools maintain-tools \
-                  $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),images $(VARIANT_IMAGES))
+                  $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),images $(VARIANT_IMAGES) $(RUNTIME_IMAGES) $(REVISION_IMAGES)) \
+                  $(if $(filter 1,$(ACCEPT)),$(INJECT_IMAGES) $(CONTROLLER_IMAGES))
 CHECK_ALL_ARGS ?=
 
 check-all: $(CHECK_ALL_DEPS)
 	@if [ -n "$(filter 1,$(WITH_BOOT)$(ACCEPT))" ]; then \
 	    printf 'check-all 镜像批次（本次 invocation 实际使用）：\n'; \
-	    for image in $(IMAGES) $(VARIANT_IMAGES); do \
+	    for image in $(IMAGES) $(VARIANT_IMAGES) $(RUNTIME_IMAGES) $(REVISION_IMAGES) $(if $(filter 1,$(ACCEPT)),$(INJECT_IMAGES) $(CONTROLLER_IMAGES),); do \
 	        if [ -f "$$image" ]; then \
 	            printf '  %s  %s\n' "$$(sha256sum "$$image" | cut -d' ' -f1)" "$$image"; \
 	        else \
@@ -313,7 +376,7 @@ check-all: $(CHECK_ALL_DEPS)
 	        fi; \
 	    done; \
 	fi
-	@Tools/Test/CheckAll.sh $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),--with-boot,) $(if $(filter 1,$(ACCEPT)),--accept,) $(if $(EVIDENCE_DIR),--evidence $(EVIDENCE_DIR),) $(CHECK_ALL_ARGS)
+	@Tools/Test/CheckAll.sh $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),--with-boot,) $(if $(filter 1,$(ACCEPT)),--accept --image-controller $(abspath $(IMAGE_CONTROLLER)) --image-controller-4kn $(abspath $(IMAGE_CONTROLLER_4KN)),) $(if $(EVIDENCE_DIR),--evidence $(EVIDENCE_DIR),) $(CHECK_ALL_ARGS)
 
 # 可复现构建检查：要求两把外部密钥输入都已存在（主密钥与第二把临时密钥，均不自动生成随机密钥），
 # 由脚本做两次 clean-all + 全量构建并比对交付物 sha256；日志与两份哈希清单留在 /tmp
@@ -335,7 +398,7 @@ payloads: packages
 	@if [ -f "$(UEFI_IA32)" ]; then cp "$(UEFI_IA32)" "$(PAYLOAD_DIR)/BOOTIA32.EFI"; fi
 	@Tools/Bin/MakePayloads "$(PAYLOAD_DIR)"
 
-# 组装整盘镜像的命令：默认镜像与验收变体只有输出路径、内核、扇区单位、系统卷与附加开关不同
+# 组装整盘镜像的命令：默认镜像与验证变体只有输出路径、内核、扇区单位、系统卷与附加开关不同
 # 用法：$(call assemble-hdd,<输出镜像>,<core>,<sector-bytes>,<system-volume>,<附加选项>)
 # 构建清单写到 <输出镜像>.json，变体因此各有自己的 .json
 define assemble-hdd
@@ -344,6 +407,16 @@ define assemble-hdd
 	Tools/Bin/TestInstaller --out $(1) --mbr $(MBR) --stub $(STUB) --core $(2) \
 	    --descs $(DESC_DIR) --sector-bytes $(3) --esp $(ESP_IMAGE) --system-volume $(4) \
 	    $(if $(LAYOUT),--layout $(LAYOUT),) $$kernel_arg $(5) --manifest $(1).json
+endef
+
+# 自建控制器路径变体的整盘组装：与 assemble-hdd 同一组参数，只换 ESP 镜像
+# 用法：$(call assemble-controller-hdd,<输出镜像>,<sector-bytes>,<ESP 镜像>)
+define assemble-controller-hdd
+	@kernel_arg=; \
+	[ ! -f "$(KERNEL_PATH_FILE)" ] || kernel_arg="--kernel-path $$(cat $(KERNEL_PATH_FILE))"; \
+	Tools/Bin/TestInstaller --out $(1) --mbr $(MBR) --stub $(STUB) --core $(CORE) \
+	    --descs $(DESC_DIR) --sector-bytes $(2) --esp $(3) --system-volume $(SYSTEM_VOLUME) \
+	    $(if $(LAYOUT),--layout $(LAYOUT),) $$kernel_arg --manifest $(1).json
 endef
 
 # 组装通用镜像（MakeImage）：一份字节供刻录光盘、写入 U 盘 / 移动硬盘与虚拟机挂载
@@ -363,7 +436,24 @@ $(HDD): payloads
 	@$(MAKE) --no-print-directory payload-report
 	$(call assemble-hdd,$@,$(CORE),$(DISK_SECTOR_BYTES),$(SYSTEM_VOLUME),)
 
-# —— 验收变体镜像 ——
+# —— UEFI 自建控制器路径验证变体 ——
+# 变体引导器由 UEFI 包按 CONTROLLER_PATH=1 单独编到 Out/Controller；顶层只在 ACCEPT 依赖里构建
+$(CONTROLLER_BOOTX64): FORCE
+	@$(MAKE) -C Packages/Baleen/Uefi CONTROLLER_PATH=1
+
+$(CONTROLLER_ESP): $(CONTROLLER_BOOTX64)
+	@mkdir -p "$(OUT_DIR)"
+	@Tools/Bin/MakePayloads --esp-image --out $@ --bootx64 $(CONTROLLER_BOOTX64) --bootia32 $(CONTROLLER_BOOTX64:BOOTX64.EFI=BOOTIA32.EFI)
+
+$(IMAGE_CONTROLLER): payloads $(CONTROLLER_ESP)
+	@$(MAKE) --no-print-directory payload-report
+	$(call assemble-controller-hdd,$@,$(DISK_SECTOR_BYTES),$(CONTROLLER_ESP))
+
+$(IMAGE_CONTROLLER_4KN): payloads $(CONTROLLER_ESP)
+	@$(MAKE) --no-print-directory payload-report
+	$(call assemble-controller-hdd,$@,4096,$(CONTROLLER_ESP))
+
+# —— 验证变体镜像 ——
 # 每个变体都是独立的文件目标，配方直接调用 TestInstaller，不递归 make 的 hdd 目标：
 # 依赖 payloads（phony）保证载荷/工具更新后一定重建，不会“文件存在就复用”；
 # 变体自己的输入（系统卷、变体 Core）也在依赖里
@@ -386,6 +476,105 @@ $(IMAGE_REVOCATION_BAD): payloads $(REVOCATION_BAD_VOLUME)
 $(IMAGE_REVOCATION_KEY): payloads $(REVOCATION_KEY_VOLUME) $(REVOCATION_CORE)
 	@$(MAKE) --no-print-directory payload-report
 	$(call assemble-hdd,$@,$(REVOCATION_CORE),$(DISK_SECTOR_BYTES),$(REVOCATION_KEY_VOLUME),)
+
+# —— 运行期模块夹具变体（G6d）——
+# 每个变体卷由 LikesProgramOS 的 $(RUNTIME_VOLUME) 目标构建：KERNEL_IMAGE 用同一份内核原型，
+# RUNTIME_MODULES 只在这一份测试变体集里登记运行期条目；产物落在 $(RUNTIME_FIXTURE_DIR)/<变体>/
+$(RUNTIME_FIXTURE_DIR)/fault/LikesProgram.img: payloads
+	@$(MAKE) -C Packages/LikesProgramOS KERNEL_IMAGE=$(abspath $(KERNEL_IMAGE_DEFAULT)) \
+	    RUNTIME_OUT_DIR=$(abspath $(RUNTIME_FIXTURE_DIR)/fault) \
+	    RUNTIME_VOLUME=$(abspath $@) \
+	    RUNTIME_MODULES="Modules/Fault.1.0.0.osm=$(abspath $(RUNTIME_MODULES_SRC_DIR)/Fault.1.0.0.osm)" \
+	    $(abspath $@)
+
+$(RUNTIME_FIXTURE_DIR)/optional/LikesProgram.img: payloads
+	@$(MAKE) -C Packages/LikesProgramOS KERNEL_IMAGE=$(abspath $(KERNEL_IMAGE_DEFAULT)) \
+	    RUNTIME_OUT_DIR=$(abspath $(RUNTIME_FIXTURE_DIR)/optional) \
+	    RUNTIME_VOLUME=$(abspath $@) \
+	    RUNTIME_MODULES="Modules/Optional/Optional.1.0.0.osm=$(abspath $(RUNTIME_MODULES_SRC_DIR)/Optional.1.0.0.osm)" \
+	    $(abspath $@)
+
+$(RUNTIME_FIXTURE_DIR)/optional-ok/LikesProgram.img: payloads $(RUNTIME_OPTIONAL_OK_OSM)
+	@$(MAKE) -C Packages/LikesProgramOS KERNEL_IMAGE=$(abspath $(KERNEL_IMAGE_DEFAULT)) \
+	    RUNTIME_OUT_DIR=$(abspath $(RUNTIME_FIXTURE_DIR)/optional-ok) \
+	    RUNTIME_VOLUME=$(abspath $@) \
+	    RUNTIME_MODULES="Modules/Optional/Optional.1.0.0.osm=$(abspath $(RUNTIME_OPTIONAL_OK_OSM))" \
+	    $(abspath $@)
+
+# 用运行期夹具卷组装验证变体盘：内核路径取该变体自己的 KernelPath（正式 KERNEL_PATH_FILE 不参与）
+define assemble-runtime-hdd
+	@kernel_arg=; \
+	[ ! -f "$(2)" ] || kernel_arg="--kernel-path $$(cat $(2))"; \
+	Tools/Bin/TestInstaller --out $(1) --mbr $(MBR) --stub $(STUB) --core $(CORE) \
+	    --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(3) \
+	    $$kernel_arg --manifest $(1).json
+endef
+
+$(IMAGE_RUNTIME_FAULT): $(RUNTIME_FIXTURE_DIR)/fault/LikesProgram.img payloads
+	$(call assemble-runtime-hdd,$@,$(RUNTIME_FIXTURE_DIR)/fault/KernelPath,$(RUNTIME_FIXTURE_DIR)/fault/LikesProgram.img)
+
+$(IMAGE_RUNTIME_OPTIONAL): $(RUNTIME_FIXTURE_DIR)/optional/LikesProgram.img payloads
+	$(call assemble-runtime-hdd,$@,$(RUNTIME_FIXTURE_DIR)/optional/KernelPath,$(RUNTIME_FIXTURE_DIR)/optional/LikesProgram.img)
+
+$(IMAGE_RUNTIME_OPTIONAL_OK): $(RUNTIME_FIXTURE_DIR)/optional-ok/LikesProgram.img payloads
+	$(call assemble-runtime-hdd,$@,$(RUNTIME_FIXTURE_DIR)/optional-ok/KernelPath,$(RUNTIME_FIXTURE_DIR)/optional-ok/LikesProgram.img)
+
+# 修订 1 快照：正式集构建完成后把清单与列表拷出来；PREVIOUS_REVISION_DIR 需要这两个文件名
+$(REVISION1_STAGE)/Manifest.mft: $(SYSTEM_VOLUME)
+	@mkdir -p $(REVISION1_STAGE)
+	@cp Packages/LikesProgramOS/Out/KernelSetStage/Manifest.mft Packages/LikesProgramOS/Out/KernelSetStage/Modules.list $(REVISION1_STAGE)/
+
+# 修订 2 夹具卷：同一份内核与模块，MODULE_REVISION=2 另生成并签名；修订 1 作为旧快照一并放进集目录
+# 集目录落在 $(REVISION2_DIR)/Static 下，不覆盖正式集目录；正式镜像不受影响
+$(REVISION2_VOLUME): $(REVISION1_STAGE)/Manifest.mft payloads
+	@$(MAKE) -C Packages/LikesProgramOS KERNEL_IMAGE=$(abspath $(KERNEL_IMAGE_DEFAULT)) \
+	    OUT_DIR=$(abspath $(REVISION2_DIR)) KERNEL_SETS_BASE=$(abspath $(REVISION2_DIR)/Static) \
+	    MODULE_REVISION=2 PREVIOUS_MODULE_REVISION=1 \
+	    PREVIOUS_REVISION_DIR=$(abspath $(REVISION1_STAGE)) \
+	    SYSTEM_VOLUME=$(abspath $@) $(abspath $@)
+
+# 两修订夹具盘：组装器按该变体自己的内核路径回填布局描述
+$(IMAGE_REVISION2): $(REVISION2_VOLUME) payloads
+	@kernel_arg=; \
+	[ ! -f "$(REVISION2_DIR)/KernelPath" ] || kernel_arg="--kernel-path $$(cat $(REVISION2_DIR)/KernelPath)"; \
+	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(CORE) \
+	    --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(REVISION2_VOLUME) \
+	    $$kernel_arg --manifest $@.json
+
+# —— T7.1① Baleen 交接包故障注入变体（仅验证）——
+# 每个注入点单独编一份 BaleenCore（LOCAL_OUT_DIR 独立，不覆盖默认引导器），再组装一张 BIOS HDD 变体盘；
+# 这些镜像只由 check-all 的 ACCEPT 依赖构建，不在 IMAGES/VARIANT_IMAGES/deliverables 里
+.PHONY: FORCE
+FORCE:
+$(BALEEN_FAULT_DIR)/%/Bin/BaleenCore.bin: FORCE
+	@$(MAKE) -C Packages/Baleen/Core LOCAL_OUT_DIR=$(abspath $(BALEEN_FAULT_DIR)/$*) FAULT_INJECT=$*
+	@test -f "$@"
+
+# —— T7.1② 合法签名 + 故意坏容器（仅验证）——
+# 用 LikesProgramOS 的 PATCH_MODE 变体卷：先在暂存目录改坏一个闭包模块，再生成/签名清单并组装独立卷
+$(FAULT_VOLUME_DIR)/container/LikesProgram.img: payloads
+	@$(MAKE) -C Packages/LikesProgramOS KERNEL_IMAGE=$(abspath $(KERNEL_IMAGE_DEFAULT)) \
+	    RUNTIME_OUT_DIR=$(abspath $(OUT_DIR)/FaultVolumeContainer) \
+	    RUNTIME_VOLUME=$(abspath $@) PATCH_MODE=corrupt $(abspath $@)
+
+$(FAULT_VOLUME_DIR)/init/LikesProgram.img: payloads
+	@$(MAKE) -C Packages/LikesProgramOS KERNEL_IMAGE=$(abspath $(KERNEL_IMAGE_DEFAULT)) \
+	    RUNTIME_OUT_DIR=$(abspath $(OUT_DIR)/FaultVolumeInit) \
+	    RUNTIME_VOLUME=$(abspath $@) PATCH_MODE=initfail $(abspath $@)
+
+$(OUT_DIR)/LikesProgram.fault-%.hdd: $(BALEEN_FAULT_DIR)/%/Bin/BaleenCore.bin payloads
+	@$(MAKE) --no-print-directory payload-report
+	@kernel_arg=; \
+	[ ! -f "$(KERNEL_PATH_FILE)" ] || kernel_arg="--kernel-path $$(cat $(KERNEL_PATH_FILE))"; \
+	Tools/Bin/TestInstaller --out $@ --mbr $(MBR) --stub $(STUB) --core $(BALEEN_FAULT_DIR)/$*/Bin/BaleenCore.bin \
+	    --descs $(DESC_DIR) --sector-bytes $(DISK_SECTOR_BYTES) --esp $(ESP_IMAGE) --system-volume $(SYSTEM_VOLUME) \
+	    $$kernel_arg --manifest $@.json
+
+$(IMAGE_FAULT_CONTAINER): $(FAULT_VOLUME_DIR)/container/LikesProgram.img payloads
+	$(call assemble-runtime-hdd,$@,$(OUT_DIR)/FaultVolumeContainer/KernelPath,$(FAULT_VOLUME_DIR)/container/LikesProgram.img)
+
+$(IMAGE_FAULT_INIT): $(FAULT_VOLUME_DIR)/init/LikesProgram.img payloads
+	$(call assemble-runtime-hdd,$@,$(OUT_DIR)/FaultVolumeInit/KernelPath,$(FAULT_VOLUME_DIR)/init/LikesProgram.img)
 
 # —— 吊销/防回滚变体的输入与中间产物 ——
 # 这些目标直接调用组装工具与子包 Makefile，不递归本文件的 hdd 目标（否则文件目标会绕圈）。
@@ -588,21 +777,22 @@ help:
 	    '                         例：make run-win hdd qemu built bios' \
 	    '                         显示方式可覆盖：QEMU_DISPLAY_WIN= / BOCHS_DISPLAY_WIN=' \
 	    '  make run-uefi          = make run iso qemu built uefi' \
-	    '  make deliverables      构建默认两份镜像与全部验收变体（4Kn / 降级 / 吊销三档）' \
-	    '  make variants          只构建验收变体镜像' \
+	    '  make deliverables      构建默认两份镜像与全部验证变体（4Kn / 降级 / 吊销三档）' \
+	    '  make variants          只构建验证变体镜像' \
 	    '  make check-all [WITH_BOOT=1]' \
-	    '                         宿主侧 9 个检查工具串行跑完，出一张“通过/失败 + 用例计数”表；' \
-	    '                         WITH_BOOT=1 先建默认镜像与全部验收变体，再跑十档启动矩阵' \
-	    '                         （BIOS 六档 + UEFI 四档；32 位 UEFI 固件可用时再加 IA32 一档），' \
-	    '                         每档三列：进内核 / 刷新路径 / 诊断编号' \
-	    '                         之后再跑引导状态演练：在介质副本上造出空区域、两份损坏、候选失败、' \
-	    '                         只剩痕迹等状态，各起一次真实引导，按“进内核/停机 + 编号 + 状态是否推进”核对' \
+	    '                         宿主侧 30 个检查工具（994 例）串行跑完，出一张“通过/失败 + 用例计数”表；' \
+	    '                         WITH_BOOT=1 先建默认镜像与全部验证变体，再跑十二档启动矩阵' \
+	    '                         （BIOS 六档 + UEFI 五档；32 位 UEFI 固件可用时再加 IA32 一档），' \
+	    '                         每档九列：进内核 / 刷新路径 / 诊断编号 / 预装 / 闭包 Init / 挂卷 /' \
+	    '                         清单 / ISO 源 / 运行期' \
+	    '                         之后再跑运行期模块 4 档与引导状态演练 19 档：在介质副本上造出空区域、' \
+	    '                         两份损坏、候选失败、只剩痕迹等状态，各起一次真实引导，按“进内核/停机 + 编号 + 状态是否推进”核对' \
 	    '                         输出落 $(OUT_DIR)/check/ —— 构建产物，不是证据目录，clean 会删；' \
 	    '                         EVIDENCE_DIR=<Out 之外的目录> 转成脚本 --evidence，长期留存记录' \
-	    '  make check-all ACCEPT=1  工业验收：再加失败注入（描述符区 / Stub / BaleenCore / 布局描述逐层弄坏）、' \
+	    '  make check-all ACCEPT=1  扩展验证：再加失败注入（旧注入 11 档 + Baleen 交接包 6 档 + 坏容器/Init 失败 2 档）、' \
 	    '                         NVMe 与 4Kn 介质控制器、引导状态机多轮、吊销/防回滚三档' \
 	    '                         参数透传：CHECK_ALL_ARGS="--out /tmp/check --timeout 120"' \
-	    '  make reproducible-check 两次 clean-all + 全量构建，比对交付物 sha256（要求 .cache/Keys 已有密钥）' \
+	    '  make reproducible-check 两次 clean-all + 全量构建，比对 51 份交付物 sha256（要求 .cache/Keys 已有密钥）' \
 	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与两类工具' \
 	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；只影响 Ext4 分区项，ESP 固定双份' \
 	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME（默认取真实产物，缺失时用占位件）' \

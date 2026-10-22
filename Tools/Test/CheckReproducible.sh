@@ -77,7 +77,16 @@ Packages/Baleen/Core/Out/Bin/BaleenCore.bin
 Packages/Baleen/Stub/Out/Bin/BaleenStub.bin
 Packages/Baleen/Ipl/Out/Bin/BaleenIPL.bin
 Packages/Baleen/Ipl/Out/Bin/BaleenIPLCd.bin
-Packages/LikesProgramOS/Out/LikesProgram.img"
+Packages/LikesProgramOS/Out/LikesProgram.img
+Packages/LikesProgramOS/Out/KernelSetStage/LikesProgram.os
+Packages/LikesProgramOS/Out/KernelSetStage/Modules.list
+Packages/LikesProgramOS/Out/KernelSetStage/Manifest.mft
+Packages/LikesProgramOS/Out/BuildId
+Packages/LikesProgramOS/Out/KernelPath
+Packages/KernelModules/Out/Modules/*.osm
+Packages/LikesProgramOS/Static/LikesProgram/System/KernelSets/*/Modules/*.osm
+Packages/LikesProgramOS/Static/LikesProgram/System/KernelSets/*/Manifest.*.mft
+Packages/LikesProgramOS/Static/LikesProgram/System/KernelSets/*/Modules.*.list"
 
 # 结论行同时进终端与汇总文件
 say() {
@@ -96,7 +105,7 @@ clean_all() {
     fi
 }
 
-# 全量构建：交付物 + 验收变体；时间戳/密钥编号取固定值，两把密钥都用仓库外的持久输入
+# 全量构建：交付物 + 验证变体；时间戳/密钥编号取固定值，两把密钥都用仓库外的持久输入
 build_once() {
     label=$1
     log=$work/build-$label.log

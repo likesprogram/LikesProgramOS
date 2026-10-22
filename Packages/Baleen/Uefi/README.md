@@ -21,7 +21,8 @@ x64 侧与 BIOS 路径**同进度**：从固件加载起，一路做到把内核
 
 | 步骤 | 状态 |
 | --- | --- |
-| 取介质块设备（块设备协议 → `Storage::BlockDevice`） | 已实现 |
+| 取介质块设备（块设备协议 → `Storage::BlockDevice`） | 已实现：固件块设备协议优先；被加载设备是分区时沿设备路径上溯到整盘 |
+| 自建控制器路径（固件没有块协议时的回退） | 已实现：经 `EFI_PCI_IO_PROTOCOL` 定位启动控制器，按类码走 AHCI（ATA 盘，512 字节块）或 NVMe（512 / 4096 字节块）只读路径；读逻辑与内核侧模块共用同一份源码（`Packages/KernelModules/Ahci`、`Nvme`），失败编号 `E-UEFI-100..104`；只读、不申报刷新原语 |
 | 读并校验布局描述（字节偏移 `0x20000`） | 已实现，判据与 BaleenCore 共用 `LayoutCheck`：固定字段与标志位、保留字段、校验和、尾部保留区 `[0x144, 0x1000)` 全 0，以及 `KernelPath` 的统一路径语法 |
 | 挂 Ext4 系统卷并核对卷标识 | 已实现，复用 `Packages/Baleen/Core` 的只读实现 |
 | 列出内核集目录 | 已实现，含目录项类型与长度 |
@@ -29,22 +30,23 @@ x64 侧与 BIOS 路径**同进度**：从固件加载起，一路做到把内核
 | 选版（引导状态记录读写、四态决策、写失败降级） | 已实现，复用 `SelectSet`（按 x64 编同一份源码） |
 | 清单验签、防回滚、吊销判定 | 已实现，复用 `ManifestVerify` / `Revocation` / 内嵌信任锚 |
 | 定位、校验并装载内核镜像 | 已实现，复用 `LoadKernel`：镜像先读进固件分配的中转缓冲（`AllocatePages`，`AllocateAnyPages`，页数按镜像文件长度向上取整；失败报 `E-UEFI-86`）；固定装载地址在退出启动服务之前不写，装载跨度与 `LoadedImage` 区间重叠报 `E-UEFI-91` |
+| 预装引导闭包并生成交接包 | 已实现（M2 起，与 BIOS 侧共用 `BootClosure`）：解析 `Modules.list` 并按 `BootClosure.def` 筛出闭包成员，规划落点（UEFI 侧经 `AllocatePages` 注入），逐条核对最小读取面、字节数与清单摘要后读进内存（列表里的运行期条目跳过），失败不交接半套；成功行 `boot closure preloaded: count=13 bytes=<m> bad=0`。清单副本、`Modules.list` 副本与预装记录随 `BootInfo` 交给内核，内容与判据与 BIOS 路径一致 |
 | 系统卷里没有内核镜像 | 已实现：报 `E-UEFI-32`（WARN）后报 `E-UEFI-58`（同 `E-CORE-58`，WARN），停在边界上、不交接 |
 | 固件内存图 → `BootInfo` | 已实现：紧贴 `ExitBootServices` 的 MapKey 循环取最终快照（取图缓冲在退出前分配）；退出后按退出后视角转换（常规内存与启动服务 / 引导器内存都归系统，运行期服务 / ACPI NVS / MMIO 始终不可用），最终所有权核对与 `BootInfo` 都用这份视图 |
 | 退出启动服务（MapKey 过期重取） | 已实现：退出前从 `LoadedImage` 协议取出并保存引导器装载跨度（无效报 `E-UEFI-87`）、取最终内存图；退出后按最终内存图核对固定装载跨度整段归系统且不与引导器映像重叠（不满足报 `E-UEFI-88`），再拷入固定地址并清零未落盘尾部，`BootInfo` 标记 `UefiExited` |
 | 按内核入口契约交接 | 已实现：`EnterKernel.asm` 关中断、换栈、`RDI` 传 `BootInfo` 后跳入口 |
 
-当前边界之后的事由内核接手：内核入口第一步核对 `BootInfo` 里的固件状态并确认启动服务已失效，随后自建段表、页表与页帧分配器。
+当前边界之后的事由内核接手：内核入口第一步核对 `BootInfo` 里的固件状态并确认启动服务已失效，随后自建段表、页表与页帧分配器，校验交接包并装载 13 个引导闭包模块。
 
 ## 与 BIOS 路径的差别
 
 | 项 | BaleenCore（BIOS） | 本包（UEFI） |
 | --- | --- | --- |
-| 介质访问 | Stub 交来的读盘服务（实模式弹跳） | 固件块设备协议；被加载设备是分区时沿设备路径上溯到整盘 |
+| 介质访问 | Stub 交来的读盘服务（实模式弹跳） | 固件块设备协议优先；被加载设备是分区时沿设备路径上溯到整盘。固件没有块协议时走 PCI 自建路径（AHCI ATA / NVMe 只读） |
 | 内存图 | Stub 从 E820 取 | 固件 `GetMemoryMap`：紧贴 `ExitBootServices` 取最终快照（MapKey 过期会重取），退出后按退出后视角转换（常规内存与启动服务 / 引导器内存都归系统，运行期服务 / ACPI NVS / MMIO 始终不可用）。`Convert` 保留退出前 / 退出后两种视角（退出前只有常规内存可用），本路径只用退出后的那份 |
 | 内核装载内存所有权 | 按 E820 可用区间核对后直接写入（没有分配接口） | 内核镜像先读进固件分配的中转缓冲（`E-UEFI-86`）；固定装载跨度在退出启动服务之前不写，退出后按最终内存图确认整段归系统且不与引导器映像重叠，才拷入（`E-UEFI-88`），不覆盖固件内存 |
 | 控制台 | VGA 文本 + 0xE9 + COM1 | 固件控制台（退出启动服务前）+ COM1（`SerialTarget::Probe` 通过才挂）+ 0xE9（退出后） |
-| 刷新原语 | 自建 AHCI / 传统 IDE 探测 | 固件的 `FlushBlocks`，不自建控制器路径；只有可写介质、协议 `REVISION2` 以上且固件未报 `EFI_UNSUPPORTED` 时才声称可刷新，只读介质按 `ReadOnly` 处理 |
+| 刷新原语 | 自建 AHCI / 传统 IDE 探测 | 固件路径用 `FlushBlocks`：只有可写介质、协议 `REVISION2` 以上且固件未报 `EFI_UNSUPPORTED` 时才声称可刷新，只读介质按 `ReadOnly` 处理。自建控制器路径只读，不申报刷新原语（`Writable=false`、`Flush` 返回 `ReadOnly`） |
 | 机器状态准备 | 自建恒等映射页表、切长模式 | 已在长模式与固件页表上运行，直接按契约交接 |
 | 引导耗时 | 报 `E-CORE-55`，判据来自 Stub 校准的 TSC | 报 `E-UEFI-55`，判据来自 TSC（先问 CPUID 0x15/0x16，问不出来就用 8254 实测一次）；两条路都失败时报 `Verdict=NoClock`，不报编号 |
 | 异常诊断 | 自建 GDT/IDT，异常落进自己的诊断行 | **沿用固件的表**：固件处理程序给出完整寄存器现场且不依赖启动服务，自己重写一份只会更差；内核入口随后换上自己的表 |
@@ -142,7 +144,11 @@ qemu-system-x86_64 -machine q35 -m 512 -display none -monitor none -no-reboot \
 [ OK ] The boot page tables are installed
 ```
 
-`make check-all WITH_BOOT=1` 会把这四档（HDD / ISO / U 盘 / 4Kn U 盘）与 BIOS 六档一起跑，每档抽三列；四档的“进内核”都应为“是”——判定不止内核横幅，还要求“清单已验证 / 已退出启动服务 / 内核已放到装载地址”三条步骤标记都出现。32 位固件与 `qemu-system-i386` 可用时，矩阵再加 IA32 提示档（OVMF32 加载 `BOOTIA32.EFI`，只验证 `E-UEFI-11`、不进内核）。
+`make check-all WITH_BOOT=1` 会把这五档（HDD / ISO / U 盘 / 4Kn U 盘 / NVMe 4Kn）与 BIOS 六档一起跑，每档抽九列（进内核 / 刷新路径 / 诊断编号 / 预装 / 闭包Init / 挂卷 / 清单 / ISO源 / 运行期）；五档的“进内核”都应为“是”——判定不止内核横幅，还要求“清单已验证 / 已退出启动服务 / 内核已放到装载地址”三条步骤标记都出现。32 位固件与 `qemu-system-i386` 可用时，矩阵再加 IA32 提示档（OVMF32 加载 `BOOTIA32.EFI`，只验证 `E-UEFI-11`、不进内核）。
+
+## 验证
+
+QEMU + OVMF（HDD / ISO / U 盘 / 4Kn U 盘 / NVMe 4Kn 五档，IA32 提示档）与 BIOS 侧一起纳入全量验证；`--accept` 另跑强制自建控制器路径三档（AHCI HDD、NVMe 4Kn 两档正例 + USB 类码负例 `E-UEFI-102`，强制路径变体 `CONTROLLER_PATH=1`），证明同一份 UEFI 代码在真实 AHCI/NVMe 设备上完成卷标识核对、清单验证、预装 13 与交权。正例启动矩阵、失败注入、状态演练、可复现构建的结论与证据入口见 [Baleen 验证报告](../../../Docs/Test/Baleen-验证报告.md)。实机边界见报告排除项。
 
 ## 边界
 
@@ -151,6 +157,8 @@ qemu-system-x86_64 -machine q35 -m 512 -display none -monitor none -no-reboot \
 - **不做镜像头字段校验**：本包不链接 `ImageHeader`，`E-UEFI-40..51` 不由本阶段产生——镜像头自校验只属于 Stub 与 BaleenCore 自身（`E-STUB-40..51` / `E-CORE-40..51`）；把 `ImageHeader` 链进来只会让不产生的编号留在二进制里。
 - **只在 x64 固件上被加载**：32 位固件走 `BOOTIA32.EFI`，那一件只提示、不引导。
 - **介质类型按块大小判定**：`BootInfo` 的 `media` 字段取“光盘为 2048 字节块、其余为硬盘”，这是交接事实里唯一靠推断的一项。
-- **没有自建控制器路径**：规格 4 允许“固件覆盖不到该控制器时走 Baleen 的最小控制器路径”，本包未实现——UEFI 固件普遍为 NVMe / AHCI 提供块协议，而本机造不出“固件故意不提供块协议”的用例，写了也无法验证。真遇到这种固件时，失败点是 `E-UEFI-16`，现场明确。
+- **自建控制器路径只覆盖只读的两类盘**：AHCI 侧只支持 ATA 盘（512 字节逻辑块），ATAPI（光盘）与 4Kn SATA 不在当前阶段；NVMe 支持 512 / 4096 字节逻辑块。自建路径不写介质、不申报刷新原语，引导状态写入按只读介质降级（`E-UEFI-70` WARN），不做 `Pending` / `Trying` 转换。
+- **自建路径的测试载体是强制变体**：QEMU/OVMF 无法构造“固件故意不给块协议”的现场，因此用 `CONTROLLER_PATH=1` 强制忽略固件块协议，在同一台模拟 AHCI/NVMe 设备上验证同一份代码；真实固件不提供块协议的现场仍属实机验证门。
+- **DMA 与 MMIO 假设**：自建路径在启动服务阶段按 x86_64 固件的恒等映射直接访问 BAR，并把 `AllocatePages` 返回的物理地址交给设备做 DMA；不处理 IOMMU。这是最小启动路径的明确边界，QEMU/OVMF 与 PC 固件常态如此。
 - **不报引导耗时的情形**：CPUID 给不出频率、且 8254 实测的 TSC 频率落在 100 MHz..100 GHz 之外时，报 `Verdict=NoClock`，不报 `E-UEFI-55`——宁可说没有校准源，也不报一个假数字。
 - **校准时机**：8254 的实测在校验退出启动服务之后做，那时定时器归本阶段使用，不与固件抢。

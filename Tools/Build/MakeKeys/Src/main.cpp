@@ -2,7 +2,7 @@
     MakeKeys：生成与导出开发期 Ed25519 密钥，并从公钥生成引导器内嵌的信任锚源文件
 
     开发期自签约定：密钥对放在仓库外（默认 .cache/Keys，已被忽略），首次生成后复用；
-    私钥不进仓库、不进镜像；换锚 = 重新生成密钥并重建引导器，见 Docs/Specs/内核集清单与签名.md
+    私钥不进仓库、不进镜像；换锚 = 重新生成密钥并重建引导器
     --anchor-cpp 从公钥生成 C++ 源，供 BaleenCore 编译进镜像；--anchor-text 生成同一张锚表的
     纯文本形态（每行 "<KeyId> <公钥 64 位十六进制>"），供 SignManifest 校验签名密钥在锚表里
     轮换窗口里的旧公钥由 --anchors 从进版本库的附加锚输入读入，与当前密钥合并成同一张表，
@@ -171,7 +171,7 @@ namespace {
         text += "    引导器内嵌的信任锚表（生成物）：由 Tools/Bin/MakeKeys 从当前密钥与附加锚输入合并生成\n";
         text += "\n";
         text += "    附加锚输入是进版本库的轮换窗口列表（MakeKeys --anchors），当前密钥来自仓库外的开发期种子；\n";
-        text += "    本文件不进版本库：换锚 = 重新生成密钥并重建引导器，见 Docs/Specs/内核集清单与签名.md 第四、五节\n";
+        text += "    本文件不进版本库：换锚 = 重新生成密钥并重建引导器\n";
         text += "*/\n";
         text += "\n";
         text += "#include <TrustAnchor.hpp>\n";
@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
             if (entries.size() < 2) {
                 std::cerr << "MakeKeys: 警告 信任锚表只有 " << entries.size()
                           << " 条：该密钥泄露后无法用签名吊销记录吊销它，请把第二把公钥放进轮换窗口的保留锚条目"
-                             "（--anchors），见 Docs/Specs/内核集清单与签名.md 5.1\n";
+                             "（--anchors）\n";
             }
         }
         return 0;

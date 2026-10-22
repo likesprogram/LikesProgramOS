@@ -2,7 +2,6 @@
 ;    Baleen 各级引导的交权契约常量：装载窗口、实模式栈顶、介质编号与 Stub → BaleenCore 交权
 ;
 ;    这些取值同时约束交权双方（IPL 与 Stub、以及后续的 BaleenCore），改动必须两边一致
-;    取值依据见 Docs/Specs/Baleen/一级引导契约.md 与 Packages/Baleen/Stub/README.md
 
 LOAD_TOP         EQU 0x7E00      ; Stub 装入点，即 [0x7E00,0x10000) 窗口下端
 LOAD_CEIL        EQU 0x10000     ; Stub 窗口上端，不含

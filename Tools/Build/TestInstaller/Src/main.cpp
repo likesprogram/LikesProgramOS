@@ -79,7 +79,7 @@ namespace {
         std::string esp;                                                   // Esp 文件路径
         std::string system_volume;                                         // 系统卷文件路径
         std::string layout;                                                // 布局描述模板：提供内核路径，位置字段仍由本工具回填
-        std::string kernel_path;                                           // 内核路径覆盖值；空表示取模板或默认路径
+        std::string kernel_path;                                           // 内核路径；空表示取模板，两者都没有时报错（旧扁平默认已退役）
         std::string manifest;                                              // 构建清单输出路径
         uint64_t pad_to = kDefaultPadTo;                                   // 镜像总长的对齐粒度
         uint32_t sector_bytes = 512;                                       // 目标磁盘的逻辑扇区大小：512 或 4096
@@ -87,7 +87,7 @@ namespace {
         bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
         bool core_unchecked = false;                                       // 是否免除 BaleenCore 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
-        // 记录损坏时允许退到缺省集：写进布局描述的标志位（默认不置位，见布局描述第七节）
+        // 记录损坏时允许退到缺省集：写进布局描述的标志位（默认不置位）
         bool degrade_without_record = false;                               // 布局描述：记录损坏时退到缺省集
         std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移，空表示自动分配
     };
@@ -114,8 +114,8 @@ namespace {
             "  --descs DIR               描述符段产物目录（默认 Packages/Baleen/Common/Out/Descs）\n"
             "  --esp PATH                ESP 的 FAT16 镜像（含 \\EFI\\BOOT\\BOOTX64.EFI），0 号分区\n"
             "  --system-volume PATH      Ext4 系统卷镜像，1 号分区\n"
-            "  --layout PATH             布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用旧扁平路径 /LikesProgram/System/LikesProgram.os（选版启用的引导器会拒绝，见 E-CORE-84）\n"
-            "  --kernel-path PATH        覆盖内核路径（卷内绝对路径），优先于模板\n"
+            "  --layout PATH             布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；与 --kernel-path 至少给一个，没有默认路径\n"
+            "  --kernel-path PATH        内核路径（卷内绝对路径），优先于模板；显式给扁平路径只用于构造 E-CORE-84 负例\n"
             "  --raw 宿主路径[@偏移]      原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
             "  --stub-unchecked          免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
             "  --core-unchecked          免除 BaleenCore 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
@@ -303,8 +303,10 @@ int main(int argc, char** argv) {
             if (options.degrade_without_record) spec.flags |= Baleen::LayoutDescriptor::kFlagDegradeWithoutRecord;
             if (!options.kernel_path.empty()) spec.kernel_path = options.kernel_path;
             else if (!options.layout.empty()) spec.kernel_path = ReadTemplateKernelPath(options.layout);
-            // 选版启用的引导器只接受 KernelSets/<BuildId>/<相对路径> 形态：默认模板的旧扁平路径
-            // 会生成无法通过选版的镜像，这里提前告警而不是静默产出
+            // 内核路径必须显式给出：旧扁平默认路径已退役，不再静默产出必被选版拒绝的镜像
+            if (spec.kernel_path.empty()) throw std::runtime_error("布局描述缺少内核路径：用 --kernel-path 指定，或用 --layout 模板提供（旧的扁平默认路径已退役）");
+            // 选版启用的引导器只接受 KernelSets/<BuildId>/<相对路径> 形态：显式给出的其它形态
+            // 会生成无法通过选版的镜像，这里提前告警而不是静默产出（仅供构造 E-CORE-84 负例）
             if (spec.kernel_path.find("/KernelSets/") == std::string::npos)
                 std::cerr << "TestInstaller: 警告：布局描述的内核路径推不出 KernelSets/<BuildId>/ 形态，选版启用的引导器会拒绝启动（E-CORE-84）：" << spec.kernel_path << "\n";
             const std::vector<uint8_t> block = BuildBaleenLayout(spec);

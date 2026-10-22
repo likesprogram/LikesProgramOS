@@ -41,7 +41,7 @@ MAX_STUB_BYTES   EQU ((LOAD_CEIL - LOAD_TOP) >> SECT_SHIFT) << SECT_SHIFT
 %ERROR "IPL 单批读取超过 EDD 的 127 块上限"
 %ENDIF
 
-; —— 失败诊断码：大于零的整数，输出时转成一位十六进制字符；登记编号与含义见 Docs/Specs/Baleen/失败诊断编号.md ——
+; —— 失败诊断码：大于零的整数，输出时转成一位十六进制字符 ——
 ; 码值与登记编号同号，按检查顺序连续编号
 ERR_DESC_READ    EQU 1           ; 描述符所在扇区读取失败（仅硬盘入口）
 ERR_MEDIA        EQU 2           ; 驱动器号或 AH=48 查询结果不受支持

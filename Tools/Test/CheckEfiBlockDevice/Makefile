@@ -13,11 +13,15 @@ UEFI_DIR := ../../../Packages/Baleen/Uefi
 COMMON_INC := ../../../Packages/Common/Include
 # Baleen 引导期公共部件的头文件：诊断编号与 BootInfo 契约，UefiMemory.cpp 直接包含
 BALEEN_COMMON_DIR := ../../../Packages/Baleen/Common
+# BaleenCore 的预装机制头：UefiMemory 的 UefiAllocator 实现 SpanAllocator，需要它的接口
+CORE_DIR := ../../../Packages/Baleen/Core
+# 契约层生成物：BootClosure.hpp 与生成的引导闭包期望集头
+CONTRACT_DIR := $(COMMON_INC)/../Out/Contract
 
 # C++ 编译器
 CXX      ?= g++
-# 预处理选项：固件侧结构定义、被测类的头文件、共用存储接口与引导期公共头文件
-CPPFLAGS ?= -I$(UEFI_DIR)/Include -I$(COMMON_INC) -I$(BALEEN_COMMON_DIR)/Include
+# 预处理选项：固件侧结构定义、被测类的头文件、共用存储接口、引导期公共头文件与预装机制接口
+CPPFLAGS ?= -I$(UEFI_DIR)/Include -I$(COMMON_INC) -I$(BALEEN_COMMON_DIR)/Include -I$(CORE_DIR)/Include -I$(CONTRACT_DIR)
 # 编译选项：常见警告全开并视为错误
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 # 链接选项：链接器警告视为错误

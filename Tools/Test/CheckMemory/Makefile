@@ -1,5 +1,5 @@
 # Makefile
-#    CheckMemory —— 引导期内存图可用性判定与弹跳窗口搜索的宿主侧检查（C++20）
+#    CheckMemory —— 引导期内存图可用性判定、弹跳窗口搜索与内核页帧预留的宿主侧检查（C++20）
 
 # 中间对象目录
 OBJ_DIR  ?= Obj
@@ -12,11 +12,16 @@ BALEEN_COMMON_SRC := ../../../Packages/Baleen/Common/Src
 # 判定与内存图条目的头文件目录
 BALEEN_COMMON_INC := ../../../Packages/Baleen/Common/Include
 COMMON_INC        := ../../../Packages/Common/Include
+# 内核页帧分配器的交付源码与头文件目录：本工具直接编译这一份，不复制实现
+KERNEL_SRC := ../../../Packages/LikesProgramOS/Core/Src
+KERNEL_INC := ../../../Packages/LikesProgramOS/Core/Include
+# 宿主侧替身头目录：Paging.hpp 的直映射在宿主上按恒等换算，见 Include/Paging.hpp
+SHIM_INC   := Include
 
 # C++ 编译器
 CXX      ?= g++
-# 预处理选项：目标侧头文件
-CPPFLAGS ?= -I$(BALEEN_COMMON_INC) -I$(COMMON_INC)
+# 预处理选项：替身头必须排在内核头之前，否则 Memory.cpp 会取到真正的 Paging.hpp
+CPPFLAGS ?= -I$(SHIM_INC) -I$(KERNEL_INC) -I$(BALEEN_COMMON_INC) -I$(COMMON_INC)
 # 编译选项：常见警告全开并视为错误
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror
 # 链接选项：链接器警告视为错误
@@ -24,8 +29,8 @@ LDFLAGS  ?= -Wl,--fatal-warnings
 
 # 本工具的可执行文件
 BIN  := $(BIN_DIR)/CheckMemory
-# 目标文件：main 是用例，BootMemory 取自 Baleen 共用源码
-OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/BootMemory.o
+# 目标文件：main 是用例，BootMemory 取自 Baleen 共用源码，Memory 与 Libc 取自内核交付实现
+OBJS := $(OBJ_DIR)/main.o $(OBJ_DIR)/BootMemory.o $(OBJ_DIR)/Memory.target.o $(OBJ_DIR)/Libc.target.o
 
 vpath %.cpp $(SRC_DIR) $(BALEEN_COMMON_SRC)
 
@@ -39,6 +44,15 @@ $(BIN): $(OBJS) | $(BIN_DIR)
 
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+
+# 内核交付实现：与上一条同源编译，对象另起名字避免与 Baleen 侧同名源撞车
+# -ffreestanding 与交付构建一致，同时防止 GCC 把 Libc 的循环识别成对同名函数的调用（宿主模式
+# 下 -ftree-loop-distribute-patterns 会生成自递归的 memset），交付构建本来就用 -ffreestanding
+$(OBJ_DIR)/Memory.target.o: $(KERNEL_SRC)/Memory.cpp | $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -ffreestanding -MMD -MP -c -o $@ $<
+
+$(OBJ_DIR)/Libc.target.o: $(KERNEL_SRC)/Libc.cpp | $(OBJ_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -ffreestanding -MMD -MP -c -o $@ $<
 
 $(BIN_DIR) $(OBJ_DIR):
 	mkdir -p $@

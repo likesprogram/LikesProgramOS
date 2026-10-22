@@ -6,8 +6,7 @@
     机器上一个阶段找得到窗口、另一个阶段找不到
     本文件只做机制：不打印、不停机，调用方按返回值处理
 
-    窗口范围与大小是 Stub 装载与 BaleenCore 读盘的共同策略，取值依据见
-    Docs/Specs/Baleen/一级引导契约.md 与 Packages/Baleen/Stub/README.md 第二节
+    窗口范围与大小是 Stub 装载与 BaleenCore 读盘的共同策略，由本文件的常量统一给出
 */
 
 #pragma once

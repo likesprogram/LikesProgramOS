@@ -1,7 +1,7 @@
 /* Ext4.hpp
     BaleenCore 的 Ext4 只读最小实现：识别并挂载卷、按路径查找、按 extent 读常规文件、按游标列目录
 
-    能力边界见 Docs/Specs/Baleen/README.md 第五节：识别 superblock 与特性标志、读块组描述符
+    能力边界：识别 superblock 与特性标志、读块组描述符
     与 inode、走 extent 树、解析线性目录项、读常规文件、列线性目录；不支持的特性、
     htree 索引目录、符号链接与内联数据都明确拒绝，不做兼容性猜测
     卷格式的接受与拒绝清单取 Packages/Common/Include/Storage/Ext4Features.hpp，与内核实现同源

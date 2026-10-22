@@ -209,7 +209,7 @@ namespace {
         Fail(command.front() + " 执行超时；日志 " + log.string());
     }
 
-    // —— 介质与镜像常量：与一级引导契约、Stub 说明及 CoreHandoff.hpp 一致 ——
+    // —— 介质与镜像常量：与一级引导契约及 CoreHandoff.hpp 一致 ——
     // 描述符区独占一个扇区：头部之后是段序列，每段自带长度；位置只按扇区表达
     constexpr std::size_t kAreaOffset = 0x22000;           // 描述符区在介质上的字节偏移（LBA 272 / 68 / 34）
     constexpr std::size_t kStubSegmentOffset = 0x22010;    // Stub 段：头部 16 字节之后

@@ -1,0 +1,17 @@
+# Makefile.ok
+#    Optional 成功变体的构建入口：同一源码加 -DOPTIONAL_INIT_OK 重编一份
+#
+#    默认 Makefile 产出失败版（Init 返回 kCorrupt），用于「可选运行期模块失败 WARN 不重启」
+#    注入；本文件产出成功版，用于同集的对照证据
+#    产物目录与失败版分开（Out/Ok/），两份文件同名、同版本、同 ModuleId，只有内容不同
+#    用法：make -C Packages/KernelModules/Optional -f Makefile.ok [all|check|package|clean]
+#
+#    CXXFLAGS 的追加写在 include 之后：ModuleRules.mk 用 ?= 给默认编译选项，追加放在它
+#    之后才能既保留默认选项又带上宏；放在 Module.mk 里会先定义 CXXFLAGS 而吃掉默认值
+#    产物：$(OUT_DIR)/Modules/Optional.1.0.0.osm（OUT_DIR 默认本目录的 Out/Ok）
+
+OUT_DIR ?= $(CURDIR)/Out/Ok
+
+include $(CURDIR)/../Common/ModuleRules.mk
+
+CXXFLAGS += -DOPTIONAL_INIT_OK

@@ -43,8 +43,7 @@ namespace {
     static_assert(offsetof(SystemTable, consoleOut) == 44, "EFI_SYSTEM_TABLE 的 ConOut 偏移已变");
     static_assert(offsetof(SimpleTextOutput, outputString) == 4, "简单文本输出协议的 OutputString 偏移已变");
 
-    // 提示文本：编号与文本在 Docs/Specs/Baleen/失败诊断编号.md 第四节登记
-    // 与 BaleenCore 的 E-CORE-11 同号：两侧都表达“平台的位数/模式不满足内核要求”，此处判据是固件架构
+    // 提示文本：与 BaleenCore 的 E-CORE-11 同号：两侧都表达“平台的位数/模式不满足内核要求”，此处判据是固件架构
     const char16_t kMessage[] =
         u"[ FATAL ] E-UEFI-11 The firmware is 32-bit UEFI (IA32): the UEFI boot path and the kernel require x64\r\n"
         u"\r\n"

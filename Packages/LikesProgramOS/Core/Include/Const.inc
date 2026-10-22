@@ -6,10 +6,11 @@
 
 KERNEL_LOAD          EQU 0x1000000   ; 内核映像的装载物理地址，2MiB 对齐
 KERNEL_ENTRY_OFFSET  EQU 0x80        ; 入口的文件偏移，即数据块之后的第一个字节
-KERNEL_STACK_BYTES   EQU 0x4000      ; 内核运行期栈，在未初始化区，向下增长
+KERNEL_STACK_BYTES   EQU 0x8000      ; 内核运行期栈，在未初始化区，向下增长
 
 KERNEL_DATA_BYTES    EQU 0x80        ; 内核镜像数据长度
 KERNEL_DATA_VERSION  EQU 1           ; 数据格式版本
 KERNEL_DIGEST_SHA256 EQU 1           ; 摘要算法编号：SHA-256，没有“禁用摘要”值
 KERNEL_BUILDID_BYTES EQU 32          ; BuildId 长度
 KERNEL_BOOTINFO_VER  EQU 1           ; 内核要求的 BootInfo 版本，与 BootInfo.hpp 的版本一致
+KERNEL_MODULE_MAJOR  EQU 1           ; 本发布线的模块主版本；.osm 主版本必须与它相等，不承诺跨主版本兼容

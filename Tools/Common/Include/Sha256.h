@@ -1,7 +1,7 @@
 /* Sha256.h
     SHA-256 摘要算法的宿主侧实现：供 Stub 镜像的打包填充与组装校验计算摘要
 
-    与目标侧 Packages/Baleen/Common/Src/Sha256.cpp 是同一算法的两份实现，
+    与目标侧 Packages/Common/Src/Sha256.cpp 是同一算法的两份实现，
     用 FIPS 180-4 测试向量与真实镜像的摘要互验；不共享源码，宿主工具不依赖目标包
 */
 

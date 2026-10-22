@@ -31,12 +31,19 @@ NASM      ?= nasm
 LD        ?= ld
 OBJCOPY   ?= objcopy
 
+# 契约层生成物：_Contract 的接口/槽位常量由 Common 包的 MakeContract 生成（构建链的 contract-generated 目标）
+CONTRACT_DIR := $(COMMON_DIR)/Out/Contract
 # 编译选项：32 位保护模式、无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
 # 优化级别取 -Os：Baleen 的 32 位阶段在低 64KiB 静态窗口里运行，代码体积优先于指令数；
 # 宿主工具与 64 位内核各自按 -O2 编译，不受这里影响
+# FATAL 等待毫秒数：0 表示内核按默认 10 秒；测试镜像可给小值加速失败注入
+FATAL_WAIT_MS ?= 0
+# 测试用交接包故障注入：0 = 关闭（发布构建）；1..6 选一个注入点，见 Core.cpp 的 ApplyFaultInjection
+FAULT_INJECT ?= 0
 CXXFLAGS  ?= -m32 -std=c++20 -Os -ffreestanding -fno-exceptions -fno-rtti -fno-pic -fno-pie \
              -fno-stack-protector -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -MMD -MP \
-             -I$(INC_DIR) -I$(LOCAL_OUT_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include
+             -I$(INC_DIR) -I$(LOCAL_OUT_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include -I$(CONTRACT_DIR) \
+             -DFATAL_WAIT_MS=$(FATAL_WAIT_MS) -DFAULT_INJECT=$(FAULT_INJECT)
 # 汇编选项：32 位保护模式；-I 让 Src 里的 %INCLUDE 找到本包与共享的 Include；警告视为错误
 NASMFLAGS ?= -f elf32 -Werror -I$(INC_DIR)/ -I$(SHARE_DIR)/
 # 链接选项：无运行库并按 Core.ld 的固定布局；build-id 是额外的落盘节，不要，链接器警告视为错误
@@ -45,12 +52,22 @@ LDFLAGS   ?= -m elf_i386 -nostdlib -T Core.ld --build-id=none --fatal-warnings
 # 本包目标文件：Core.cpp 是主流程，Console.cpp 是控制台装配，Ext4/BiosBlockDevice/Libc 服务系统卷读取，
 # LoadKernel.cpp 定位并校验内核镜像，SelectSet.cpp 做选版（状态记录读写来自共用包的 BootState.cpp），
 # ManifestVerify.cpp 验证内核集清单与产物，
+# Sha256.o 取自 Common 的共享目标代码（按本包 32 位选项再编一份），
 # TrustAnchor.cpp 做信任锚查找，TrustAnchors.o 是构建期生成的锚表
-LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Core.o Console.o Ext4.o BiosBlockDevice.o DiskFlush.o LoadKernel.o SelectSet.o ManifestVerify.o Libc.o TrustAnchor.o TrustAnchors.o Core_asm.o)
+LOCAL_OBJS := $(addprefix $(OBJ_DIR)/,Core.o Console.o Ext4.o BiosBlockDevice.o DiskFlush.o LoadKernel.o SelectSet.o ManifestVerify.o BootClosure.o ScreenFacts.o Libc.o TrustAnchor.o TrustAnchors.o Core_asm.o Sha256.o)
+# 引导闭包期望集头是生成物：缺了就先跑契约生成器（与顶层 contract-generated 同一份工具）
+MAKE_CONTRACT := ../../../Tools/Bin/MakeContract
+$(MAKE_CONTRACT):
+	@$(MAKE) -C ../../../Tools/Build/MakeContract
+$(CONTRACT_DIR)/BootClosure.hpp: $(MAKE_CONTRACT)
+	@cd ../../.. && Tools/Bin/MakeContract
+$(OBJ_DIR)/BootClosure.o: $(CONTRACT_DIR)/BootClosure.hpp
+
 # 上游目标文件：Print 与平台原语，以及存储抽象（块设备、偏移视图、路径与文件系统接口）、内核镜像数据校验，
-# 以及引导状态记录与吊销记录（后两者是两阶段共用的一份实现，吊销记录的验签在本包侧链入）
+# 以及引导状态记录与吊销记录（后两者是两阶段共用的一份实现，吊销记录的验签在本包侧链入）；
+# 目标侧 SHA-256 已提升为 Common 的共享目标代码，不再取 Baleen/Common 的旧副本
 COMMON_OBJS := $(addprefix $(COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Cpu_asm.o Descriptor.o Descriptor_asm.o Error.o Path.o SubDevice.o FileSystem.o KernelImage.o BootState.o Revocation.o)
-BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha256.o Sha512.o Ed25519.o ImageHeader.o BootMemory.o ReadFailure.o)
+BALEEN_COMMON_OBJS := $(addprefix $(BALEEN_COMMON_DIR)/$(UPSTREAM_OBJ_DIR)/,PrintTarget.o Diagnostics.o BootClock.o VgaTextTarget.o Sha512.o Ed25519.o ImageHeader.o BootMemory.o ReadFailure.o)
 
 # 开发期签名密钥与信任锚：私钥不进仓库，缺失时由 MakeKeys 生成后复用；
 # 锚源与锚文本是生成物，随密钥变化重新生成，供 --anchor-cpp / --anchor-text 写进本包产物目录
@@ -62,7 +79,7 @@ TRUST_ANCHOR_TEXT := $(LOCAL_OUT_DIR)/TrustAnchors.txt
 # 当前密钥的信任锚编号：KEY_ID 由顶层 export 下来（默认 1），签名工具与锚表用同一个编号
 KEY_ID         ?= 1
 # 保留锚条目（生成输入，进版本库）：轮换窗口里仍要承认的旧公钥，默认空；
-# 旧公钥由这份输入复现，不依赖本地构建产物，见 Docs/Specs/内核集清单与签名.md 第五节
+# 旧公钥由这份输入复现，不依赖本地构建产物
 # 可覆盖：变体构建用 --anchors 给一份含第二把公钥的锚文本（绝对路径亦可）
 ANCHORS_FILE   ?= Anchors/Retained.txt
 # 密钥与锚生成工具：产物在 Tools/Bin，随源码交付
@@ -87,6 +104,12 @@ all: $(CORE_BIN) $(TRUST_ANCHOR_TEXT)
 # 链接：上游对象由各自包的 Makefile 生成，子 make 自己判断是否需要重编
 $(CORE_ELF): $(LOCAL_OBJS) $(COMMON_OBJS) $(BALEEN_COMMON_OBJS) Core.ld | $(BIN_DIR)
 	$(LD) $(LDFLAGS) -o $@ $(LOCAL_OBJS) $(COMMON_OBJS) $(BALEEN_COMMON_OBJS)
+	@# freestanding 阶段没有 C++ 运行库执行全局构造：.init_array 一旦出现就会把 .data 段
+	@# 撑到 __image_end 之外，PackImage 的头长度校验随之失败。这里直接拦成构建错误，
+	@# 而不是等 PackImage 报“镜像头长度不一致”这种偏离根因的消息
+	@if LC_ALL=C readelf -SW $@ | grep -q '\.init_array'; then \
+	    echo "BaleenCore 出现 .init_array：目标侧不允许全局动态初始化（改为 constexpr 或函数内静态）"; exit 1; \
+	fi
 
 # 建产物目录
 $(BIN_DIR):
@@ -108,6 +131,12 @@ $(PACK_IMAGE):
 	@$(MAKE) -C ../../../Tools/Build/PackImage
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# 目标侧 SHA-256 来自 Common 的共享目标代码（Packages/Common/Src/Sha256.cpp）：
+# 按本包 32 位选项再编一份，共享头里的 Baleen 兼容视图让未迁移的 ImageHeader.o 仍可混链
+$(OBJ_DIR)/Sha256.o: $(COMMON_DIR)/Src/Sha256.cpp
 	@mkdir -p $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -141,7 +170,7 @@ $(SECURITY_FLOOR_HPP): FORCE
 	    '    内嵌的最低允许 SecurityVersion（生成物）：由 BaleenCore 的 Makefile 按 SECURITY_FLOOR 写出' \
 	    '' \
 	    '    清单的 SecurityVersion 低于它一律拒绝；抬高它即吊销更低世代，' \
-	    '    撤销的生效点是一次可信的引导器更新，见 Docs/Specs/内核集清单与签名.md 第五节' \
+	    '    撤销的生效点是一次可信的引导器更新' \
 	    '*/' \
 	    '' \
 	    '#pragma once' \

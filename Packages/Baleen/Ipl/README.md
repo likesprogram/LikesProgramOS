@@ -95,4 +95,4 @@ IPL 不解析 `BaleenLayout.bin`、Ext4、Superblock，不做内核集选择、B
 
 Stub 自身的完整性头与摘要也不由 IPL 校验：摘要算法与轮常量放不进 446/510 字节的首段，验证因此下移给有余量的 Stub 在装入后自检；理由与检查时点见[一级引导契约](../../../Docs/Specs/Baleen/一级引导契约.md) 3.2。
 
-Stub 的进展不影响 IPL 的验收范围。IPL 的验收可使用专用探针验证完整装载、寄存器状态和失败停机。
+Stub 的进展不影响 IPL 的验证范围。IPL 的验证使用专用夹具验证完整装载、寄存器状态和失败停机，回归入口是 [CheckIpl](../../../Tools/Test/CheckIpl/README.md)（静态布局 + 59 例启动回归 + 失败注入）。全量验证结论与证据入口见 [Baleen 验证报告](../../../Docs/Test/Baleen-验证报告.md)。

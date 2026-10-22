@@ -1,7 +1,7 @@
 /* main.cpp
     SignManifest：用 Ed25519 私钥填写内核集清单的签名区，并可按信任锚表回验已签名的清单
 
-    签名覆盖按 Docs/Specs/内核集清单与签名.md 2.1：签名值 64 字节视作零，对整份清单
+    签名覆盖：签名值 64 字节视作零，对整份清单
     计算 SHA-256 与 Ed25519 签名；算法与密钥编号在覆盖范围内，签名后清单字节不得再改
     私钥是 32 字节种子文件；开发期密钥由 MakeKeys 生成在 .cache/Keys，发布期密钥离线保管
     --anchors 读 MakeKeys --anchor-text 产出的文本锚表：签名时拒绝用锚表外的密钥签，
@@ -179,7 +179,7 @@ namespace {
         for (uint16_t i = 0; i < count; ++i) {
             if (offset + ML::kEntryFixedBytes > signatureBegin) throw std::runtime_error("清单条目区越界");
             const uint8_t type = manifest[offset + ML::kEntryType];
-            if (type != ML::kTypeOs && type != ML::kTypeOsm) throw std::runtime_error("清单条目类型非法");
+            if (type != ML::kTypeOs && type != ML::kTypeOsm && type != ML::kTypeBootList) throw std::runtime_error("清单条目类型非法");
             if (type == ML::kTypeOs) ++osCount;
             const uint16_t pathBytes = Get16(manifest, offset + ML::kEntryPathBytes);
             if (pathBytes == 0 || pathBytes > ML::kEntryPathMaxBytes) throw std::runtime_error("清单条目路径长度非法");

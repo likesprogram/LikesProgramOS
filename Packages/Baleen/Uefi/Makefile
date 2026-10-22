@@ -13,9 +13,17 @@
 
 # 产物根目录
 OUT_DIR   ?= Out
+# 强制自建控制器路径的测试变体：1 时即使固件有块设备协议也走 PCI 自建路径，
+# 产物落在 Out/Controller 下，不覆盖正式产物；只用于验证，不进发布
+CONTROLLER_PATH ?= 0
+ifeq ($(CONTROLLER_PATH),1)
+LOCAL_OUT_DIR := $(OUT_DIR)/Controller
+else
+LOCAL_OUT_DIR := $(OUT_DIR)
+endif
 # 对象目录与产物目录
-OBJ_DIR   := $(OUT_DIR)/Obj
-BIN_DIR   := $(OUT_DIR)/Bin
+OBJ_DIR   := $(LOCAL_OUT_DIR)/Obj
+BIN_DIR   := $(LOCAL_OUT_DIR)/Bin
 # 源码与头文件目录
 SRC_DIR   := Src
 INC_DIR   := Include
@@ -30,6 +38,9 @@ NASM      ?= nasm
 COMMON_DIR        := ../../Common
 BALEEN_COMMON_DIR := ../Common
 CORE_DIR          := ../Core
+
+# 内核模块目录：自建控制器路径复用内核侧的 AHCI / NVMe 只读实现
+KERNEL_MODULES_DIR := ../../KernelModules
 
 # 公共编译选项：无宿主运行库、无异常与 RTTI、不开 PIC/PIE 与栈保护，警告视为错误
 # -fno-ident 去掉 .comment：它落在映像基址之下，PE 链接会为它报 "section below image base"
@@ -49,8 +60,15 @@ LDFLAGS32  ?= -m i386pe --image-base 0x400000 --enable-reloc-section --subsystem
 # -mno-red-zone 是固件环境的要求：本阶段中断是开着的，红色区域会被固件的中断处理打断
 # -DBALEEN_STAGE_PREFIX：共享实现的诊断编号前缀随阶段换（同号异前缀），序号不变
 # -I$(CORE_OUT)：ManifestVerify.cpp 引用 Core 包生成的内嵌最低安全版本头
+# FATAL 等待毫秒数：0 表示内核按默认 10 秒；测试镜像可给小值加速失败注入
+FATAL_WAIT_MS ?= 0
+# 自建控制器路径的测试变体：定义 FORCE_CONTROLLER_PATH 让 BindMedium 跳过固件块协议
+CONTROLLER_DEFINE := $(if $(filter 1,$(CONTROLLER_PATH)),-DFORCE_CONTROLLER_PATH=1,)
 CXXFLAGS64 ?= -m64 -mno-red-zone $(COMMON_FLAGS) -MMD -MP -DBALEEN_STAGE_PREFIX='"E-UEFI"' \
-              -I$(INC_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include -I$(CORE_DIR)/Include -I$(CORE_OUT)
+              -I$(INC_DIR) -I$(COMMON_DIR)/Include -I$(BALEEN_COMMON_DIR)/Include -I$(CORE_DIR)/Include -I$(CORE_OUT) \
+              -I$(COMMON_DIR)/Out/Contract -I$(KERNEL_MODULES_DIR)/Common \
+              -I$(KERNEL_MODULES_DIR)/Ahci/Src -I$(KERNEL_MODULES_DIR)/Nvme/Src \
+              -DFATAL_WAIT_MS=$(FATAL_WAIT_MS) $(CONTROLLER_DEFINE)
 # 链接选项与 32 位同一套约束，只是目标格式换成 PE32+
 LDFLAGS64  ?= -m i386pep --image-base 0x400000 --enable-reloc-section --subsystem 10 -nostdlib -e efi_main --no-insert-timestamp
 # 汇编选项：交接入口是 64 位代码，链进同一个 PE
@@ -65,18 +83,22 @@ OBJ32     := $(OBJ_DIR)/BootIa32.o
 # —— x64 引导器 ——
 # 交付产物：ESP 的 \EFI\BOOT\BOOTX64.EFI
 EFI64     := $(BIN_DIR)/BOOTX64.EFI
-# 本包自己的对象：主流程、控制台装配、块设备适配、内存图、引导计时与文本目标，外加交接入口的汇编
-LOCAL_OBJS64 := $(addprefix $(OBJ_DIR)/,BootX64.o Console.o EfiBlockDevice.o EfiTextTarget.o UefiMemory.o UefiClock.o EnterKernel.o)
+# 本包自己的对象：主流程、控制台装配、固件块设备适配、自建控制器路径、内存图、
+# 引导计时与文本目标，外加交接入口的汇编
+LOCAL_OBJS64 := $(addprefix $(OBJ_DIR)/,BootX64.o Console.o EfiBlockDevice.o ControllerPath.o EfiTextTarget.o UefiMemory.o ScreenFacts.o UefiClock.o EnterKernel.o)
+# 自建控制器路径复用的内核模块只读实现（同一份源码按 x64 再编一份）
+CONTROLLER_OBJS64 := $(addprefix $(OBJ_DIR)/,Ahci.o Nvme.o)
 # 上游对象：存储抽象、Print 前端与诊断写法，Ext4 只读实现与最小 C 运行库，
 # 以及选版、清单验签、内核镜像校验与信任锚——后四项是与 BaleenCore 共用的同一份源码，
 # 按 x64 再编一份，诊断编号前缀由 CXXFLAGS64 里的 BALEEN_STAGE_PREFIX 换成 E-UEFI
+# SHA-256 取自 Common 的共享目标代码（Sha256.cpp 从 Common/Src 按 x64 再编一份）
 # 各源文件的对象名互不相同，因此与本地对象共用一个对象目录不会撞名
 # UEFI 侧不校验自身镜像头（镜像头字段校验 E-UEFI-40..51 在本阶段不可达），
 # 因此 ImageHeader.o 不链入：它带着三张按阶段排的编号表，链接进去会让死编号重新出现在二进制里
 SHARED_OBJS64 := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Error.o Path.o SubDevice.o FileSystem.o Diagnostics.o Ext4.o Libc.o \
-                 LoadKernel.o SelectSet.o ManifestVerify.o TrustAnchor.o TrustAnchors.o \
+                 LoadKernel.o SelectSet.o ManifestVerify.o BootClosure.o TrustAnchor.o TrustAnchors.o \
                  BootState.o Revocation.o KernelImage.o Sha256.o Sha512.o Ed25519.o BootMemory.o)
-OBJS64    := $(LOCAL_OBJS64) $(SHARED_OBJS64)
+OBJS64    := $(LOCAL_OBJS64) $(CONTROLLER_OBJS64) $(SHARED_OBJS64)
 
 # Core 包的生成物：信任锚源/锚文本与内嵌最低安全版本头。两个包各编一份，生成只有一处
 CORE_OUT           := $(CORE_DIR)/Out
@@ -112,12 +134,33 @@ $(TRUST_ANCHORS_SRC) $(TRUST_ANCHORS_TEXT) $(SECURITY_FLOOR_HPP): core-generated
 $(OBJ_DIR)/TrustAnchors.o: | $(OBJ_DIR) core-generated
 	$(CXX) $(CXXFLAGS64) -c -o $@ $(TRUST_ANCHORS_SRC)
 
-# 从本包、上游与 Core 生成物的目录里找源文件
-vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/Src $(COMMON_DIR)/Src/Storage $(BALEEN_COMMON_DIR)/Src $(CORE_DIR)/Src $(CORE_OUT)
+# 契约层生成物：BootClosure.cpp 引用生成的引导闭包期望集头；缺了就先跑契约生成器
+MAKE_CONTRACT := ../../../Tools/Bin/MakeContract
+$(MAKE_CONTRACT):
+	@$(MAKE) -C ../../../Tools/Build/MakeContract
+$(COMMON_DIR)/Out/Contract/BootClosure.hpp: $(MAKE_CONTRACT)
+	@cd ../../.. && Tools/Bin/MakeContract
+$(OBJ_DIR)/BootClosure.o: $(COMMON_DIR)/Out/Contract/BootClosure.hpp
+
+# 从本包、上游、Core 生成物与内核模块目录里找源文件
+vpath %.cpp $(SRC_DIR) $(COMMON_DIR)/Src $(COMMON_DIR)/Src/Storage $(BALEEN_COMMON_DIR)/Src $(CORE_DIR)/Src $(CORE_OUT) \
+            $(KERNEL_MODULES_DIR)/Ahci/Src $(KERNEL_MODULES_DIR)/Nvme/Src
 
 # x64 侧：本包源码与上游源码共用一条编译规则
 # order-only 依赖 core-generated：编译前 Core 的锚源与内嵌下限一定已生成（或已确认最新）
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR) core-generated
+	$(CXX) $(CXXFLAGS64) -c -o $@ $<
+
+# 目标侧 SHA-256 来自 Common 的共享目标代码：vpath 顺序已让 Common/Src 优先于
+# Baleen/Common/Src，这里再显式给出源文件，避免两处同名源随 vpath 调整而漂移
+$(OBJ_DIR)/Sha256.o: $(COMMON_DIR)/Src/Sha256.cpp | $(OBJ_DIR) core-generated
+	$(CXX) $(CXXFLAGS64) -c -o $@ $<
+
+# AHCI / NVMe 只读实现：内核模块源码按 x64 编进引导器；诊断不经过模块日志，纯读路径
+$(OBJ_DIR)/Ahci.o: $(KERNEL_MODULES_DIR)/Ahci/Src/Ahci.cpp | $(OBJ_DIR) core-generated
+	$(CXX) $(CXXFLAGS64) -c -o $@ $<
+
+$(OBJ_DIR)/Nvme.o: $(KERNEL_MODULES_DIR)/Nvme/Src/Nvme.cpp | $(OBJ_DIR) core-generated
 	$(CXX) $(CXXFLAGS64) -c -o $@ $<
 
 # 交接入口：64 位汇编，与 C++ 对象一起链进同一个 PE
@@ -160,6 +203,9 @@ check: all
 	@strings "$(EFI64)" | grep -q "BALEENUEFI" || { echo "check: $(EFI64) 里没有阶段标签"; exit 1; }
 	@strings "$(EFI64)" | grep -q "E-UEFI-17" || { echo "check: $(EFI64) 里没有登记编号 E-UEFI-17"; exit 1; }
 	@strings "$(EFI64)" | grep -q "E-UEFI-78" || { echo "check: $(EFI64) 里没有登记编号 E-UEFI-78"; exit 1; }
+	@strings "$(EFI64)" | grep -q "E-UEFI-100" || { echo "check: $(EFI64) 里没有登记编号 E-UEFI-100"; exit 1; }
+	@strings "$(EFI64)" | grep -q "E-UEFI-104" || { echo "check: $(EFI64) 里没有登记编号 E-UEFI-104"; exit 1; }
+	@strings "$(EFI64)" | grep -q "The self-built controller path is bound" || { echo "check: $(EFI64) 里没有自建控制器路径的绑定文本"; exit 1; }
 	@command -v mdir >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1 || { echo "check: 缺少 mtools（mdir/mcopy），无法核对 $(ESP_IMAGE) 的内容"; exit 1; }
 	@mdir -i "$(ESP_IMAGE)" ::/EFI/BOOT >/dev/null || { echo "check: $(ESP_IMAGE) 里没有 \\EFI\\BOOT 目录"; exit 1; }
 	@mdir -i "$(ESP_IMAGE)" ::/EFI/BOOT | grep -q "BOOTX64" || { echo "check: $(ESP_IMAGE) 的 \\EFI\\BOOT 里没有 BOOTX64.EFI"; exit 1; }
@@ -167,6 +213,7 @@ check: all
 	@mcopy -i "$(ESP_IMAGE)" ::/EFI/BOOT/BOOTX64.EFI - | cmp -s - "$(EFI64)" || { echo "check: $(ESP_IMAGE) 里的 BOOTX64.EFI 与 $(EFI64) 不一致"; exit 1; }
 	@mcopy -i "$(ESP_IMAGE)" ::/EFI/BOOT/BOOTIA32.EFI - | cmp -s - "$(EFI32)" || { echo "check: $(ESP_IMAGE) 里的 BOOTIA32.EFI 与 $(EFI32) 不一致"; exit 1; }
 	@echo "check: $(EFI32) 是 PE32 EFI 应用（$$(wc -c < "$(EFI32)") 字节）；ESP 内容与它逐字节一致"
+	@strings "$(EFI64)" | grep -q "ControllerPath" 2>/dev/null || true
 	@echo "check: $(EFI64) 是 PE32+ EFI 应用（$$(wc -c < "$(EFI64)") 字节）；ESP 内容与它逐字节一致"
 
 clean:

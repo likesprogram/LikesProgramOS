@@ -2,10 +2,13 @@
 # CheckAll.sh
 #    一条命令跑完宿主侧全部检查，并可选跑启动矩阵，结果收成两张表
 #
-#    宿主侧：9 个检查工具串行执行（CheckIpl、CheckStub、CheckStorage、CheckExt4、
-#    CheckCrypto、CheckSelect、CheckMemory、CheckRevocation、CheckEfiBlockDevice），
-#    逐个报告通过或失败与用例计数
-#    工业验收（--accept，隐含 --with-boot）：在启动矩阵与状态演练之外再跑失败注入、
+#    宿主侧：30 个检查工具串行执行（+RunBootCase 共 31 个工具目录；CheckIpl、CheckStub、CheckStorage、CheckExt4、
+#    CheckCrypto、CheckSelect、CheckMemory、CheckRevocation、CheckEfiBlockDevice、CheckOsm、
+#    CheckPreload、CheckRevision、CheckHandoff、CheckScreen、CheckObjects、CheckContainer、
+#    CheckRegistry、CheckDependency、CheckRelocation、CheckLoader、CheckDevModel、CheckVfs、
+#    CheckExt4Module、CheckNvme、CheckUsbCore、CheckXhci、CheckIso9660、CheckFat32、
+#    CheckUsbHub、CheckUsbStorage），逐个报告通过或失败与用例计数
+#    扩展验证（--accept，隐含 --with-boot）：在启动矩阵与状态演练之外再跑失败注入、
 #    介质与控制器、吊销与防回滚、只读介质与状态写入、引导状态机多轮；各段按期望停机或进内核核对
 #      · 失败注入：整链逐层弄坏一次（描述符区 / Stub 摘要 / BaleanCore 头与摘要 / 布局描述魔数与校验和），
 #        每层的期望是“按哪个编号停机、且绝不进内核”；另有两档篡改布局描述的内核路径并重算校验和
@@ -14,15 +17,27 @@
 #        以及一档把内核路径改成含空分量的非法语法，布局校验必须在选版前拒绝（E-CORE-93）
 #      · 介质与控制器：NVMe 控制器（BIOS / UEFI）与 4Kn 设备 + 按 4096 单位组装的镜像（两档）
 #      · 引导状态机多轮：候选连试三次未确认 → 用尽 → 稳态仍可启动；以及确认提交后走已确认集
-#    工业验收还包含 4Kn 介质上的状态推进（Pending→Trying、候选失败→Failed 真实落盘）、
+#      · G7 三类失败注入载体（T7.1）：Baleen FAULT_INJECT 测试变体 1–6（交接包缺失 / 清单坏 / 记录错 /
+#        BuildId 不符 / 主版门 / 模块摘要错 → E-KRN-50/52/53/56/56/58）、合法签名 + 坏容器（E-KRN-57）、
+#        Init 失败（E-KRN-59）；每档断言 进内核 / FATAL 编号 / 复位循环 / 状态推进 四列
+#    扩展验证还包含 4Kn 介质上的状态推进（Pending→Trying、候选失败→Failed 真实落盘）、
 #    只读 ISO 上的状态写入降级（E-CORE-70）、吊销与防回滚三档（E-CORE-66 / 75 / 74）
 #
-#    启动矩阵（--with-boot）：十档或十一档介质各起一次真实引导，每档抽三列——
+#    启动矩阵（--with-boot）：十二档介质各起一次真实引导，每档抽九列——
 #    进内核（内核横幅 LikesProgramOS kernel）、刷新路径（Flush= 或“无刷新原语”）、
-#    诊断编号（E-XXX-nn），任一档没进内核即判失败
-#    其中 BIOS 六档（QEMU 四档 + Bochs 两档）与 UEFI 四档（HDD / ISO / U 盘 / 4Kn U 盘，走 OVMF）；
-#    32 位固件与 qemu-system-i386 都在时再加 IA32 一档（OVMF32 加载 BOOTIA32.EFI，只验证 E-UEFI-11）
+#    诊断编号（E-XXX-nn）、预装（boot closure preloaded: count=13）、闭包 Init
+#    （module init ok: ×13）、挂卷（system volume mounted: uuid=…）、清单
+#    （system manifest read: bytes=…）、ISO 源（ISO9660 第二来源行）、运行期模块
+#    （正式镜像为 0；运行期夹具档另表验证必需失败 / 可选失败 / 可选成功），任一档没进内核即判失败
+#    主线档（QEMU HDD/ISO × BIOS/UEFI + UEFI NVMe 4Kn）这几列必须齐且内核侧不得报错
+#    （E-KRN 编号 / FATAL 行），引导器自身的 WARN 不算；USB 两档等 G6c 驱动就绪后再收紧
+#    主线档的停机标记是阶段边界行而不是内核横幅：盯横幅会在闭包 Init 与挂卷行之前就把模拟器停掉
+#    其中 BIOS 六档（QEMU 四档 + Bochs 两档）与 UEFI 五档（HDD / ISO / U 盘 / 4Kn U 盘 / NVMe 4Kn，
+#    走 OVMF）；32 位固件与 qemu-system-i386 都在时再加 IA32 一档（OVMF32 加载 BOOTIA32.EFI，只验证 E-UEFI-11）
 #    UEFI 档不只认内核横幅：还要求出现“清单已验证 / 已退出启动服务 / 内核已放到装载地址”三条步骤标记
+#    G6d 追加两段：运行期模块夹具三档（Fault 必需失败 → E-KRN-81 + 复位循环；Optional 失败 → WARN
+#    E-KRN-83 不重启；Optional 成功 → runtime module init ok）与同集两修订切换三档（rev2 直启断言
+#    Rev=2、rev1 直启 Rev=1、状态区移植后发布假候选 → 回退修订 1）。
 #    启动矩阵之后再跑引导状态演练：在介质副本上造出空区域、两份损坏、候选失败、只剩痕迹等状态，
 #    各起一次真实引导，按“该进内核还是该停机 + 该出现哪个编号 + 状态区该不该被推进”逐档核对
 #    另有写中途断电（撕裂最新槽位 / 七个槽位只有半条记录）与设备级写缓存三档：刷新覆盖核验
@@ -38,13 +53,21 @@
 #    --out 仍然是可删的构建产物，两者不要指到一起
 #
 #    用法：CheckAll.sh [选项]
-#      --with-boot          宿主检查之后再跑十档启动矩阵（另有 IA32 时共十一档）与引导状态演练
-#      --accept             工业验收：在上面基础上加失败注入、NVMe / 4Kn 介质与控制器、吊销与防回滚、引导状态机多轮
-#      --image-4kn <文件>   4Kn 验收镜像，默认 Out/LikesProgram.4kn.hdd
+#      --with-boot          宿主检查之后再跑十二档启动矩阵（含 UEFI NVMe 4Kn、运行期夹具与两修订切换）与引导状态演练
+#      --accept             扩展验证：在上面基础上加失败注入、NVMe / 4Kn 介质与控制器、吊销与防回滚、引导状态机多轮
+#      --image-4kn <文件>   4Kn 验证镜像，默认 Out/LikesProgram.4kn.hdd
+#      --image-controller <文件>      强制自建控制器路径的 AHCI 镜像，默认 Out/LikesProgram.controller.hdd
+#      --image-controller-4kn <文件>  强制自建控制器路径的 NVMe 4Kn 镜像，默认 Out/LikesProgram.controller-4kn.hdd
 #      --image-degrade <文件>  置了降级策略位的镜像，默认 Out/LikesProgram.degrade.hdd
 #      --image-revocation-floor <文件>  安全版本低于下限的变体，默认 Out/LikesProgram.revocation-floor.hdd
 #      --image-revocation-bad <文件>    吊销记录损坏的变体，默认 Out/LikesProgram.revocation-bad.hdd
 #      --image-revocation-key <文件>    签名密钥被吊销的变体，默认 Out/LikesProgram.revocation-key.hdd
+#      --image-runtime-fault <文件>       运行期夹具：Fault 必需模块 Init 失败，默认 Out/LikesProgram.runtime-fault.hdd
+#      --image-runtime-optional <文件>    运行期夹具：Optional 可选模块 Init 失败，默认 Out/LikesProgram.runtime-optional.hdd
+#      --image-runtime-optional-ok <文件> 运行期夹具：Optional 成功版（OPTIONAL_INIT_OK），默认 Out/LikesProgram.runtime-optional-ok.hdd
+#      --image-revision2 <文件>           同集两修订夹具：修订 2 为当前、修订 1 为旧快照，默认 Out/LikesProgram.rev2.hdd
+#      （T7.1 故障注入镜像固定从 Out/LikesProgram.fault-{1..6}-/.fault-container/.fault-init 读取，
+#        由 make 的 ACCEPT 依赖构建；不在发布/交付镜像清单里）
 #      --bin-dir <目录>     检查工具所在目录，默认 Tools/Bin
 #      --out <目录>         输出目录，默认 Out/check；不能指向项目根或根 Out（会删真实镜像）
 #      --evidence <目录>    证据目录，必须落在项目 Out 之外；结束时复制 summary、逐例日志与 metadata.txt
@@ -68,18 +91,33 @@ root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 bin_dir=$root/Tools/Bin
 out_dir=$root/Out/check
 with_boot=0
-# 工业验收开关：在启动矩阵与状态演练之外再加三组
+# 扩展验证开关：在启动矩阵与状态演练之外再加三组
 accept=0
 image_iso=$root/Out/LikesProgram.iso
 image_hdd=$root/Out/LikesProgram.hdd
-# 4Kn 验收镜像：同一批载荷按 4096 单位组装的另一份产物
+# 4Kn 验证镜像：同一批载荷按 4096 单位组装的另一份产物
 image_4kn=$root/Out/LikesProgram.4kn.hdd
+# 自建控制器路径验证镜像（强制路径变体，仅 --accept）：AHCI HDD 与 NVMe 4Kn 两档
+image_controller=$root/Out/LikesProgram.controller.hdd
+image_controller_4kn=$root/Out/LikesProgram.controller-4kn.hdd
 # 降级变体镜像：布局描述里置了"记录损坏时退到缺省集"的策略位
 image_degrade=$root/Out/LikesProgram.degrade.hdd
 # 吊销与防回滚变体镜像：安全版本低于下限（E-CORE-66）、吊销记录损坏（E-CORE-75 WARN）、密钥被吊销（E-CORE-74）
 image_revocation_floor=$root/Out/LikesProgram.revocation-floor.hdd
 image_revocation_bad=$root/Out/LikesProgram.revocation-bad.hdd
 image_revocation_key=$root/Out/LikesProgram.revocation-key.hdd
+# 运行期模块夹具镜像（G6d 验证用）：三个变体各带一份测试变体集（运行期 .osm 以清单 Type=2 条目
+# 与 Modules.list 条目存在，Baleen 只预装闭包成员；不进正式发布集）；正式镜像的各档「运行期模块」列为 0
+image_runtime_fault=$root/Out/LikesProgram.runtime-fault.hdd
+image_runtime_optional=$root/Out/LikesProgram.runtime-optional.hdd
+image_runtime_optional_ok=$root/Out/LikesProgram.runtime-optional-ok.hdd
+# 同集两修订夹具（G6d）：修订 2 为当前列表，修订 1 为旧快照；Baleen 按 BootState.ModuleRevision 选回退目标
+image_revision2=$root/Out/LikesProgram.rev2.hdd
+# T7.1 故障注入测试镜像（只由 make 的 ACCEPT 依赖构建，不进发布产物）：
+# Baleen 交接包注入 1..6 与“合法签名 + 坏容器”两档；路径固定为 Out/ 下的测试变体名
+image_fault_baleen_prefix=$root/Out/LikesProgram.fault-
+image_fault_container=$root/Out/LikesProgram.fault-container.hdd
+image_fault_init=$root/Out/LikesProgram.fault-init.hdd
 # 布局清单 JSON：失败注入的偏移从这里读；空表示跟随 --image-hdd / --image-iso 的路径
 manifest_hdd=
 manifest_iso=
@@ -93,13 +131,16 @@ qemu_i386=${QEMU32:-qemu-system-i386}
 ovmf32_code=${OVMF32_CODE:-/usr/share/OVMF/OVMF32_CODE_4M.fd}
 ovmf32_vars=${OVMF32_VARS:-/usr/share/OVMF/OVMF32_VARS_4M.fd}
 timeout_s=60
+# 定长观察窗口：需要保留复位循环的档（运行期必需失败、故障注入）要跑满一段时间；
+# 窗口太短会在宿主负载下少看一轮，把复位循环误判成缺失
+reset_window_s=45
 qemu=${QEMU:-qemu-system-x86_64}
 qemu_mem=${QEMU_MEM:-512}
 bochs=${BOCHS:-bochs}
 helper=${RUN_BOOT_CASE:-$root/Tools/Bin/RunBootCase}
 
 # 宿主侧的检查工具：顺序即执行顺序，也是表格的行序
-host_tools='CheckIpl CheckStub CheckStorage CheckExt4 CheckCrypto CheckSelect CheckMemory CheckRevocation CheckEfiBlockDevice'
+host_tools='CheckIpl CheckStub CheckStorage CheckExt4 CheckCrypto CheckSelect CheckMemory CheckRevocation CheckEfiBlockDevice CheckOsm CheckPreload CheckRevision CheckHandoff CheckScreen CheckObjects CheckContainer CheckRegistry CheckDependency CheckRelocation CheckLoader CheckDevModel CheckVfs CheckExt4Module CheckNvme CheckUsbCore CheckXhci CheckIso9660 CheckFat32 CheckUsbHub CheckUsbStorage'
 # 内核横幅：内核进入 KernelMain 后打出的第一行模块行
 # RunBootCase 只看裸子串就能及时停机；但“进内核”这一列的硬判定要用带标签的完整一行：
 # 失败诊断的正文里也可能出现 "LikesProgramOS kernel" 字样（如 IA32 提示件），裸子串会误判
@@ -121,10 +162,16 @@ while [ $# -gt 0 ]; do
         --with-boot) with_boot=1; shift ;;
         --accept) accept=1; with_boot=1; shift ;;
         --image-4kn) [ $# -ge 2 ] || die "--image-4kn 缺少参数"; image_4kn=$2; shift 2 ;;
+        --image-controller) [ $# -ge 2 ] || die "--image-controller 缺少参数"; image_controller=$2; shift 2 ;;
+        --image-controller-4kn) [ $# -ge 2 ] || die "--image-controller-4kn 缺少参数"; image_controller_4kn=$2; shift 2 ;;
         --image-degrade) [ $# -ge 2 ] || die "--image-degrade 缺少参数"; image_degrade=$2; shift 2 ;;
         --image-revocation-floor) [ $# -ge 2 ] || die "--image-revocation-floor 缺少参数"; image_revocation_floor=$2; shift 2 ;;
         --image-revocation-bad) [ $# -ge 2 ] || die "--image-revocation-bad 缺少参数"; image_revocation_bad=$2; shift 2 ;;
         --image-revocation-key) [ $# -ge 2 ] || die "--image-revocation-key 缺少参数"; image_revocation_key=$2; shift 2 ;;
+        --image-runtime-fault) [ $# -ge 2 ] || die "--image-runtime-fault 缺少参数"; image_runtime_fault=$2; shift 2 ;;
+        --image-runtime-optional) [ $# -ge 2 ] || die "--image-runtime-optional 缺少参数"; image_runtime_optional=$2; shift 2 ;;
+        --image-runtime-optional-ok) [ $# -ge 2 ] || die "--image-runtime-optional-ok 缺少参数"; image_runtime_optional_ok=$2; shift 2 ;;
+        --image-revision2) [ $# -ge 2 ] || die "--image-revision2 缺少参数"; image_revision2=$2; shift 2 ;;
         --manifest-hdd) [ $# -ge 2 ] || die "--manifest-hdd 缺少参数"; manifest_hdd=$2; shift 2 ;;
         --manifest-iso) [ $# -ge 2 ] || die "--manifest-iso 缺少参数"; manifest_iso=$2; shift 2 ;;
         --evidence) [ $# -ge 2 ] || die "--evidence 缺少参数"; evidence_dir=$2; shift 2 ;;
@@ -194,9 +241,17 @@ boot_failed=0
 # 引导状态演练的计数：通过数与总数，失败计入 boot_failed（同一个结论出口）
 state_total=0
 state_passed=0
+# 其中 ACCEPT 才跑 4Kn 状态演练：G7 汇总把主线 19 档与 4Kn 附加档分开报
+state_4kn=0
 # 启动矩阵的两种特殊判据：UEFI 档要额外的步骤标记；IA32 档要求出现提示且绝不进内核
 boot_require_steps=0
 boot_expect_no_kernel=0
+# M5 主线四档判据：闭包预装/Init/挂卷/清单四列必须齐；其余档只显示
+boot_require_m5=0
+# ISO 档的额外判据：光盘档必须出现 ISO9660 第二来源标记（iso9660: system volume file=…）
+boot_require_iso=0
+# 额外文本判据：UEFI USB/NVMe 档断言块大小标识行（usbstorage: ... block=0x200 / nvme: ... block=0x1000）
+boot_require_text=
 # RunBootCase 监视的字面标记：普通档盯内核横幅，IA32 档临时换成 E-UEFI-11
 boot_marker=$kernel_marker
 
@@ -260,7 +315,7 @@ boot_missing() {
     row "$(printf '%-22s %-8s %-8s %-8s %s' "$1" 跳过 - - "基础设施缺失：$2")"
 }
 
-# 从一例的串口/调试日志里抽三列：进内核、刷新路径、诊断编号
+# 从一例的串口/调试日志里抽启动矩阵的列：进内核、刷新路径、诊断编号，以及 M5 的四列
 boot_columns() {
     dir=$1
     boot_reached=否
@@ -278,8 +333,28 @@ boot_columns() {
     # 直接对两个文件计数会把一份现场算成两份；先按行去重再数编号
     # 两个文件之间补一个换行：日志最后一行可能没有换行符（停机就在那一行），直接 cat 会把两行粘成一行
     boot_codes=$({ cat "$dir/serial.log" 2>/dev/null; printf '\n'; cat "$dir/debug.log" 2>/dev/null; printf '\n'; } | tr -d '\r' | sort -u |
-        grep -a -o -E 'E-[A-Z]+-[0-9][0-9]' | sort | uniq -c | awk '{ printf "%s%s×%s", (NR > 1 ? " " : ""), $2, $1 }')
+        grep -a -o -E 'E-[A-Z]+-[0-9][0-9][0-9]*' | sort | uniq -c | awk '{ printf "%s%s×%s", (NR > 1 ? " " : ""), $2, $1 }')
     [ -n "$boot_codes" ] || boot_codes=无
+    # M5 四列：闭包预装条数、闭包 Init 条数、挂卷行、清单摘要行
+    # 模块行在串口与调试口各写一份：先去重再计数，避免把一份现场算成两份
+    boot_preload=-
+    preload_line=$(grep -a -h -o 'boot closure preloaded: count=[0-9][0-9]*' "$dir/serial.log" "$dir/debug.log" 2>/dev/null | head -n 1)
+    if [ -n "$preload_line" ]; then boot_preload=${preload_line##*count=}; fi
+    boot_closure=-
+    closure_lines=$({ cat "$dir/serial.log" 2>/dev/null; printf '\n'; cat "$dir/debug.log" 2>/dev/null; printf '\n'; } |
+        tr -d '\r' | grep -a 'module init ok:' | sort -u | grep -a -c . || true)
+    if [ "$closure_lines" -gt 0 ]; then boot_closure=$closure_lines; fi
+    boot_mount=否
+    if grep -a -q 'system volume mounted: uuid=' "$dir/serial.log" "$dir/debug.log" 2>/dev/null; then boot_mount=是; fi
+    boot_manifest=否
+    if grep -a -q 'system manifest read: bytes=' "$dir/serial.log" "$dir/debug.log" 2>/dev/null; then boot_manifest=是; fi
+    # 运行期模块列：取汇总行的 loaded 数（正式发布集没有运行期条目时为 0）；没有该行显示 -
+    boot_runtime=-
+    runtime_line=$(grep -a -h -o 'runtime modules: loaded=[0-9][0-9]*' "$dir/serial.log" "$dir/debug.log" 2>/dev/null | head -n 1)
+    if [ -n "$runtime_line" ]; then boot_runtime=${runtime_line##*loaded=}; fi
+    # ISO9660 第二来源列：光盘档应出现 iso9660: system volume file=… 稳定标记（非光盘档为 -）
+    boot_iso=-
+    if grep -a -q 'iso9660: system volume file=' "$dir/serial.log" "$dir/debug.log" 2>/dev/null; then boot_iso=是; fi
 }
 
 # 跑一例启动：run_boot_case <名称> <目录名> <stdin文件或空> <命令...>
@@ -322,13 +397,28 @@ run_boot_case() {
     else
         [ "$boot_reached" = 是 ] || boot_status=失败
     fi
+    # M5 主线四档的硬判定：闭包预装 13、闭包 Init 13 条、挂卷行与清单摘要行都在，且内核侧不得报错；
+    # 其余档只显示这四列，不据此判失败（USB / 4Kn / Bochs 档的驱动在 M6 才落地）
+    # 判据只看内核侧：E-KRN 编号与 FATAL 行一律失败；引导器自身的 WARN（如 E-UEFI-55 耗时预算）
+    # 不改变内核观测，不算失败
+    if [ "$boot_require_m5" -eq 1 ]; then
+        [ "$boot_preload" = 13 ] || boot_status=失败
+        [ "$boot_closure" = 13 ] || boot_status=失败
+        [ "$boot_mount" = 是 ] || boot_status=失败
+        [ "$boot_manifest" = 是 ] || boot_status=失败
+        [ "$boot_runtime" = 0 ] || boot_status=失败
+        if [ "$boot_require_iso" -eq 1 ]; then [ "$boot_iso" = 是 ] || boot_status=失败; fi
+        if [ -n "$boot_require_text" ] && ! grep -a -q -F -- "$boot_require_text" "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null; then boot_status=失败; fi
+        case "$boot_codes" in *E-KRN-*) boot_status=失败 ;; esac
+        if grep -a -q -F '[ FATAL ]' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null; then boot_status=失败; fi
+    fi
     boot_total=$((boot_total + 1))
     if [ "$boot_status" = 通过 ]; then
         boot_passed=$((boot_passed + 1))
     else
         boot_failed=$((boot_failed + 1))
     fi
-    row "$(printf '%-22s %-8s %-8s %-8s %s' "$name" "$boot_reached" "$boot_flush" "$boot_codes" "$boot_status")"
+    row "$(printf '%-22s %-8s %-8s %-14s %-6s %-8s %-6s %-8s %-6s %-8s %s' "$name" "$boot_reached" "$boot_flush" "$boot_codes" "$boot_preload" "$boot_closure" "$boot_mount" "$boot_manifest" "$boot_iso" "$boot_runtime" "$boot_status")"
 }
 
 # —— 证据与镜像批次 ——
@@ -374,7 +464,7 @@ write_metadata() {
         printf '记录时间(UTC)：%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         printf '项目根：%s\n' "$root"
         printf 'git 版本：%s\n' "$(git -c safe.directory="$root" -C "$root" rev-parse HEAD 2>/dev/null || printf unknown)"
-        # 工作树状态：dirty 时本记录不对应任何提交，验收证据必须能一眼看出这一点
+        # 工作树状态：dirty 时本记录不对应任何提交，验证证据必须能一眼看出这一点
         worktree_status=$(git -c safe.directory="$root" -C "$root" status --porcelain 2>/dev/null || true)
         if ! git -c safe.directory="$root" -C "$root" rev-parse HEAD >/dev/null 2>&1; then
             printf 'git 工作树：unknown（git 不可用）\n'
@@ -409,6 +499,54 @@ write_metadata() {
         # 布局清单记录了各载荷偏移，注入档的注入点由它派生；记下哈希才能复核注入点来源
         printf '布局清单 HDD：%s sha256=%s bytes=%s\n' "$manifest_hdd" "$(sha256_of "$manifest_hdd")" "$(bytes_of "$manifest_hdd")"
         printf '布局清单 ISO：%s sha256=%s bytes=%s\n' "$manifest_iso" "$(sha256_of "$manifest_iso")" "$(bytes_of "$manifest_iso")"
+        printf '工具链 g++：%s\n' "$(g++ --version 2>/dev/null | head -n 1)"
+        printf '工具链 ld：%s\n' "$(ld --version 2>/dev/null | head -n 1)"
+        printf '工具链 nasm：%s\n' "$(nasm -v 2>/dev/null | head -n 1)"
+        printf '工具链 mke2fs：%s\n' "$(mke2fs -V 2>&1 | head -n 1)"
+        printf '工具链 mformat：%s\n' "$(mformat --version 2>/dev/null | head -n 1)"
+        # —— T7.3 集产物与模块输入哈希：离线复核链（清单→集内产物→模块 .osm→构建输入）——
+        kernel_os=$root/Packages/LikesProgramOS/Core/Out/Bin/LikesProgram.os
+        printf '内核原型 .os：%s sha256=%s bytes=%s\n' "$kernel_os" "$(sha256_of "$kernel_os")" "$(bytes_of "$kernel_os")"
+        kernel_path_file=$root/Packages/LikesProgramOS/Out/KernelPath
+        if [ -r "$kernel_path_file" ]; then
+            set_rel=$(cat "$kernel_path_file")
+            set_dir=$root/Packages/LikesProgramOS/Static$(dirname "$set_rel")
+            printf '内核集目录：%s\n' "$set_dir"
+            for set_file in LikesProgram.os Manifest.mft Modules.list; do
+                printf '集产物 %s：sha256=%s bytes=%s\n' "$set_file" "$(sha256_of "$set_dir/$set_file")" "$(bytes_of "$set_dir/$set_file")"
+            done
+            for revision_file in "$set_dir"/Manifest.*.mft "$set_dir"/Modules.*.list; do
+                [ -f "$revision_file" ] || continue
+                printf '修订快照 %s：sha256=%s bytes=%s\n' "$(basename "$revision_file")" "$(sha256_of "$revision_file")" "$(bytes_of "$revision_file")"
+            done
+            if [ -d "$set_dir/Modules" ]; then
+                for module_file in "$set_dir"/Modules/*.osm; do
+                    [ -f "$module_file" ] || continue
+                    printf '集内模块 %s：sha256=%s bytes=%s\n' "$(basename "$module_file")" "$(sha256_of "$module_file")" "$(bytes_of "$module_file")"
+                done
+            fi
+        else
+            printf '内核集目录：未能读取 %s\n' "$kernel_path_file"
+        fi
+        # 构建输入：模块产物目录里的全部 .osm（与集内副本逐字节同源）
+        for module_file in "$root"/Packages/KernelModules/Out/Modules/*.osm; do
+            [ -f "$module_file" ] || continue
+            printf '模块产物 %s：sha256=%s bytes=%s\n' "$(basename "$module_file")" "$(sha256_of "$module_file")" "$(bytes_of "$module_file")"
+        done
+        # 工具链二进制：证据里的清单/签名/打包/组装产物由这些工具生成
+        for tool_file in MakeManifest SignManifest MakeContract PackModule TestInstaller MakeImage PackImage; do
+            printf '工具 %s：%s sha256=%s\n' "$tool_file" "$root/Tools/Bin/$tool_file" "$(sha256_of "$root/Tools/Bin/$tool_file")"
+        done
+        # 测试变体镜像：不进发布清单，只在验证证据里登记哈希，便于复核“测试集与发布集分离”
+        for variant_file in "$image_runtime_fault" "$image_runtime_optional" "$image_runtime_optional_ok" "$image_revision2" \
+            "$image_fault_baleen_prefix"1.hdd "$image_fault_baleen_prefix"2.hdd "$image_fault_baleen_prefix"3.hdd \
+            "$image_fault_baleen_prefix"4.hdd "$image_fault_baleen_prefix"5.hdd "$image_fault_baleen_prefix"6.hdd \
+            "$image_fault_container" "$image_fault_init"; do
+            [ -e "$variant_file" ] || continue
+            printf '测试变体镜像 %s：sha256=%s bytes=%s\n' "$(basename "$variant_file")" "$(sha256_of "$variant_file")" "$(bytes_of "$variant_file")"
+        done
+        # 发布镜像清单（IMAGES + 验证变体）与测试变体互斥的核对依据：变量名与数量写进证据
+        printf '发布镜像清单：IMAGES 2 份（ISO/HDD）+ 验证变体 5 份（4Kn/降级/吊销三档）；测试变体仅在上面的“测试变体镜像”里\n'
     } > "$metadata"
 }
 
@@ -440,8 +578,8 @@ if [ "$with_boot" -eq 1 ]; then
         [ -r "$image" ] || die "缺少镜像 $image；先跑 make（或用 --image-iso / --image-hdd 指定）"
     done
     [ -x "$helper" ] || die "缺少运行辅助工具 $helper；先跑 make -C Tools/Test/RunBootCase"
-    say "启动矩阵                                                          三列"
-    say "介质档                进内核   刷新路径 诊断编号 结果"
+    say "启动矩阵                                                          九列"
+    say "介质档                进内核   刷新路径 诊断编号       预装   闭包Init 挂卷   清单   ISO源  运行期 结果"
     mkdir -p "$boot_dir"
 
     # QEMU 四档：HDD 直挂、ISO 直挂、HDD 当 U 盘、ISO 写入 U 盘（规格把最后一种列为必查）
@@ -452,12 +590,18 @@ if [ "$with_boot" -eq 1 ]; then
             if [ "$media" = iso ]; then image=$image_iso; else image=$image_hdd; fi
             case_dir=$boot_dir/$spec
             mkdir -p "$case_dir"
-            set -- "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
+            # M5 选择：ISO 档用 i440fx（PIIX IDE 提供 0x1F0/0x170，AtaPio 的 ATAPI 路径才能读光盘）；
+            # HDD 档保持 q35 走 Ahci（SATA 盘，READ DMA EXT）。非 M5 四档的档位不改机器
+            machine=q35
+            if [ "$media" = iso ]; then machine=pc; fi
+            set -- "$qemu" -machine "$machine" -m "$qemu_mem" -monitor none -display none -no-reboot \
                 -serial "file:$case_dir/serial.log" -debugcon "file:$case_dir/debug.log"
             if [ "$mode" = usb ]; then
-                set -- "$@" -device usb-ehci,id=ehci \
+                # M6 G6c：USB 档用 QEMU 的 xHCI 控制器，根端口直连 usb-storage（无 hub 下游枚举，
+                # 见 M6 已知限制）；内核侧 Xhci/UsbStorage 驱动按 xHCI 规范枚举
+                set -- "$@" -device qemu-xhci,id=xhci \
                     -drive "if=none,id=usbstick,format=raw,snapshot=on,file=$image" \
-                    -device usb-storage,bus=ehci.0,drive=usbstick -boot order=c
+                    -device usb-storage,bus=xhci.0,drive=usbstick -boot order=c
             elif [ "$media" = iso ]; then
                 set -- "$@" -drive "if=ide,media=cdrom,format=raw,readonly=on,file=$image" -boot order=d
             else
@@ -468,7 +612,16 @@ if [ "$with_boot" -eq 1 ]; then
             else
                 label="QEMU $media + built"
             fi
+            # 主线档（HDD / ISO 直挂 + 两档 USB）：要求闭包与挂卷列齐、运行期模块列为 0
+            # ISO 直挂档另要求 ISO9660 第二来源标记（iso9660: system volume file=…）
+            # 停机标记换成阶段边界行：盯内核横幅会立刻停机，闭包 Init 与挂卷行都还没打出来
+            boot_require_m5=1
+            if [ "$media" = iso ] && [ "$mode" = built ]; then boot_require_iso=1; fi
+            boot_marker="kernel core stage ends here"
             run_boot_case "$label" "$spec" '' "$@"
+            boot_require_m5=0
+            boot_require_iso=0
+            boot_marker=$kernel_marker
         done
     else
         for spec in hdd-built iso-built hdd-usb iso-usb; do
@@ -476,9 +629,10 @@ if [ "$with_boot" -eq 1 ]; then
         done
     fi
 
-    # UEFI 四档：走 OVMF，介质与 BIOS 三档对齐，另加只有 UEFI 固件才看得见的 4Kn U 盘
+    # UEFI 五档：走 OVMF，介质与 BIOS 三档对齐，加只有 UEFI 固件才看得见的 4Kn U 盘，
+    # 以及 M6 G6a 的 NVMe 4Kn 档（NVMe 控制器 + 4096 逻辑块，从 NVMe 启动到挂卷）
     # 每档的介质参数：uefi 分支在这里只负责挂介质，固件参数由上面统一加
-    for spec in hdd-uefi iso-uefi usb-uefi usb4kn-uefi; do
+    for spec in hdd-uefi iso-uefi usb-uefi usb4kn-uefi nvme4kn-uefi; do
         uefi_media=${spec%-uefi}
         if ! command -v "$qemu" >/dev/null 2>&1; then
             boot_missing "$spec" "找不到 QEMU：$qemu"
@@ -489,11 +643,15 @@ if [ "$with_boot" -eq 1 ]; then
             continue
         fi
         if [ "$uefi_media" = iso ]; then image=$image_iso; else image=$image_hdd; fi
+        if [ "$uefi_media" = nvme4kn ]; then image=$image_4kn; fi
         case_dir=$boot_dir/$spec
         mkdir -p "$case_dir"
         # OVMF 的变量卷必须每例一份独立副本，否则上一例的启动项会污染下一例
         cp "$ovmf_vars" "$case_dir/vars.fd"
-        set -- "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
+        # M5 选择与 BIOS 侧一致：ISO 档用 i440fx 走 PIIX IDE（AtaPio ATAPI），HDD 档保持 q35（Ahci）
+        machine=q35
+        if [ "$uefi_media" = iso ]; then machine=pc; fi
+        set -- "$qemu" -machine "$machine" -m "$qemu_mem" -monitor none -display none -no-reboot \
             -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
             -drive "if=pflash,format=raw,file=$case_dir/vars.fd" \
             -serial "file:$case_dir/serial.log" -debugcon "file:$case_dir/debug.log"
@@ -503,19 +661,38 @@ if [ "$with_boot" -eq 1 ]; then
             iso-uefi)
                 set -- "$@" -drive "if=ide,media=cdrom,format=raw,readonly=on,file=$image" -boot order=d ;;
             usb-uefi)
-                set -- "$@" -device usb-ehci,id=ehci \
+                set -- "$@" -device qemu-xhci,id=xhci \
                     -drive "if=none,id=usbstick,format=raw,snapshot=on,file=$image" \
-                    -device usb-storage,bus=ehci.0,drive=usbstick -boot order=c ;;
+                    -device usb-storage,bus=xhci.0,drive=usbstick -boot order=c ;;
             usb4kn-uefi)
                 # 4Kn：SeaBIOS 不枚举这种设备，只有 UEFI 固件能看到，正是按 8 MiB 那份 ESP 启动
-                set -- "$@" -device usb-ehci,id=ehci \
+                set -- "$@" -device qemu-xhci,id=xhci \
                     -drive "if=none,id=usbstick,format=raw,snapshot=on,file=$image" \
-                    -device "usb-storage,bus=ehci.0,drive=usbstick,logical_block_size=4096,physical_block_size=4096" -boot order=c ;;
+                    -device "usb-storage,bus=xhci.0,drive=usbstick,logical_block_size=4096,physical_block_size=4096" -boot order=c ;;
+            nvme4kn-uefi)
+                # M6 G6a：4Kn 镜像挂成 NVMe 控制器（逻辑块 4096），UEFI 从 NVMe 上的 ESP 启动；
+                # 内核侧由 Nvme 模块经 Dev.Model 取 PCI 事实、Drv.Loader 绑定，挂卷走同一套 70–76 诊断
+                set -- "$@" -drive "if=none,id=nvme0,format=raw,snapshot=on,file=$image" \
+                    -device "nvme,drive=nvme0,serial=LIKESNVME,logical_block_size=4096,physical_block_size=4096" ;;
         esac
         # UEFI 档额外要求三条固件阶段步骤标记，见 run_boot_case
+        # G6c/G6a 后五档全部是主线：HDD / ISO / USB / 4Kn U 盘 / NVMe 4Kn，都要求闭包与挂卷列齐
+        # 且运行期模块列为 0；USB 两档断言驱动报告的块大小（512e=0x200、4Kn=0x1000），
+        # NVMe 4Kn 档断言 `nvme: ... block=0x1000`；停机标记换成阶段边界行
+        boot_require_m5=1
+        boot_require_text=
+        if [ "$uefi_media" = iso ]; then boot_require_iso=1; fi
+        if [ "$uefi_media" = usb ]; then boot_require_text="usbstorage: device bound block=0x200"; fi
+        if [ "$uefi_media" = usb4kn ]; then boot_require_text="usbstorage: device bound block=0x1000"; fi
+        if [ "$uefi_media" = nvme4kn ]; then boot_require_text="block=0x1000"; fi
+        boot_marker="kernel core stage ends here"
         boot_require_steps=1
         run_boot_case "QEMU $uefi_media + uefi" "$spec" '' "$@"
         boot_require_steps=0
+        boot_require_m5=0
+        boot_require_iso=0
+        boot_require_text=
+        boot_marker=$kernel_marker
     done
 
     # IA32 一档：32 位固件只会加载 ESP 里的 BOOTIA32.EFI，那个提示件打印 E-UEFI-11 后停机；
@@ -610,6 +787,90 @@ if [ "$with_boot" -eq 1 ]; then
         run_boot_case "$media + bochs" "$spec" "$case_dir/continue.rc" \
             "$bochs" -q -f "$case_dir/bochsrc"
     done
+    matrix_total=$boot_total
+    matrix_passed=$boot_passed
+    say ""
+    say "启动小计：通过 $boot_passed/$boot_total，失败 $boot_failed，基础设施缺失 $boot_skipped"
+    say ""
+
+    # —— 运行期模块夹具档（G6d）：三份变体镜像各带一份测试变体集 ——
+    # 正式镜像的「运行期模块」列是 0（发布集不含运行期条目）；这里验证三条发行策略：
+    #   必需模块失败 → E-KRN-81 FATAL + 等待复位；可选模块失败 → WARN E-KRN-83 不重启并继续启动；
+    #   可选模块成功 → runtime module init ok + 汇总行 loaded=1 / failed=0 / optional=1
+    # 夹具约定（M6，正式清单 Type 语义留后续）：运行期 .osm 以清单 Type=2 与 Modules.list 条目存在，
+    # Baleen 只预装闭包成员；内核按「列表条目不属于引导闭包期望集」识别运行期模块，
+    # Modules/ 下直接子项 = 必需，Modules/Optional/ 子目录 = 可选
+    for runtime_image in "$image_runtime_fault" "$image_runtime_optional" "$image_runtime_optional_ok"; do
+        [ -r "$runtime_image" ] || die "缺少运行期夹具镜像 $runtime_image；先跑 make（或用 --image-runtime-* 指定）"
+    done
+    runtime_dir=$boot_dir/runtime
+    mkdir -p "$runtime_dir"
+    say "运行期模块档                                                        期望"
+    say "变体                   进内核   运行期标记  诊断编号        结果"
+
+    # 跑一档运行期夹具：run_runtime_case <名称> <目录名> <镜像> <停机标记> <期望编号-> <期望运行期数> <必须出现的子串->
+    run_runtime_case() {
+        rt_name=$1
+        rt_spec=$2
+        rt_image=$3
+        rt_marker=$4
+        rt_want_code=$5
+        rt_want_runtime=$6
+        rt_want_text=$7
+        rt_dir=$runtime_dir/$rt_spec
+        mkdir -p "$rt_dir"
+        : > "$rt_dir/serial.log"
+        : > "$rt_dir/debug.log"
+        : > "$rt_dir/console.log"
+        rt_status=通过
+        if ! "$helper" --timeout "$timeout_s" --marker "$rt_marker" \
+                --cwd "$rt_dir" --console "$rt_dir/console.log" \
+                --log "$rt_dir/serial.log" --log "$rt_dir/debug.log" -- \
+                "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
+                -drive "if=ide,format=raw,snapshot=on,file=$rt_image" -boot order=c \
+                -serial "file:$rt_dir/serial.log" -debugcon "file:$rt_dir/debug.log" > "$rt_dir/runner.log" 2>&1; then
+            rt_status=失败
+        fi
+        boot_columns "$rt_dir"
+        [ "$boot_reached" = 是 ] || rt_status=失败
+        if [ "$rt_want_code" != "-" ] && ! printf '%s' "$boot_codes" | grep -q -- "$rt_want_code"; then rt_status=失败; fi
+        [ "$boot_runtime" = "$rt_want_runtime" ] || rt_status=失败
+        if [ "$rt_want_text" != "-" ] && ! grep -a -q -F -- "$rt_want_text" "$rt_dir/serial.log" "$rt_dir/debug.log" 2>/dev/null; then rt_status=失败; fi
+        # 可选降级与可选成功都必须停在阶段边界、不发生复位循环（一次启动只有一条 BALEENSTUB 行）
+        if [ "$rt_spec" != fault ]; then
+            restarts=$(grep -a -c 'BALEENSTUB' "$rt_dir/serial.log" 2>/dev/null || true)
+            [ "$restarts" = 1 ] || rt_status=失败
+            if grep -a -q -F '[ FATAL ]' "$rt_dir/serial.log" "$rt_dir/debug.log" 2>/dev/null; then rt_status=失败; fi
+        fi
+        boot_total=$((boot_total + 1))
+        if [ "$rt_status" = 通过 ]; then boot_passed=$((boot_passed + 1)); else boot_failed=$((boot_failed + 1)); fi
+        row "$(printf '%-22s %-8s %-10s %-14s %s' "$rt_name" "$boot_reached" "$boot_runtime" "$boot_codes" "$rt_status")"
+    }
+
+    run_runtime_case "runtime-fault" fault "$image_runtime_fault" "E-KRN-81" "E-KRN-81" "-" "Modules/Fault.1.0.0.osm"
+    run_runtime_case "runtime-optional" optional "$image_runtime_optional" "kernel core stage ends here" "E-KRN-83" "0" "E-KRN-83"
+    run_runtime_case "runtime-optional-ok" optional-ok "$image_runtime_optional_ok" "kernel core stage ends here" "-" "1" "runtime module init ok: Optional"
+
+    # 必需失败还要证明「等待 + 复位循环」：定长运行一段，按出现的启动次数与编号次数核对
+    if [ "$with_boot" -eq 1 ]; then
+        rt_dir=$runtime_dir/fault-reset
+        mkdir -p "$rt_dir"
+        rt_status=通过
+        # 这一档要看到复位循环：不能带 -no-reboot（它会让 QEMU 在复位请求时直接退出，只看得到一轮）
+        # 观察窗口用 reset_window_s：要覆盖两轮完整启动，固定 26s 在宿主负载高时会少看一轮
+        ( timeout -s KILL "$reset_window_s" "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none \
+              -drive "if=ide,format=raw,snapshot=on,file=$image_runtime_fault" -boot order=c \
+              -serial "file:$rt_dir/serial.log" -debugcon "file:$rt_dir/debug.log" >/dev/null 2>&1 ) || true
+        restarts=$(grep -a -c 'BALEENSTUB' "$rt_dir/serial.log" 2>/dev/null || true)
+        fatals=$(grep -a -c 'E-KRN-81' "$rt_dir/serial.log" 2>/dev/null || true)
+        [ "$restarts" -ge 2 ] || rt_status=失败
+        [ "$fatals" -ge 2 ] || rt_status=失败
+        boot_total=$((boot_total + 1))
+        if [ "$rt_status" = 通过 ]; then boot_passed=$((boot_passed + 1)); else boot_failed=$((boot_failed + 1)); fi
+        row "$(printf '%-22s %-8s %-10s %-14s %s' "runtime-fault 复位循环" "是" "-" "E-KRN-81×$fatals" "$rt_status")"
+    fi
+    runtime_total=$((boot_total - matrix_total))
+    runtime_passed=$((boot_passed - matrix_passed))
     say ""
     say "启动小计：通过 $boot_passed/$boot_total，失败 $boot_failed，基础设施缺失 $boot_skipped"
     say ""
@@ -627,7 +888,7 @@ if [ "$with_boot" -eq 1 ]; then
     bogus_digest=0badc0de0badc0de0badc0de0badc0de0badc0de0badc0de0badc0de0badc0de
 
     # 缺省集的 BuildId：从镜像的布局描述里取（端到端，不依赖构建产物）
-    # 状态演练与验收都要用它造“能通过验证的候选”，因此在这里定义一次
+    # 状态演练与验证都要用它造“能通过验证的候选”，因此在这里定义一次
     default_build_id=$(dd if="$image_hdd" bs=1 skip=$((0x20000 + 0x40)) count=255 2>/dev/null | tr -d '\000' |
         sed -n 's#.*/KernelSets/\([0-9a-f]\{64\}\)/.*#\1#p')
 
@@ -718,6 +979,7 @@ if [ "$with_boot" -eq 1 ]; then
             -device "nvme,drive=n4,serial=LPOS4K,logical_block_size=4096,physical_block_size=4096" -boot order=c \
             -serial "file:$case_dir/serial.log" -debugcon "file:$case_dir/debug.log"
         run_state_case "$k4_name" "$k4_tag" kernel "$k4_code" "$k4_state" "$@"
+        state_4kn=$((state_4kn + 1))
     }
 
     if [ ! -x "$fixboot" ]; then
@@ -960,7 +1222,7 @@ if [ "$with_boot" -eq 1 ]; then
 
         # 4Kn 状态推进：块设备契约要求偏移与长度是逻辑块的整数倍，4Kn NVMe 上 512 字节槽位写会被
         # 块设备以 InvalidArgument 拒绝，空状态能启动看不出这一点——必须把状态转换在 4Kn 介质上走一遍
-        # 验收模式才跑：候选 BuildId 从 4Kn 镜像自己的布局描述里取，digest 用上面那个假摘要
+        # 验证模式才跑：候选 BuildId 从 4Kn 镜像自己的布局描述里取，digest 用上面那个假摘要
         if [ "$accept" -eq 1 ]; then
             if [ ! -r "$image_4kn" ]; then
                 boot_missing "4Kn 状态推进（五档）" "缺少 $image_4kn；先跑 make 的 4Kn 依赖或用 --image-4kn 指定"
@@ -1001,6 +1263,59 @@ if [ "$with_boot" -eq 1 ]; then
             printf '%s\t%s\t%s\t%s\t%s\n' "维修重建坏槽位" - - 全部槽位有效 失败 >> "$summary"
         fi
 
+        # —— 同集两修订切换（G6d）——
+        # 修订 2 = 当前列表（MODULE_REVISION=2 的 Manifest.2/Modules.2），修订 1 = 旧快照；
+        # 步骤：① 修订 2 镜像正常启动，内核打印 Rev=2；
+        #      ② 修订 1 镜像启动一次，把状态区（含 Confirmed 的 ModuleRevision=1）搬到修订 2 副本；
+        #      ③ 修订 2 副本上发布假候选 → 候选验证失败 → 回退到记录里的回退目标修订 1 → 内核打印 Rev=1。
+        # 状态区偏移/长度取布局约定（0x21000 / 4096）；两份镜像几何相同，按 512 字节扇区 dd 搬运
+        if [ -r "$image_revision2" ]; then
+            rev_dir=$state_dir/revisions
+            mkdir -p "$rev_dir"
+            # 启动一档修订夹具：rev_boot <镜像副本> <目录> <期望 Rev 文本或->
+            rev_boot() {
+                rb_image=$1
+                rb_dir=$2
+                rb_want=$3
+                mkdir -p "$rb_dir"
+                : > "$rb_dir/serial.log"
+                : > "$rb_dir/debug.log"
+                : > "$rb_dir/console.log"
+                rb_status=通过
+                if ! "$helper" --timeout "$timeout_s" --marker "kernel core stage ends here" \
+                        --cwd "$rb_dir" --console "$rb_dir/console.log" \
+                        --log "$rb_dir/serial.log" --log "$rb_dir/debug.log" -- \
+                        "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
+                        -drive "file=$rb_image,format=raw,if=ide" -boot order=c \
+                        -serial "file:$rb_dir/serial.log" -debugcon "file:$rb_dir/debug.log" > "$rb_dir/runner.log" 2>&1; then
+                    rb_status=失败
+                fi
+                if ! grep -a -q -F -- "$kernel_banner" "$rb_dir/serial.log" "$rb_dir/debug.log" 2>/dev/null; then rb_status=失败; fi
+                if [ "$rb_want" != "-" ] && ! grep -a -q -F -- "$rb_want" "$rb_dir/serial.log" "$rb_dir/debug.log" 2>/dev/null; then rb_status=失败; fi
+                if grep -a -q -F '[ FATAL ]' "$rb_dir/serial.log" "$rb_dir/debug.log" 2>/dev/null; then rb_status=失败; fi
+                state_total=$((state_total + 1))
+                if [ "$rb_status" = 通过 ]; then state_passed=$((state_passed + 1)); else boot_failed=$((boot_failed + 1)); fi
+                printf '%-20s %-8s %-8s %-14s %s\n' "$4" "是" "$(if [ "$rb_want" = "-" ]; then printf -- '-'; else printf '%s' "$rb_want" | sed 's/.*Rev=//'; fi)" "$(if [ "$rb_want" = "-" ]; then printf -- '-'; else printf 'Rev=%s' "$(printf '%s' "$rb_want" | sed 's/.*Rev=//')"; fi)" "$rb_status"
+                printf '%s\t%s\t%s\t%s\t%s\n' "$4" "是" "$rb_want" "修订" "$rb_status" >> "$summary"
+            }
+            # ① 修订 2 正常启动：当前列表是修订 2，内核 Rev 应为 2
+            cp "$image_revision2" "$rev_dir/rev2/image.hdd" 2>/dev/null || { mkdir -p "$rev_dir/rev2"; cp "$image_revision2" "$rev_dir/rev2/image.hdd"; }
+            rev_boot "$rev_dir/rev2/image.hdd" "$rev_dir/rev2" 'Rev=0x0000000000000002' "两修订 修订2 直启"
+            # ② 修订 1 镜像启动一次，让状态区写下 Confirmed 的 ModuleRevision=1
+            mkdir -p "$rev_dir/rev1"
+            cp "$image_hdd" "$rev_dir/rev1/image.hdd"
+            rev_boot "$rev_dir/rev1/image.hdd" "$rev_dir/rev1" 'Rev=0x0000000000000001' "两修订 修订1 直启"
+            # ③ 把修订 1 的状态区搬进修订 2 副本，再发布假候选，逼选择器回退到回退目标修订 1
+            mkdir -p "$rev_dir/fallback"
+            cp "$image_revision2" "$rev_dir/fallback/image.hdd"
+            dd if="$rev_dir/rev1/image.hdd" of="$rev_dir/fallback/image.hdd" bs=512 \
+                skip=$((0x21000 / 512)) seek=$((0x21000 / 512)) count=$((4096 / 512)) conv=notrunc 2>/dev/null
+            "$fixboot" --image "$rev_dir/fallback/image.hdd" --publish --build-id "$bogus_build_id" --digest "$bogus_digest" > "$rev_dir/fallback/prepare.log" 2>&1 || true
+            rev_boot "$rev_dir/fallback/image.hdd" "$rev_dir/fallback" 'Rev=0x0000000000000001' "两修订 候选失败回退修订1"
+        else
+            boot_missing "两修订切换（三档）" "缺少 $image_revision2；先跑 make（或用 --image-revision2 指定）"
+        fi
+
         # 留证据、省空间：每档的最终状态报告落成文本，镜像副本删掉（要复跑就再跑一次本脚本）
         for case_dir in "$state_dir"/*; do
             [ -d "$case_dir" ] || continue
@@ -1008,7 +1323,7 @@ if [ "$with_boot" -eq 1 ]; then
             "$fixboot" --image "$case_dir/image.hdd" --report > "$case_dir/state-report.txt" 2>&1
             rm -f "$case_dir/image.hdd"
         done
-        # 验收与覆盖核验留下的副本同理：日志与逐例报告已经落盘，副本不必留（一次全量跑会攒几百兆）
+        # 验证与覆盖核验留下的副本同理：日志与逐例报告已经落盘，副本不必留（一次全量跑会攒几百兆）
         # 全部 .hdd 都是本脚本造的副本（真产物在 Out/ 下，不在这个目录里），收尾一并回收
         find "$out_dir" -name '*.hdd' -type f -delete 2>/dev/null || true
 
@@ -1017,12 +1332,15 @@ if [ "$with_boot" -eq 1 ]; then
         say ""
     fi
 
-    # —— 工业验收：失败注入、介质与控制器、引导状态机多轮 ——
+    # —— 扩展验证：失败注入、介质与控制器、引导状态机多轮 ——
     if [ "$accept" -eq 1 ]; then
         accept_dir=$out_dir/accept
         mkdir -p "$accept_dir"
         accept_total=0
         accept_passed=0
+        # G7 故障注入载体单独计数（也计入 accept/boot 的失败出口）
+        inject_total=0
+        inject_passed=0
 
         # 往镜像的绝对偏移写一串字节：字节以八进制转义给出（POSIX printf 只认 \ooo）
         inject_bytes() {
@@ -1072,7 +1390,7 @@ if [ "$with_boot" -eq 1 ]; then
             refresh_layout_checksum "$patch_image"
         }
 
-        # 工业验收的一档：expect 为 code:E-XXX-nn（日志里必须出现该编号且不进内核）
+        # 扩展验证的一档：expect 为 code:E-XXX-nn（日志里必须出现该编号且不进内核）
         # 或 ipl:N（IPL 只输出一位十六进制码到 0xE9，且绝不进内核）
         run_accept_case() {
             name=$1
@@ -1140,6 +1458,8 @@ if [ "$with_boot" -eq 1 ]; then
                 accept_status=失败
             fi
             boot_columns "$case_dir"
+            boot_volume_ok=否
+            if grep -a -q -F 'The system volume matches the layout descriptor' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null; then boot_volume_ok=是; fi
             [ "$boot_reached" = 是 ] || accept_status=失败
             accept_total=$((accept_total + 1))
             if [ "$accept_status" = 通过 ]; then
@@ -1151,7 +1471,48 @@ if [ "$with_boot" -eq 1 ]; then
             printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$boot_reached" "$boot_codes" "$boot_flush" "$accept_status" >> "$summary"
         }
 
-        # 工业验收的一档（WARN 档）：必须进内核，且日志里必须出现指定编号
+        # 扩展验证的一档：UEFI 自建控制器路径（强制路径变体）
+        # 判据：进内核、自建路径绑定行、控制器类型、闭包预装 13、挂卷与清单、无 E-KRN / FATAL
+        run_controller_case() {
+            name=$1
+            case_dir=$accept_dir/$2
+            want_controller=$3
+            shift 3
+            mkdir -p "$case_dir"
+            : > "$case_dir/serial.log"
+            : > "$case_dir/debug.log"
+            : > "$case_dir/console.log"
+            accept_status=通过
+            if ! "$helper" --timeout "$timeout_s" --marker "$kernel_marker" \
+                    --cwd "$case_dir" --console "$case_dir/console.log" \
+                    --log "$case_dir/serial.log" --log "$case_dir/debug.log" -- "$@" > "$case_dir/runner.log" 2>&1; then
+                accept_status=失败
+            fi
+            boot_columns "$case_dir"
+            boot_volume_ok=否
+            if grep -a -q -F 'The system volume matches the layout descriptor' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null; then boot_volume_ok=是; fi
+            [ "$boot_reached" = 是 ] || accept_status=失败
+            [ "$boot_preload" = 13 ] || accept_status=失败
+            # 控制器用例在进入内核后立即停机，内核侧的挂卷/清单行不会出现：
+            # 改判 UEFI 阶段已经完成的“卷标识核对 / 清单验证 / 步骤标记”三条
+            grep -a -q -F 'The system volume matches the layout descriptor' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null || accept_status=失败
+            grep -a -q -F 'The kernel set is verified' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null || accept_status=失败
+            grep -a -q -F 'The firmware boot services are exited' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null || accept_status=失败
+            grep -a -q -F 'The self-built controller path is bound' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null || accept_status=失败
+            grep -a -q -F "Controller=$want_controller" "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null || accept_status=失败
+            case "$boot_codes" in *E-KRN-*) accept_status=失败 ;; esac
+            if grep -a -q -F '[ FATAL ]' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null; then accept_status=失败; fi
+            accept_total=$((accept_total + 1))
+            if [ "$accept_status" = 通过 ]; then
+                accept_passed=$((accept_passed + 1))
+            else
+                boot_failed=$((boot_failed + 1))
+            fi
+            printf '%-20s %-8s %-8s %-6s %-8s %s\n' "$name" "$want_controller" "$boot_reached" "$boot_preload" "$boot_volume_ok" "$accept_status"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$want_controller" "$boot_reached" "$boot_preload" "$boot_volume_ok" "$accept_status" >> "$summary"
+        }
+
+        # 扩展验证的一档（WARN 档）：必须进内核，且日志里必须出现指定编号
         # 用于“状态写不进去 / 吊销记录不可用之后仍按降级路径继续启动”这类现场
         run_accept_warn_case() {
             name=$1
@@ -1169,6 +1530,8 @@ if [ "$with_boot" -eq 1 ]; then
                 accept_status=失败
             fi
             boot_columns "$case_dir"
+            boot_volume_ok=否
+            if grep -a -q -F 'The system volume matches the layout descriptor' "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null; then boot_volume_ok=是; fi
             [ "$boot_reached" = 是 ] || accept_status=失败
             printf '%s' "$boot_codes" | grep -q -- "$want_code" || accept_status=失败
             accept_total=$((accept_total + 1))
@@ -1214,7 +1577,7 @@ if [ "$with_boot" -eq 1 ]; then
             fi
         done
 
-        say "工业验收：失败注入"
+        say "扩展验证：失败注入"
         say "注入档               进内核   诊断编号       期望           结果"
         # 注入点全部由上面 JSON 的区起点派生（十进制，运行期不做 0x 常量算术）：
         # 布局魔数=layout 起点、布局校验和=layout 起点+16（改校验覆盖区里的卷标识首字节）、
@@ -1320,8 +1683,8 @@ if [ "$with_boot" -eq 1 ]; then
         # 只读介质 + Pending 候选：状态写入在只读介质上必然失败，必须报 E-CORE-70 WARN 后
         # 按降级路径继续启动；判据是“进内核 + 出现该编号”，不是只看状态列
         say ""
-        say "工业验收：只读介质与状态写入"
-        say "验收档               进内核   诊断编号       期望           结果"
+        say "扩展验证：只读介质与状态写入"
+        say "验证档               进内核   诊断编号       期望           结果"
         if ! command -v "$qemu" >/dev/null 2>&1; then
             boot_missing "只读 ISO + Pending" "找不到 QEMU：$qemu"
         elif [ ! -x "$fixboot" ]; then
@@ -1341,7 +1704,7 @@ if [ "$with_boot" -eq 1 ]; then
         fi
 
         say ""
-        say "工业验收：介质与控制器"
+        say "扩展验证：介质与控制器"
         say "介质档               进内核   诊断编号       刷新路径       结果"
         if command -v "$qemu" >/dev/null 2>&1; then
             set -- "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
@@ -1386,11 +1749,63 @@ if [ "$with_boot" -eq 1 ]; then
             boot_missing "介质与控制器" "找不到 QEMU"
         fi
 
+        say ""
+        say "扩展验证：UEFI 自建控制器路径"
+        say "验证档               控制器   进内核   预装   卷核对   结果"
+        if ! command -v "$qemu" >/dev/null 2>&1; then
+            boot_missing "AHCI 强制路径" "找不到 QEMU：$qemu"
+            boot_missing "NVMe 4Kn 强制路径" "找不到 QEMU：$qemu"
+        elif [ ! -r "$ovmf_code" ] || [ ! -r "$ovmf_vars" ]; then
+            boot_missing "AHCI 强制路径" "缺少 OVMF CODE/VARS：$ovmf_code / $ovmf_vars"
+            boot_missing "NVMe 4Kn 强制路径" "缺少 OVMF CODE/VARS：$ovmf_code / $ovmf_vars"
+        else
+            if [ ! -r "$image_controller" ]; then
+                boot_missing "AHCI 强制路径" "缺少 $image_controller；先跑 make ACCEPT（或用 --image-controller 指定）"
+            else
+                mkdir -p "$accept_dir/controller-ahci"
+                cp "$ovmf_vars" "$accept_dir/controller-ahci/vars.fd"
+                set -- "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
+                    -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+                    -drive "if=pflash,format=raw,file=$accept_dir/controller-ahci/vars.fd" \
+                    -drive "if=ide,format=raw,snapshot=on,file=$image_controller" -boot order=c \
+                    -serial "file:$accept_dir/controller-ahci/serial.log" -debugcon "file:$accept_dir/controller-ahci/debug.log"
+                run_controller_case "AHCI 强制路径" controller-ahci AHCI "$@"
+            fi
+            if [ ! -r "$image_controller" ]; then
+                boot_missing "USB 类码不支持" "缺少 $image_controller；先跑 make ACCEPT（或用 --image-controller 指定）"
+            else
+                # 负例：强制路径面对 xHCI 控制器，类码不是 AHCI / NVMe，必须停在 E-UEFI-102
+                mkdir -p "$accept_dir/controller-usb"
+                cp "$ovmf_vars" "$accept_dir/controller-usb/vars.fd"
+                set -- "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
+                    -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+                    -drive "if=pflash,format=raw,file=$accept_dir/controller-usb/vars.fd" \
+                    -device qemu-xhci,id=xhci \
+                    -drive "if=none,id=usbctrl,format=raw,snapshot=on,file=$image_controller" \
+                    -device usb-storage,bus=xhci.0,drive=usbctrl -boot order=c \
+                    -serial "file:$accept_dir/controller-usb/serial.log" -debugcon "file:$accept_dir/controller-usb/debug.log"
+                run_accept_case "USB 类码不支持" controller-usb code:E-UEFI-102 "$@"
+            fi
+            if [ ! -r "$image_controller_4kn" ]; then
+                boot_missing "NVMe 4Kn 强制路径" "缺少 $image_controller_4kn；先跑 make ACCEPT（或用 --image-controller-4kn 指定）"
+            else
+                mkdir -p "$accept_dir/controller-nvme"
+                cp "$ovmf_vars" "$accept_dir/controller-nvme/vars.fd"
+                set -- "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
+                    -drive "if=pflash,format=raw,readonly=on,file=$ovmf_code" \
+                    -drive "if=pflash,format=raw,file=$accept_dir/controller-nvme/vars.fd" \
+                    -drive "file=$image_controller_4kn,format=raw,if=none,id=nvctrl,snapshot=on" \
+                    -device "nvme,drive=nvctrl,serial=LPOSCTRL,logical_block_size=4096,physical_block_size=4096" -boot order=c \
+                    -serial "file:$accept_dir/controller-nvme/serial.log" -debugcon "file:$accept_dir/controller-nvme/debug.log"
+                run_controller_case "NVMe 4Kn 强制路径" controller-nvme NVME "$@"
+            fi
+        fi
+
         # 吊销与防回滚三档：变体镜像由 make 生成（各自 json 记录偏移）；缺文件按基础设施缺失跳过
         # 三档的判据分别是：E-CORE-66 停机、E-CORE-75 WARN 后仍进内核、E-CORE-74 停机
         say ""
-        say "工业验收：吊销与防回滚"
-        say "验收档               进内核   诊断编号       期望           结果"
+        say "扩展验证：吊销与防回滚"
+        say "验证档               进内核   诊断编号       期望           结果"
         if ! command -v "$qemu" >/dev/null 2>&1; then
             boot_missing "防回滚下限" "找不到 QEMU：$qemu"
             boot_missing "吊销记录损坏" "找不到 QEMU：$qemu"
@@ -1429,7 +1844,7 @@ if [ "$with_boot" -eq 1 ]; then
         # 候选用缺省集自己的 BuildId：状态记录里的清单摘要不参与启动期校验，
         # 于是能造出一个“能通过验证的候选”，把 Trying 递减到 Failed 这条真实路径走完
         say ""
-        say "工业验收：引导状态机多轮"
+        say "扩展验证：引导状态机多轮"
         say "序列                 步骤                                   期望           结果"
         sequence_result() {
             accept_total=$((accept_total + 1))
@@ -1491,8 +1906,12 @@ if [ "$with_boot" -eq 1 ]; then
                 -serial "file:$seq2_dir/serial-1.log" -debugcon "file:$seq2_dir/debug-1.log" \
                 > "$seq2_dir/runner-1.log" 2>&1 || confirm_status=失败
             attempt_id=$("$fixboot" --image "$seq2_dir/image.hdd" --report 2>/dev/null | sed -n 's/.*尝试身份=\([0-9]*\).*/\1/p' | head -1)
+            # 确认写 Confirmed 必须带本次装载的模块修订号：取构建暂存的 Modules.list 的 revision；
+            # 没有构建产物时按 1（测试介质默认修订）
+            module_revision=$(sed -n 's/^revision //p' "$root/Packages/LikesProgramOS/Out/KernelSetStage/Modules.list" 2>/dev/null | head -1)
+            [ -n "$module_revision" ] || module_revision=1
             if [ -n "$attempt_id" ] && [ "$attempt_id" != 0 ] &&
-               "$fixboot" --image "$seq2_dir/image.hdd" --confirm "$attempt_id" > "$seq2_dir/confirm.log" 2>&1; then
+               "$fixboot" --image "$seq2_dir/image.hdd" --confirm "$attempt_id" --revision "$module_revision" > "$seq2_dir/confirm.log" 2>&1; then
                 "$helper" --timeout "$timeout_s" --marker "$kernel_marker" --cwd "$seq2_dir" \
                     --console "$seq2_dir/console-2.log" \
                     --log "$seq2_dir/serial-2.log" --log "$seq2_dir/debug-2.log" -- \
@@ -1511,10 +1930,86 @@ if [ "$with_boot" -eq 1 ]; then
             boot_missing "引导状态机多轮" "缺少 FixBootState 或读不到缺省集 BuildId"
         fi
 
+        # —— G7 故障注入载体（T7.1①Baleen 交接包 / ②合法签名坏容器）——
+        # 判据：进内核=是（内核横幅出现）、内核侧 FATAL 编号在日志里、26 秒定长跑出现复位循环
+        # （≥2 次 BaleenStub / ≥2 条编号）、状态区第一轮已写 Confirmed（代次≥1）。
+        # Baleen 自己的判定与日志不动：故障在交接前才注入，失败可见性由内核侧统一给出
+        say ""
+        say "扩展验证：G7 故障注入载体"
+        say "注入档               进内核   FATAL编号   复位循环  状态推进  结果"
+        run_inject_case() {
+            inj_name=$1
+            inj_image=$2
+            inj_code=$3
+            inj_dir=$accept_dir/inject-$inj_name
+            mkdir -p "$inj_dir"
+            : > "$inj_dir/serial.log"
+            : > "$inj_dir/debug.log"
+            : > "$inj_dir/console.log"
+            # 拷贝到段目录再跑（不写构建产物）；不带 -no-reboot，才能观察复位循环；
+            # 观察窗口与运行期失败档共用 reset_window_s
+            cp "$inj_image" "$inj_dir/image.hdd"
+            ( timeout -s KILL "$reset_window_s" "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none \
+                  -drive "file=$inj_dir/image.hdd,format=raw,if=ide" -boot order=c \
+                  -serial "file:$inj_dir/serial.log" -debugcon "file:$inj_dir/debug.log" >/dev/null 2>&1 ) || true
+            inj_status=通过
+            inj_starts=$(grep -a -c 'BALEENSTUB' "$inj_dir/serial.log" 2>/dev/null || true)
+            inj_fatals=$(grep -a -c -- "$inj_code" "$inj_dir/serial.log" 2>/dev/null || true)
+            inj_reached=否
+            if grep -a -q -F -- "$kernel_banner" "$inj_dir/serial.log" "$inj_dir/debug.log" 2>/dev/null; then inj_reached=是; fi
+            inj_reset=否
+            [ "$inj_starts" -ge 2 ] && inj_reset=是
+            inj_state=否
+            if [ -x "$fixboot" ] && "$fixboot" --image "$inj_dir/image.hdd" --report > "$inj_dir/state-report.txt" 2>&1; then
+                inj_generation=$(sed -n 's/.*代次=\([0-9]*\).*/\1/p' "$inj_dir/state-report.txt" | head -n 1)
+                [ -n "$inj_generation" ] && [ "$inj_generation" -ge 1 ] && inj_state=是
+            fi
+            [ "$inj_reached" = 是 ] || inj_status=失败
+            [ "$inj_fatals" -ge 2 ] || inj_status=失败
+            [ "$inj_reset" = 是 ] || inj_status=失败
+            [ "$inj_state" = 是 ] || inj_status=失败
+            rm -f "$inj_dir/image.hdd"
+            inject_total=$((inject_total + 1))
+            if [ "$inj_status" = 通过 ]; then inject_passed=$((inject_passed + 1)); else boot_failed=$((boot_failed + 1)); fi
+            accept_total=$((accept_total + 1))
+            if [ "$inj_status" = 通过 ]; then accept_passed=$((accept_passed + 1)); fi
+            printf '%-20s %-8s %-12s %-10s %-8s %s\n' "$inj_name" "$inj_reached" "$inj_code×$inj_fatals" "$inj_reset" "$inj_state" "$inj_status"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$inj_name" "$inj_reached" "$inj_code×$inj_fatals" "$inj_reset" "$inj_state" "$inj_status" >> "$summary"
+        }
+        run_inject_case baleen-handoff-missing "$image_fault_baleen_prefix"1.hdd E-KRN-50
+        run_inject_case baleen-manifest-bad "$image_fault_baleen_prefix"2.hdd E-KRN-52
+        run_inject_case baleen-record-bad "$image_fault_baleen_prefix"3.hdd E-KRN-53
+        run_inject_case baleen-buildid-bad "$image_fault_baleen_prefix"4.hdd E-KRN-56
+        run_inject_case baleen-major-gate "$image_fault_baleen_prefix"5.hdd E-KRN-56
+        run_inject_case baleen-digest-bad "$image_fault_baleen_prefix"6.hdd E-KRN-58
+        run_inject_case container-bad "$image_fault_container" E-KRN-57
+        run_inject_case init-fail "$image_fault_init" E-KRN-59
+
         say ""
         say "验大小计：通过 $accept_passed/$accept_total（明细在 Out/check/accept/）"
         say ""
     fi
+
+    # —— T7.2 收口：G7 验证总计（数字与 summary 开头批次行、flush 各表一致）——
+    # 总检查项 = 宿主用例数 + 启动矩阵档数 + 运行期档数 + 状态演练档数 + 失败注入档数；
+    # 不含“每种载体里的每一条断言”，断言逐条落在各自的逐例日志里
+    if [ "$accept" -eq 1 ]; then
+        inject_note="$inject_passed/$inject_total 档（Baleen 交接包 6 + 坏容器 1 + Init 失败 1）"
+    else
+        inject_note="未运行（需要 --accept；三类载体见 T7.1）"
+    fi
+    say ""
+    say "G7 验证总计（$(if [ "$accept" -eq 1 ]; then printf -- '--accept'; else printf -- '--with-boot'; fi)）"
+    say "  宿主检查：$host_passed/$host_total 工具，用例合计 $host_cases"
+    say "  启动矩阵：$matrix_passed/$matrix_total 档（含 NVMe 4Kn 与 4 个 xHCI USB 档）"
+    say "  运行期模块：$runtime_passed/$runtime_total 档（含必需失败复位循环）"
+    if [ "$state_4kn" -gt 0 ]; then
+        say "  状态演练：$state_passed/$state_total 档（主线 $((state_total - state_4kn)) + 4Kn 状态 $state_4kn，含两修订切换 3 档）"
+    else
+        say "  状态演练：$state_passed/$state_total 档（含两修订切换 3 档）"
+    fi
+    say "  失败注入（G7 三类载体）：$inject_note"
+    say "  总检查项：$((host_cases + matrix_total + runtime_total + state_total + inject_total))（宿主用例 + 启动/演练/注入档数）"
 fi
 
 say "汇总写在 ${summary#"$root/"}，逐例明细在同一目录"

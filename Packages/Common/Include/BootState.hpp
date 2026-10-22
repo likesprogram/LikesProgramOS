@@ -1,8 +1,12 @@
 /* BootState.hpp
     引导状态记录：内核集选版的持久状态，读写引导状态区域里的八槽环形记录
 
-    记录字节表、槽位布局、写入顺序与掉电语义见 Docs/Specs/Baleen/引导状态记录.md；
+    记录字节表、槽位布局、写入顺序与掉电语义由本文件定义；
     读取取代次最高且可验证的那一个槽位，空区域与损坏分开处理；写入只落在最旧的槽位并读回校验
+    保留区 0x0D8..0x0E0 存放 ModuleRevision（u64，回退目标修订号），0x0E0..0x0EC 仍是
+    12 字节保留（必须全零），Checksum 的覆盖范围 [0x000, 0x0EC) 不变——新字段在覆盖范围内；
+    该字段只扩保留区、记录版本仍为 1，**不做前向兼容**：旧引导器按“保留字段必须全零”
+    会把带非零 ModuleRevision 的新记录判为损坏，引导器与内核集必须同批更新
 
     区域切成 8 个等长槽位，**每个槽位固定 512 字节**；槽位长度与设备逻辑块解耦，
     一次提交按设备逻辑块落盘：逻辑块不大于槽位时写一个槽位，4Kn（4096 字节块）上
@@ -12,10 +16,10 @@
     这样 512 / 1024 / 2048 / 4096 逻辑块下区域都能整段读写，4Kn 上恰好一个逻辑块
     读取取代次最高且可验证的槽位；写入落在"最旧"的那个槽位（代次最低，未写过视为最低），
     当前最新的那个槽位在写的过程中永不被覆盖——这条不变量是掉电安全的全部依据
-    槽位环形使用：连续多次断电各毁一个槽位也要毁到第 8 个才会丢掉全部记录（见规格第一节）
+    槽位环形使用：连续多次断电各毁一个槽位也要毁到第 8 个才会丢掉全部记录
 
-    **格式尚未发布，只有一个版本：`kVersion` 为 1，读写都按同一张字段表。** 字段调整直接改本文件与
-    Docs/Specs/Baleen/引导状态记录.md 的字节表，不留兼容分支——首次发布前不背兼容包袱；
+    **格式尚未发布，只有一个版本：`kVersion` 为 1，读写都按同一张字段表。** 字段调整直接改本文件的
+    字段表，不留兼容分支——首次发布前不背兼容包袱；
     读方遇到版本号不是 1 的记录按损坏处理，不猜字段表
     运行期写入方（Updater / Init）必须读—改—写，保留撤销字段与已试次数：
     清掉撤销字段等于把吊销退回到"依赖签名记录文件在场"
@@ -50,7 +54,7 @@ namespace Baleen {
             // 记录必须落在单份槽位之内：这是"一次提交只改变一个槽位"的前提
             static_assert(kRecordBytes <= kCopyBytes, "记录长度超过一个槽位，单次提交只改变一个槽位的前提不成立");
 
-            // 记录状态：与规格第四节一致
+            // 记录状态
             enum class State : uint8_t {
                 Confirmed = 1,   // 已知良好集已确认，无待试候选
                 Pending = 2,     // 候选已完整落盘，尚未试启动
@@ -71,6 +75,10 @@ namespace Baleen {
                 uint8_t candidateManifestDigest[32] = {};   // 候选集清单摘要
                 uint64_t seenSecurityVersion = 0;       // 本设备已见最高安全版本，只增不减
                 Revocation::Facts revocation{};         // 已应用的吊销事实，只增不减；运行期写入方必须保留
+                // 回退目标修订号：记录的是已知良好侧（Confirmed 侧）的模块修订，与 Modules.list 的
+                // revision 同值；候选修订不另存字段（候选就是集目录里当前的清单与列表）
+                // 0 表示无修订：旧格式记录，或该修订没有可回退的修订号，选择器按当前列表的 revision 解释
+                uint64_t moduleRevision = 0;
             };
 
             // 读取结果分类
@@ -118,10 +126,13 @@ namespace Baleen {
 
             // 受控恢复：把状态区域全部槽位清零，回到出厂形态（选版按"无记录"直启缺省集）
             // 只写状态区域，不碰系统卷；介质不可写或写后读回不是全零都返回 false
+            // 清零本身不写 ModuleRevision：下一次选择器按"无记录"重建 Confirmed 记录时
+            // 以当前 Modules.list 的 revision 填入（与出厂首次启动同一口径）
             bool Clear(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes);
 
             // 受控恢复：用有效记录重建每一个不可用的槽位，把冗余恢复到满
             // 没有可用记录（空区域、全部不可用、或最高代次出现两次）返回 false，不猜测目标集
+            // 重建用读出的整份记录，ModuleRevision 与撤销事实原样保留，不得因修复而清零
             bool Repair(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t& writtenGeneration);
 
             // 人工接受：把已见最高安全版本下调到显式接受的值；这是防回滚的唯一例外
@@ -131,15 +142,19 @@ namespace Baleen {
 
             // 发布候选：写 Pending 记录（候选标识、清单摘要与可用尝试次数）——运行期发布方（Updater）的写入步骤
             // 候选集全部文件完整落盘、清单签名与摘要检查通过之后调用；区域为空时按首次写入处理
-            // 已有记录时保留已知良好集、已见最高版本与撤销事实，只换候选与剩余次数
+            // 已有记录时保留已知良好集、已见最高版本、撤销事实与 ModuleRevision，只换候选与剩余次数
+            // ModuleRevision 原样继承上一份有效 Confirmed 记录的值，不因候选发布而改动；
+            // 空区域上没有已知良好侧，新记录按无修订（0）起步
             // 剩余次数为 0 或超过上限、候选标识全零、记录损坏、介质不可写或写不成立都返回 false
             bool PublishCandidate(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, const uint8_t candidateBuildId[32], const uint8_t candidateManifestDigest[32], uint8_t triesRemaining, uint64_t& writtenGeneration);
 
             // 提交确认：当前记录仍是 Trying 且 AttemptId 等于收到的值时才写 Confirmed
+            // moduleRevision 是本次装载所用修订的修订号（来自当前列表副本的 revision），写进
+            // ModuleRevision 字段；新写方写出的 Confirmed 记录该字段必须非零，收 0 直接返回 false
             // 这是运行期确认方（Init）的写入步骤：候选字段一次写入转成已知良好集字段并清零候选，
-            // 已见最高版本、撤销事实与已试次数原样保留（已试次数是只增的审计账，转正不清零）。
-            // 记录不是 Trying、AttemptId 不符、没有记录或写不成立都返回 false
-            bool ConfirmAttempt(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t attemptId, uint64_t& writtenGeneration);
+            // 已见最高版本、撤销事实与已试次数原样保留（已试次数是只增的审计账，转正不清零）
+            // 记录不是 Trying、AttemptId 不符、修订号为零、没有记录或写不成立都返回 false
+            bool ConfirmAttempt(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t attemptId, uint64_t moduleRevision, uint64_t& writtenGeneration);
         }
     }
 }

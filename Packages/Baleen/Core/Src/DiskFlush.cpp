@@ -8,8 +8,8 @@
 */
 
 #include <DiskFlush.hpp>
-#include <AhciCommand.hpp>
 #include <LayoutDescriptor.hpp>
+#include <Storage/AhciCommand.hpp>
 
 #include <stddef.h>
 
@@ -23,6 +23,9 @@ extern "C" void _Cpu_Write32(uintptr_t address, uint32_t value);
 
 namespace Baleen {
     namespace Core {
+        // AHCI 命令编码语义在 Common/Storage，Baleen 与内核 Ahci 模块共用；本文件只用别名引用
+        namespace AhciCommand = Storage::AhciCommand;
+
         namespace DiskFlush {
             namespace {
                 // PCI 配置空间的地址端口与数据端口

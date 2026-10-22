@@ -1,7 +1,10 @@
 /* Core.cpp
     BaleenCore 引导阶段的主流程：装配自己的控制台并打印横幅，核对 Stub 交权块与自身镜像事实，
-    初始化 CPU 快照，建立运行期段表与中断表，播报环境事实，读取并校验内核镜像，
-    装载到装载地址、构造 BootInfo 与恒等映射页表，切长模式进入内核
+    初始化 CPU 快照，建立运行期段表与中断表，播报环境事实，选版并读取、校验内核镜像，
+    按 Modules.list 预装引导闭包，装载到装载地址、构造 BootInfo 与恒等映射页表，切长模式进入内核
+
+    只有内核镜像、清单副本、模块记录与模块字节全部就绪才交权：装载或预装失败都按两阶段选版
+    回退（候选集失败改选已知良好集，已知良好集失败终止），不交出残缺的交接现场
 
     按 Stub 的分工约定，本文件承担全部启动流程与全部诊断输出：步骤顺序、进度行、
     失败原因与停机都集中在这里；Console.cpp 只做控制台装配，不打印也不停机
@@ -12,6 +15,7 @@
 #include <DiskFlush.hpp>
 #include <BiosBlockDevice.hpp>
 #include <BootClock.hpp>
+#include <BootClosure.hpp>
 #include <BootInfo.hpp>
 #include <BootMemory.hpp>
 #include <CoreHandoff.hpp>
@@ -28,6 +32,7 @@
 #include <Print/SerialTarget.hpp>
 #include <PrintTarget.hpp>
 #include <ReadFailure.hpp>
+#include <ScreenFacts.hpp>
 #include <SelectSet.hpp>
 #include <Storage/BlockDevice.hpp>
 #include <Storage/Error.hpp>
@@ -97,7 +102,7 @@ namespace {
     constexpr Baleen::Diagnostic kFailVolumeUuid{"E-CORE-30", "The system volume identifier doesn't match the layout descriptor"};
     constexpr Baleen::Diagnostic kException{"E-CORE-31", "Exception"};
     constexpr Baleen::Diagnostic kWarnBootBudget{"E-CORE-55", "The boot time is beyond the budget"};
-    // 引导时间预算：从 Stub 进入算起，内核入口之前的毫秒数；取值依据见一级引导契约第七节
+    // 引导时间预算：从 Stub 进入算起，内核入口之前的毫秒数
     constexpr uint32_t kBootBudgetMs = 3000;
     constexpr Baleen::Diagnostic kWarnKernelMissing{"E-CORE-32", "The kernel image isn't in the system volume: the volume has no kernel yet"};
     // 没有内核镜像可交：停在可观测的边界上，不再往装载与交接走
@@ -127,6 +132,12 @@ namespace {
     uint8_t s_firstBlock[kLayoutBlockBytes] = {};
     // 选版结果：目标集路径、集目录与集身份
     Baleen::Core::SelectedSet s_selected;
+    // 预装：清单条目到预装条目的视图缓冲、来源与计划；机制本身不动态分配，这些都放静态存储
+    Baleen::Core::PreloadArtifact s_listedArtifactViews[Baleen::Core::kPreloadMaxEntries] = {};
+    Baleen::Core::PreloadSource s_preloadSource;
+    Baleen::Core::PreloadPlan s_preloadPlan;
+    // 预装结果：清单副本、列表副本与记录数组的物理地址与长度，随 BootInfo 交给内核
+    Baleen::Core::PreloadResult s_preloadResult;
     // 交权块：固定字段校验通过后常驻，Fail 路径经它取读盘失败记录
     const Baleen::CoreHandoff* s_handoff = nullptr;
     // 交接状态：BootInfo、内存图副本与恒等映射页表，都在未初始化区
@@ -234,11 +245,145 @@ namespace {
         return total;
     }
 
+    // 把清单事实里的列表产物视图搭成预装机制的条目视图：两者字段同义、布局不同，
+    // 这里只搭视图，路径与摘要仍指向清单副本里的字节（本阶段只读）；非闭包条目也在视图里，
+    // PlanPreload 按引导闭包期望集筛出要预装的成员
+    uint32_t BuildListedArtifacts(const Baleen::Core::ManifestFacts& manifest) {
+        uint32_t count = manifest.listedArtifactCount;
+        if (count > Baleen::Core::kPreloadMaxEntries) count = Baleen::Core::kPreloadMaxEntries;
+        for (uint32_t i = 0; i < count; ++i) {
+            const Baleen::Core::ListedArtifact& entry = manifest.listedArtifacts[i];
+            s_listedArtifactViews[i].artifactIndex = entry.artifactIndex;
+            s_listedArtifactViews[i].pathBytes = static_cast<uint16_t>(entry.pathBytes);
+            s_listedArtifactViews[i].dataBytes = entry.dataBytes;
+            s_listedArtifactViews[i].path = entry.path;
+            s_listedArtifactViews[i].digest = entry.digest;
+        }
+        return count;
+    }
+
+    // 预装引导闭包：解析 Modules.list、按期望集筛出闭包成员并逐个核对与读入，产出三类交接缓冲事实
+    // 落点在内存图里找低 4 GiB 的连续可用区间，避开低 1 MiB、引导器映像与内核装载跨度；
+    // 失败返回带编号的原因且不留下半套记录，调用方按两阶段选版回退处理
+    Baleen::Diagnostic PreloadBootClosure(const Baleen::CoreHandoff& handoff, const Baleen::Core::KernelFacts& kernelFacts) {
+        const Baleen::Core::ManifestFacts& manifest = s_selected.handoff.manifest;
+        s_preloadSource = Baleen::Core::PreloadSource{};
+        s_preloadSource.setDirectory = s_selected.setDirectory;
+        s_preloadSource.manifest = manifest.manifestCopy;
+        s_preloadSource.manifestBytes = manifest.manifestBytes;
+        s_preloadSource.list = manifest.bootListCopy;
+        s_preloadSource.listBytes = manifest.bootListBytes;
+        s_preloadSource.moduleMajor = manifest.moduleMajor;
+        s_preloadSource.artifacts = s_listedArtifactViews;
+        s_preloadSource.artifactCount = BuildListedArtifacts(manifest);
+        if (const Baleen::Diagnostic reason = Baleen::Core::PlanPreload(s_preloadSource, s_preloadPlan); reason.code != nullptr) return reason;
+        Baleen::Core::MemoryMapAllocator allocator(handoff.memoryMap, handoff.memoryMapCount,
+            reinterpret_cast<uintptr_t>(__image_start), static_cast<uint64_t>(__bss_end - __image_start),
+            kernelFacts.loadAddress, kernelFacts.memoryBytes);
+        Baleen::Core::StoragePreloadSink sink(s_ext4, allocator);
+        return Baleen::Core::PreloadModules(s_preloadPlan, sink, s_preloadResult);
+    }
+
+    // 写十进制无符号数：预装摘要行的 count 与 bytes 用十进制，只做 32 位除法，
+    // 避免 32 位目标上把 64 位除法与运行库带进镜像
+    void WriteDecimal(uint32_t value) {
+        char text[11] = {};
+        uint32_t digits = 0;
+        do {
+            text[digits++] = static_cast<char>('0' + value % 10);
+            value /= 10;
+        } while (value != 0 && digits < sizeof(text) - 1);
+        for (uint32_t i = 0; i < digits / 2; ++i) {
+            const char swap = text[i];
+            text[i] = text[digits - 1 - i];
+            text[digits - 1 - i] = swap;
+        }
+        text[digits] = '\0';
+        Print::Write(text);
+    }
+
+    // 预装摘要行：G2/G5 断言用，count 与记录数一致、bytes 是全部模块字节之和、bad 恒为 0
+    // 预装失败不落成半套，也不走本行；每模块的 idx/base/len 只在 DEBUG 等级输出，本阶段不输出
+    void ReportPreloadSummary() {
+        Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+        Print::Write("boot closure preloaded: count=");
+        WriteDecimal(s_preloadResult.recordCount);
+        Print::Write(" bytes=");
+        WriteDecimal(static_cast<uint32_t>(s_preloadResult.moduleBytes));
+        Print::Write(" bad=0\r\n");
+    }
+
+    // 播报本次选定的目标集：集标识按字节顺序的 64 位小写十六进制，与集目录名同一串字符
+    // 回退改选之后同样播报一次，日志里能看出交接用的是哪一份
+    void ReportSelectedSet() {
+        Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+        Print::Write("Set=");
+        static const char kHexDigits[] = "0123456789abcdef";
+        for (uint32_t i = 0; i < 32; ++i) {
+            const char text[3] = { kHexDigits[s_selected.buildId[i] >> 4], kHexDigits[s_selected.buildId[i] & 0x0f], '\0' };
+            Print::Write(text);
+        }
+        Print::Write("\r\n");
+        Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+        Print::Write("Attempt=");
+        Print::WriteHex64(s_selected.attemptId);
+        Print::Write(" Rev=");
+        Print::WriteHex64(s_selected.moduleRevision);
+        Print::Write("\r\n");
+    }
+
+    // 测试用故障注入：只在 FAULT_INJECT 非零的测试构建里生效（发布构建编译为空）
+    // 预装、验签与选版都已完成，注入点只改“交给内核的那一份事实”，因此断言落在内核侧 E-KRN-5x：
+    //   1 交接包缺失（清单副本指针清零）      → 内核 E-KRN-50
+    //   2 清单副本魔数损坏                    → 内核 E-KRN-52
+    //   3 记录数组头计数损坏                  → 内核 E-KRN-53
+    //   4 清单副本 BuildId 损坏               → 内核 E-KRN-56
+    //   5 列表副本主版本损坏                  → 内核 E-KRN-56
+    //   6 首个模块字节损坏（摘要不符）        → 内核 E-KRN-58
+    // 注入都不改引导器自己的判定与日志：引导器仍认为交接包完整，失败可见性由内核侧给出
+#if FAULT_INJECT
+    void ApplyFaultInjection() {
+        uint8_t* const manifest = reinterpret_cast<uint8_t*>(s_bootInfo.kernelSetManifest);
+        // 记录数组：8 字节头（计数）后接 16 字节记录；记录里的 phys 指向模块字节
+        uint8_t* const records = reinterpret_cast<uint8_t*>(s_bootInfo.bootModules);
+        switch (FAULT_INJECT) {
+            case 1: s_bootInfo.kernelSetManifest = 0; break;
+            case 2: if (manifest != nullptr) manifest[0] = static_cast<uint8_t>(~manifest[0]); break;
+            case 3: if (records != nullptr) { records[0] = 0xFF; records[1] = 0xFF; } break;
+            case 4: if (manifest != nullptr) manifest[0x10] = static_cast<uint8_t>(~manifest[0x10]); break;
+            case 5: {
+                // 列表副本的第三行是 major 行：把版本数字改成 2，与 .os 的 major 1 不等
+                uint8_t* const list = reinterpret_cast<uint8_t*>(s_bootInfo.bootList);
+                const uint32_t bytes = s_bootInfo.bootListBytes;
+                for (uint32_t index = 0; index + 7 < bytes; ++index) {
+                    if (list[index] == 'm' && list[index + 1] == 'a' && list[index + 2] == 'j' && list[index + 3] == 'o' && list[index + 4] == 'r' && list[index + 5] == ' ') {
+                        list[index + 6] = '2';
+                        break;
+                    }
+                }
+                break;
+            }
+            case 6: if (records != nullptr) {
+                // 记录布局：8 字节头 + 每条 {phys u64, bytes u32, artifactIndex u16, reserved u16}
+                // 改模块文件的最后一个字节：容器解析不读段文件内容，但摘要必然不符 → 内核装载第 1 步 E-KRN-58
+                uint64_t modulePhys = 0;
+                uint32_t moduleBytes = 0;
+                for (uint32_t index = 0; index < 8; ++index) modulePhys |= static_cast<uint64_t>(records[8 + index]) << (8 * index);
+                for (uint32_t index = 0; index < 4; ++index) moduleBytes |= static_cast<uint32_t>(records[16 + index]) << (8 * index);
+                uint8_t* const module = reinterpret_cast<uint8_t*>(modulePhys);
+                if (module != nullptr && moduleBytes != 0) module[moduleBytes - 1] = static_cast<uint8_t>(~module[moduleBytes - 1]);
+            } break;
+            default: break;
+        }
+    }
+#endif
+
     // 构造交给内核的 BootInfo：字段取自交权块与布局描述，内存图复制到本阶段的静态存储
     // 固件状态填 None：BIOS 路径进入长模式后没有可调用的固件服务，内核按这个事实固定运行模式
     // 输出通道按事实给出：调试口无条件可用，串口以存在性探测为准；内核按这些位装配自己的控制台
     // 启动来源取自布局描述：内核与运行期更新据此定位启动介质、系统卷、状态区域与内核路径
-    void BuildBootInfo(const Baleen::CoreHandoff& handoff, const Baleen::Core::SelectedSet& selected) {
+    // 引导闭包交接包与屏幕事实由预装与采集步骤给出，本函数只按字段一一填入
+    void BuildBootInfo(const Baleen::CoreHandoff& handoff, const Baleen::Core::SelectedSet& selected, const Baleen::Core::PreloadResult& preloads, const Baleen::Core::ScreenFacts& screen) {
         using Baleen::LayoutDescriptor;
         uint32_t count = handoff.memoryMapCount;
         if (count > kMemoryMapEntries) count = kMemoryMapEntries;
@@ -254,8 +399,16 @@ namespace {
         s_bootInfo.channels = channels;
         s_bootInfo.memoryMapCount = count;
         s_bootInfo.memoryMapTruncated = handoff.memoryMapTruncated;
-        s_bootInfo.reserved0 = 0;
-        for (uint32_t i = 0; i < 4; ++i) s_bootInfo.reserved[i] = 0;
+        // FATAL 等待按构建配置给出：0 = 内核按默认 10 秒；屏幕事实按引导期采集到的形态填，
+        // 采集不成立时是 None，内核只走流式通道，不改启动判定
+        s_bootInfo.fatalWaitMs = Baleen::Core::kFatalWaitMs;
+        s_bootInfo.screenAddress = screen.address;
+        s_bootInfo.screenWidth = screen.width;
+        s_bootInfo.screenHeight = screen.height;
+        s_bootInfo.screenStride = screen.stride;
+        s_bootInfo.screenBytes = screen.bytes;
+        s_bootInfo.screenKind = static_cast<uint32_t>(screen.kind);
+        s_bootInfo.screenFormat = static_cast<uint32_t>(screen.format);
         s_bootInfo.memoryMap = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(s_bootMemoryMap));
         // 内核集身份：选版成功的集标识与试启动身份；选版成功时集一定经过清单验签
         memcpy(s_bootInfo.kernelSetBuildId, selected.buildId, Boot::InfoLayout::kKernelSetBuildIdBytes);
@@ -279,7 +432,13 @@ namespace {
         // 引导器自身占用区间：内核不得把 BaleenCore 的残留当可用内存
         s_bootInfo.loaderBegin = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(__image_start));
         s_bootInfo.loaderBytes = static_cast<uint64_t>(__bss_end - __image_start);
-        for (uint32_t i = 0; i < 4; ++i) s_bootInfo.reserved1[i] = 0;
+        // 引导闭包交接包：清单副本、列表副本与预装记录数组都由预装步骤给出，
+        // 三者都是验签/摘要通过的那一份字节或指向实际装载的模块字节
+        s_bootInfo.kernelSetManifest = preloads.manifestPhys;
+        s_bootInfo.bootList = preloads.listPhys;
+        s_bootInfo.bootModules = preloads.recordsPhys;
+        s_bootInfo.kernelSetManifestBytes = preloads.manifestBytes;
+        s_bootInfo.bootListBytes = preloads.listBytes;
     }
 
     // 建恒等映射页表：PML4[0] 指向 PDPT，PDPT 的 4 项各指向一张页目录，2MiB 大页覆盖低 4GiB
@@ -477,86 +636,104 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
             Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "The flushable port isn't this medium's device; the boot state write has no durable guarantee");
     }
 
-    // —— 选版：读引导状态记录，选出目标集并验证清单与签名 ——
-    // 状态机与写入边界见 Docs/Specs/内核集更新与回滚.md 与 Baleen/引导状态记录.md；
-    // 清单与信任锚见 Docs/Specs/内核集清单与签名.md；只读介质与写失败按降级路径启动缺省集，
+    // —— 选版（第一阶段）：读引导状态记录，定下目标集并验证清单与签名 ——
+    // 选版落实引导状态记录的状态机与写入边界，并验证清单与信任锚；
+    // 只读介质与写失败按降级路径启动缺省集，
     // 缺省集与其它集一样先验证清单与签名（没有未验证的直启回退）
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Selecting the kernel set");
-    if (const Baleen::Diagnostic reason = Baleen::Core::SelectKernelSet(s_ext4, s_medium, stateOffset, stateBytes, s_kernelPath, Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldFlags), s_selected); reason.code != nullptr)
+    if (const Baleen::Diagnostic reason = Baleen::Core::BeginSetSelection(s_ext4, s_medium, stateOffset, stateBytes, s_kernelPath, Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldFlags), s_selected); reason.code != nullptr)
         Fail(reason);
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The kernel set is verified");
-    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
-    Print::Write("Set=");
-    {
-        // 集标识按字节顺序的 64 位小写十六进制，与集目录名同一串字符
-        static const char kHexDigits[] = "0123456789abcdef";
-        for (uint32_t i = 0; i < 32; ++i) {
-            const char text[3] = { kHexDigits[s_selected.buildId[i] >> 4], kHexDigits[s_selected.buildId[i] & 0x0f], '\0' };
-            Print::Write(text);
-        }
-    }
-    Print::Write("\r\n");
-    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
-    Print::Write("Attempt=");
-    Print::WriteHex64(s_selected.attemptId);
-    Print::Write("\r\n");
+    ReportSelectedSet();
 
-    // —— 内核镜像：按选中集的路径定位、读取并校验数据与整幅摘要 ——
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Locating and checking the kernel image");
+    // —— 内核镜像与引导闭包：装载或预装失败都按两阶段选版回退 ——
+    // 候选集失败时由选择器写 Failed 并改选已知良好集或上一修订；已知良好集（含缺省集）失败终止
+    // 只有内核镜像、清单副本、列表副本、预装记录与模块字节全部就绪才往下走，不交出残缺的交接现场
     Baleen::Core::KernelFacts kernelFacts;
-    bool kernelMissing = false;
-    const Baleen::Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, s_selected.kernelPath, s_selected.buildId, handoff->memoryMap, handoff->memoryMapCount, reinterpret_cast<uintptr_t>(__image_start), static_cast<uint64_t>(__bss_end - __image_start), kernelFacts, kernelMissing);
-    if (kernelMissing) {
-        Baleen::WriteDiagnostic(Baleen::PrintTargets::Tag::Warn, kWarnKernelMissing);
-    } else if (kernelReason.code != nullptr) {
-        Fail(kernelReason);
-    } else {
-        Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The kernel image is valid");
-        Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
-        Print::Write("Bytes=");
-        Print::WriteHex(kernelFacts.imageBytes);
-        Print::Write(" Load=");
-        Print::WriteHex(kernelFacts.loadAddress);
-        Print::Write(" Entry=");
-        Print::WriteHex(kernelFacts.entryOffset);
-        Print::Write("\r\n");
-        Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
-        Print::Write("BootInfo=");
-        Print::WriteHex(kernelFacts.bootInfoVersion);
-        Print::Write(" Build=");
-        Print::WriteHex(kernelFacts.buildId);
-        Print::Write("\r\n");
-    }
+    for (;;) {
+        // —— 内核镜像：按选中集的路径定位、读取并校验数据与整幅摘要 ——
+        Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Locating and checking the kernel image");
+        bool kernelMissing = false;
+        const Baleen::Diagnostic kernelReason = Baleen::Core::CheckKernelImage(s_ext4, s_selected.kernelPath, s_selected.buildId, handoff->memoryMap, handoff->memoryMapCount, reinterpret_cast<uintptr_t>(__image_start), static_cast<uint64_t>(__bss_end - __image_start), kernelFacts, kernelMissing);
+        Baleen::Diagnostic failure{};
+        bool preloadFailed = false;
+        if (kernelMissing) {
+            Baleen::WriteDiagnostic(Baleen::PrintTargets::Tag::Warn, kWarnKernelMissing);
+            failure = kWarnKernelMissing;
+        } else if (kernelReason.code != nullptr) {
+            failure = kernelReason;
+        } else {
+            Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The kernel image is valid");
+            Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+            Print::Write("Bytes=");
+            Print::WriteHex(kernelFacts.imageBytes);
+            Print::Write(" Load=");
+            Print::WriteHex(kernelFacts.loadAddress);
+            Print::Write(" Entry=");
+            Print::WriteHex(kernelFacts.entryOffset);
+            Print::Write("\r\n");
+            Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+            Print::Write("BootInfo=");
+            Print::WriteHex(kernelFacts.bootInfoVersion);
+            Print::Write(" Build=");
+            Print::WriteHex(kernelFacts.buildId);
+            Print::Write("\r\n");
 
-    // 没有内核镜像可交：WARN 已在上一步给出，停在可观测的边界上而不是空转
-    // 停在这里也是本阶段的终点，照常报出耗时与预算判定
-    if (kernelMissing) {
-        Baleen::WriteDiagnostic(Baleen::PrintTargets::Tag::Warn, kWarnNoKernel);
-        ReportBootTime(*handoff);
-        Stop();
-    }
+            // —— 装载：整幅读进装载地址，按静态内存跨度清零未落盘尾部 ——
+            // 读盘按扇区上取整，末尾填充也被写进内存，清零覆盖文件末尾之后的所有字节
+            Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Loading the kernel image");
+            if (const Baleen::Diagnostic reason = Baleen::Core::LoadKernelImage(s_ext4, s_selected.kernelPath, kernelFacts.loadAddress, kernelFacts.imageBytes); reason.code != nullptr) {
+                failure = reason;
+            } else {
+                uint8_t* const kernelImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(kernelFacts.loadAddress));
+                if (kernelFacts.memoryBytes > kernelFacts.imageBytes)
+                    memset(kernelImage + kernelFacts.imageBytes, 0, kernelFacts.memoryBytes - kernelFacts.imageBytes);
+                Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The kernel image is loaded");
+                Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+                Print::Write("Load=");
+                Print::WriteHex(kernelFacts.loadAddress);
+                Print::Write(" Bytes=");
+                Print::WriteHex(kernelFacts.imageBytes);
+                Print::Write(" Span=");
+                Print::WriteHex(kernelFacts.memoryBytes);
+                Print::Write("\r\n");
 
-    // —— 装载：整幅读进装载地址，按静态内存跨度清零未落盘尾部 ——
-    // 读盘按扇区上取整，末尾填充也被写进内存，清零覆盖文件末尾之后的所有字节
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Loading the kernel image");
-    if (const Baleen::Diagnostic reason = Baleen::Core::LoadKernelImage(s_ext4, s_selected.kernelPath, kernelFacts.loadAddress, kernelFacts.imageBytes); reason.code != nullptr)
-        Fail(reason);
-    uint8_t* const kernelImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(kernelFacts.loadAddress));
-    if (kernelFacts.memoryBytes > kernelFacts.imageBytes)
-        memset(kernelImage + kernelFacts.imageBytes, 0, kernelFacts.memoryBytes - kernelFacts.imageBytes);
-    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The kernel image is loaded");
-    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
-    Print::Write("Load=");
-    Print::WriteHex(kernelFacts.loadAddress);
-    Print::Write(" Bytes=");
-    Print::WriteHex(kernelFacts.imageBytes);
-    Print::Write(" Span=");
-    Print::WriteHex(kernelFacts.memoryBytes);
-    Print::Write("\r\n");
+                // —— 预装：按 Modules.list 把引导闭包读进低 4 GiB 并填记录 ——
+                Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Preloading the boot closure");
+                const Baleen::Diagnostic preloadReason = PreloadBootClosure(*handoff, kernelFacts);
+                if (preloadReason.code == nullptr) {
+                    Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The boot closure is preloaded");
+                    ReportPreloadSummary();
+                    break;
+                }
+                failure = preloadReason;
+                preloadFailed = true;
+            }
+        }
+
+        // —— 回退：候选集的装载 / 预装失败由选择器改选已知良好集或上一修订 ——
+        // 候选集失败是 WARN 加回退；已知良好集（含缺省集）失败原样返回原因，终止启动
+        Baleen::Core::SelectedSet fallback;
+        const Baleen::Diagnostic next = Baleen::Core::SelectAfterLoadFailure(s_ext4, s_medium, stateOffset, stateBytes, s_kernelPath, Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldFlags), s_selected, preloadFailed, failure, fallback);
+        if (next.code != nullptr) {
+            // 没有内核镜像可交且没有可回退的目标：停在可观测的边界上而不是空转，照常报出耗时
+            if (!preloadFailed && kernelMissing && next.code == kWarnKernelMissing.code) {
+                Baleen::WriteDiagnostic(Baleen::PrintTargets::Tag::Warn, kWarnNoKernel);
+                ReportBootTime(*handoff);
+                Stop();
+            }
+            Fail(next);
+        }
+        s_selected = fallback;
+        Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Warn, "The selected set failed to load; falling back to the recorded set");
+        ReportSelectedSet();
+    }
 
     // —— 交接状态：BootInfo 与恒等映射页表，都在本阶段的静态存储里 ——
+    // 屏幕事实在这里采集：只读 BDA，不成立时给 None，不影响启动判定
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Info, "Building the handover state");
-    BuildBootInfo(*handoff, s_selected);
+    const Baleen::Core::ScreenFacts screen = Baleen::Core::CollectScreenFacts();
+    BuildBootInfo(*handoff, s_selected, s_preloadResult, screen);
     BuildIdentityPageTables();
     Baleen::PrintTargets::WriteLine(Baleen::PrintTargets::Tag::Ok, "The handover state is ready");
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
@@ -586,10 +763,49 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Print::Write("Path=");
     Print::Write(s_kernelPath);
     Print::Write("\r\n");
+    // 引导闭包交接包与屏幕事实：内核入口按这些地址读三类缓冲，屏幕只报形态与等待配置
+    // 地址都在低 4GiB，长度与记录数按预装结果给出；屏幕事实不成立时 Kind=0
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Closure=Manifest=");
+    Print::WriteHex(static_cast<uint32_t>(s_bootInfo.kernelSetManifest));
+    Print::Write("/");
+    Print::WriteHex(s_bootInfo.kernelSetManifestBytes);
+    Print::Write(" List=");
+    Print::WriteHex(static_cast<uint32_t>(s_bootInfo.bootList));
+    Print::Write("/");
+    Print::WriteHex(s_bootInfo.bootListBytes);
+    Print::Write(" Records=");
+    Print::WriteHex(static_cast<uint32_t>(s_bootInfo.bootModules));
+    Print::Write(" Count=");
+    WriteDecimal(s_preloadResult.recordCount);
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Screen=Kind=");
+    Print::WriteHex(s_bootInfo.screenKind);
+    Print::Write(" Addr=");
+    Print::WriteHex(static_cast<uint32_t>(s_bootInfo.screenAddress));
+    Print::Write(" Geo=");
+    Print::WriteHex(s_bootInfo.screenWidth);
+    Print::Write("x");
+    Print::WriteHex(s_bootInfo.screenHeight);
+    Print::Write(" Stride=");
+    Print::WriteHex(s_bootInfo.screenStride);
+    Print::Write(" Bytes=");
+    Print::WriteHex(s_bootInfo.screenBytes);
+    Print::Write(" Format=");
+    Print::WriteHex(s_bootInfo.screenFormat);
+    Print::Write(" WaitMs=");
+    Print::WriteHex(s_bootInfo.fatalWaitMs);
+    Print::Write("\r\n");
 
     // 引导耗时：从 Stub 进入起算到交接完成的总耗时与本阶段耗时，预算判定同行的 Verdict 给出
     // 报在装载与交接状态之后：装载是读盘的主要项，预算终点按契约取内核入口
     ReportBootTime(*handoff);
+
+#if FAULT_INJECT
+    // 测试构建：在交给内核之前弄坏一处交接事实（发布构建没有这段）
+    ApplyFaultInjection();
+#endif
 
     // —— 进入内核：切长模式与恒等映射分页，跳到装载地址加入口偏移 ——
     // 交权后 BaleenCore 冻结常驻；内核会重建自己的段表、中断表与页表，并保留这份 BootInfo

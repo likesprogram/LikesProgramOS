@@ -158,6 +158,12 @@ namespace {
         return record;
     }
 
+    // 模块加载列表的固定内容：主版本与 .os 相同（1），修订号 1
+    Bytes BootListBytes() {
+        const char text[] = "LPML 1\nmajor 1\nrevision 1\n";
+        return Bytes(text, text + sizeof(text) - 1);
+    }
+
     // 构造一份通过内核镜像数据检查的 .os 内容：头部 0x80 字节加填充
     Bytes BuildKernelImage(const uint8_t buildId[32]) {
         using L = Kernel::ImageDataLayout;
@@ -172,6 +178,7 @@ namespace {
         Put32(image, L::kFieldLoadAddress, L::kLoadAlign);
         Put16(image, L::kFieldDigestAlgorithm, L::kDigestSha256);
         Put16(image, L::kFieldBuildIdBytes, L::kBuildIdBytes);
+        Put16(image, L::kFieldModuleMajor, 1);
         Put32(image, L::kFieldBootInfoVersion, 1);
         std::memcpy(image.data() + L::kFieldBuildId, buildId, ML::kBuildIdBytes);
         hostbuild::Sha256 hash;
@@ -182,10 +189,16 @@ namespace {
         return image;
     }
 
-    // 构造一份可验证的清单：头部、一条 .os 产物与签名区
+    // 构造一份可验证的清单：头部、一条 .os 产物、Modules.list 与签名区
     Bytes BuildManifest(const uint8_t buildId[32], uint64_t securityVersion, const std::string& artifactPath, uint64_t artifactBytes, const uint8_t digest[32], uint8_t signerKeyId, const KeyPair& signer) {
         const std::size_t pathBytes = artifactPath.size();
-        const std::size_t total = ML::kHeaderBytes + ML::kEntryFixedBytes + pathBytes + ML::kSignatureAreaBytes;
+        const Bytes bootList = BootListBytes();
+        hostbuild::Sha256 listHash;
+        listHash.Begin();
+        listHash.Update(bootList);
+        const std::array<uint8_t, hostbuild::kSha256Bytes> bootListDigest = listHash.Finish();
+        const std::size_t listPathBytes = sizeof("Modules.list") - 1;
+        const std::size_t total = ML::kHeaderBytes + (ML::kEntryFixedBytes + pathBytes) + (ML::kEntryFixedBytes + listPathBytes) + ML::kSignatureAreaBytes;
         Bytes manifest(total, 0);
         Put32(manifest, ML::kFieldMagic, ML::kMagic);
         Put16(manifest, ML::kFieldVersion, ML::kVersion);
@@ -194,13 +207,19 @@ namespace {
         Put32(manifest, ML::kFieldFlags, 0);
         std::memcpy(manifest.data() + ML::kFieldBuildId, buildId, ML::kBuildIdBytes);
         Put64(manifest, ML::kFieldSecurityVersion, securityVersion);
-        Put16(manifest, ML::kFieldArtifactCount, 1);
+        Put16(manifest, ML::kFieldArtifactCount, 2);
         const std::size_t entry = ML::kFieldArtifacts;
         manifest[entry + ML::kEntryType] = ML::kTypeOs;
         Put16(manifest, entry + ML::kEntryPathBytes, static_cast<uint16_t>(pathBytes));
         Put64(manifest, entry + ML::kEntryDataBytes, artifactBytes);
         std::memcpy(manifest.data() + entry + ML::kEntryDigest, digest, ML::kEntryDigestBytes);
         std::memcpy(manifest.data() + entry + ML::kEntryPath, artifactPath.data(), pathBytes);
+        const std::size_t listEntry = entry + ML::kEntryFixedBytes + pathBytes;
+        manifest[listEntry + ML::kEntryType] = ML::kTypeBootList;
+        Put16(manifest, listEntry + ML::kEntryPathBytes, static_cast<uint16_t>(listPathBytes));
+        Put64(manifest, listEntry + ML::kEntryDataBytes, bootList.size());
+        std::memcpy(manifest.data() + listEntry + ML::kEntryDigest, bootListDigest.data(), bootListDigest.size());
+        std::memcpy(manifest.data() + listEntry + ML::kEntryPath, "Modules.list", listPathBytes);
         const std::size_t signatureArea = total - ML::kSignatureAreaBytes;
         manifest[signatureArea + ML::kSignatureAlgorithm] = ML::kAlgorithmEd25519;
         manifest[signatureArea + ML::kSignatureKeyId] = signerKeyId;
@@ -330,6 +349,7 @@ namespace {
         const Bytes manifest = BuildManifest(buildId, securityVersion, artifactPath, image.size(), digest.data(), kSignerKeyId, SignerPair());
         setDirectory = "/LikesProgram/System/KernelSets/" + Hex64(buildId) + "/";
         fs.Add(setDirectory + "Manifest.mft", manifest);
+        fs.Add(setDirectory + "Modules.list", BootListBytes());
         fs.Add(setDirectory + artifactPath, image);
     }
 
@@ -565,6 +585,7 @@ namespace {
             Bytes manifest = BuildManifest(buildId, 5, artifactPath, image.size(), digest.data(), kSignerKeyId, SignerPair());
             item.make(manifest);
             fs.Add(setDirectory + "Manifest.mft", manifest);
+        fs.Add(setDirectory + "Modules.list", BootListBytes());
             const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
             Require(result.code != nullptr && std::string(result.code) == "E-CORE-62", std::string("签名区结构错（") + item.what + "）应返回 E-CORE-62，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
         }
@@ -575,6 +596,7 @@ namespace {
             Bytes manifest = BuildManifest(buildId, 5, artifactPath, image.size(), digest.data(), kSignerKeyId, SignerPair());
             manifest[manifest.size() - ML::kSignatureAreaBytes + ML::kSignatureValue] ^= 0x01;
             fs.Add(setDirectory + "Manifest.mft", manifest);
+        fs.Add(setDirectory + "Modules.list", BootListBytes());
             const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
             Require(result.code != nullptr && std::string(result.code) == "E-CORE-64", "签名值错应返回 E-CORE-64，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
         }
@@ -587,6 +609,7 @@ namespace {
             Bytes manifest = BuildManifest(otherBuildId, 5, artifactPath, image.size(), digest.data(), kSignerKeyId, SignerPair());
             manifest[manifest.size() - ML::kSignatureAreaBytes + ML::kSignatureValue] ^= 0x01;
             fs.Add(setDirectory + "Manifest.mft", manifest);
+        fs.Add(setDirectory + "Modules.list", BootListBytes());
             const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
             Require(result.code != nullptr && std::string(result.code) == "E-CORE-64", "签名错且 BuildId 不符时必须先报验签失败 E-CORE-64，实际 " + std::string(result.code == nullptr ? "通过" : result.code));
         }
@@ -596,6 +619,7 @@ namespace {
             MemoryFileSystem fs;
             const Bytes manifest = BuildManifest(buildId, 5, artifactPath, image.size(), digest.data(), 2, SignerPair());
             fs.Add(setDirectory + "Manifest.mft", manifest);
+        fs.Add(setDirectory + "Modules.list", BootListBytes());
             RV::Facts revoked;
             revoked.epoch = 1;
             RevokeKey(revoked, 2);
@@ -611,6 +635,7 @@ namespace {
             const auto badDigest = DigestOf(badImage);
             const Bytes manifest = BuildManifest(buildId, 5, artifactPath, badImage.size(), badDigest.data(), kSignerKeyId, SignerPair());
             fs.Add(setDirectory + "Manifest.mft", manifest);
+        fs.Add(setDirectory + "Modules.list", BootListBytes());
             fs.Add(setDirectory + artifactPath, badImage);
             const Baleen::Diagnostic result = Baleen::Core::VerifyKernelSet(fs, setDirectory.c_str(), buildId, 0, RV::Facts{}, facts);
             Require(result.code != nullptr && std::string(result.code) == "E-CORE-54", "内核镜像数据头错应返回 E-CORE-54，实际 " + std::string(result.code == nullptr ? "通过" : result.code));

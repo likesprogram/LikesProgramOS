@@ -4,7 +4,7 @@
 
 | 模块 | 内容 |
 | --- | --- |
-| `Sha256` | SHA-256 摘要算法的宿主侧实现，与目标侧 `Packages/Baleen/Common` 同算法、用测试向量与真实镜像互验 |
+| `Sha256` | SHA-256 摘要算法的宿主侧实现，与目标侧 `Packages/Common` 同算法、用测试向量与真实镜像互验 |
 | `Sha512` | SHA-512 摘要算法的宿主侧实现，Ed25519 的内部依赖，与目标侧同算法、用 FIPS 180-4 向量与两侧互验 |
 | `Ed25519` | Ed25519 签名算法（RFC 8032）的宿主侧实现，与目标侧同算法、用标准向量与两侧互验；供 MakeKeys 生成密钥与信任锚、SignManifest 签清单 |
 | `BaleenImage` | Baleen 镜像完整性头：Stub 与 BaleenCore 同构的字段常量、BuildId 与 Digest 填充、头字段与摘要校验，供 PackImage、MakeImage、TestInstaller、MakePayloads 与 CheckStub 使用 |

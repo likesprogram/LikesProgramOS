@@ -1,7 +1,7 @@
 /* Ext4.cpp
     BaleenCore 的 Ext4 只读最小实现：superblock、块组描述符、inode、extent 树、线性目录查找与遍历
 
-    结构字段依据 Ext4 Disk Layout（见 Docs/Specs/Common/文件系统抽象与VFS.md 第八节）
+    结构字段依据 Ext4 Disk Layout
     只做读取：不写卷、不回放日志、不分配内存；拒绝清单见 Storage/Ext4Features.hpp
     挂载阶段先核完解析前提：特性必需位、卷干净位、64 位卷的高位块数与描述符大小，缺一即拒绝
     32 位目标不牵入 64 位除法：块号换算用移位，inode 号与组号的除法都是 32 位
@@ -142,7 +142,8 @@ namespace Baleen {
             // 特性清单：未知或拒绝的 INCOMPAT 位、改变解析方式的 RO_COMPAT 位都拒绝
             const uint32_t incompat = Get32(m_super + kFieldFeatureIncompat);
             const uint32_t roCompat = Get32(m_super + kFieldFeatureRoCompat);
-            if (!Storage::Ext4Features::IncompatSupported(incompat) || !Storage::Ext4Features::RoCompatSupported(roCompat)) {
+            // 只读实现按 kBaleenAccepted 判定：kKernelAccepted 是阶段 3 的超集，当前阶段不得按它接受卷
+            if (!Storage::Ext4Features::IncompatSupported(incompat, Storage::Ext4Features::kBaleenAccepted) || !Storage::Ext4Features::RoCompatSupported(roCompat)) {
                 Unmount();
                 return Storage::Error::NotSupported;
             }

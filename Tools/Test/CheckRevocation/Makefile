@@ -82,7 +82,7 @@ $(OBJ_DIR)/TrustAnchor.target.o: $(CORE_DIR)/$(SRC_DIR)/TrustAnchor.cpp | $(OBJ_
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 # 密码学：目标侧供清单与记录验签，宿主侧供夹具构造与签名
-$(OBJ_DIR)/Sha256.target.o: $(BALEEN_COMMON_DIR)/$(SRC_DIR)/Sha256.cpp | $(OBJ_DIR)
+$(OBJ_DIR)/Sha256.target.o: $(COMMON_DIR)/$(SRC_DIR)/Sha256.cpp | $(OBJ_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 $(OBJ_DIR)/Ed25519.target.o: $(BALEEN_COMMON_DIR)/$(SRC_DIR)/Ed25519.cpp | $(OBJ_DIR)

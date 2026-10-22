@@ -118,7 +118,7 @@ namespace {
     constexpr uint32_t kProbeOpRead = 3;         // INT 13h AH=42h，读盘
 
     // 探针门限：实测最深约 100 字节，门限取它的 10 倍；它不是安全边界
-    // 真正的边界是保护区到 BDA/IVT 的约 30 KiB 无主常规内存，见一级引导契约 2.2
+    // 真正的边界是保护区到 BDA/IVT 的约 30 KiB 无主常规内存
     constexpr uint32_t kStackProbeLimit = 0x400;
 
     // 某个操作码的最深写入深度：保护区最低被写地址到 0x7C00 的距离，0 表示没测到

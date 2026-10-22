@@ -53,8 +53,7 @@ namespace Baleen {
             // 调用方的块大小必须与设备逻辑扇区一致（INT 13h 的扇区单位由设备报告）；
             // 不一致时命令或比对失败，按未覆盖返回，方向保守（绝不谎报覆盖）
             // 只读一个空闲命令槽、不下发任何写命令；传统 IDE 路径不做这项核验，一律按未覆盖返回
-            // 用途见 Docs/Specs/Baleen/引导状态记录.md 第五节：刷不到自己写的介质，
-            // 那次提交就只有设备缓存的保证，调用方必须把这条边界报出来
+            // 刷不到自己写的介质，那次提交就只有设备缓存的保证，调用方必须把这条边界报出来
             bool CoversMedium(uint64_t byteOffset, const uint8_t* expected, uint32_t sectorBytes);
         }
     }

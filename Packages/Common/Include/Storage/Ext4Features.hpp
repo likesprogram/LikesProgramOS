@@ -1,12 +1,15 @@
 /* Ext4Features.hpp
-    Ext4 卷格式的接受与拒绝清单：Baleen 只读实现与内核完整实现引用同一份定义
+    Ext4 卷格式的接受与拒绝清单：Baleen 只读实现与内核 Ext4 模块共用的单点定义
 
-    未知的 INCOMPAT 位一律拒绝，不猜测语义；Baleen 侧只读实现的接受集合是内核实现的子集：
-    引导器能读的卷，内核必须也能读，两侧的判定都从这里取，避免出现一侧能读、另一侧读不了的布局
-    COMPAT 位只影响写路径，读取不受影响；RO_COMPAT 里只有 BIGALLOC 改变 extent 的单位，必须拒绝
-    接受集合内另分必需位（kIncompatRequired）：只读解析路径的硬前提，缺失位的卷在挂载阶段拒绝
-
-    位定义依据 Ext4 Disk Layout 的特性说明，见 Docs/Specs/Common/文件系统抽象与VFS.md 第八节
+    位定义与拒绝理由由本文件给出；
+    INCOMPAT 里不认识的位一律拒绝，不猜测语义；COMPAT 只影响写路径，读取不看
+    接受集合拆成两个常量（子集与超集）：
+      kBaleenAccepted  Baleen 只读最小实现接受的集合（原 kIncompatAccepted 的取值）
+      kKernelAccepted  内核完整实现的最终接受集合，超集：含阶段 3 日志回放需要的 RECOVER
+    子集关系由 static_assert 固定；**当前阶段只读挂载两侧都按 kBaleenAccepted 判定**：
+    kKernelAccepted 只是阶段 3 的预留，当前阶段任何路径不得按它接受卷——否则会宣称
+    尚未实现的日志回放能力。判定函数保持「按传入集合判定」的形式，
+    不把某个集合写死进函数，阶段 3 切换时只改调用点的实参
 */
 
 #pragma once
@@ -17,7 +20,7 @@ namespace Storage {
         // INCOMPAT：不认识的位必须拒绝，因此每个认识的位都要在这里列出
         constexpr uint32_t kIncompatCompression = 0x0001;    // 压缩，拒绝
         constexpr uint32_t kIncompatFileType = 0x0002;       // 目录项带类型字节，接受
-        constexpr uint32_t kIncompatRecover = 0x0004;        // 需要日志回放，拒绝（只读路径不回放日志）
+        constexpr uint32_t kIncompatRecover = 0x0004;        // 需要日志回放，只读路径拒绝
         constexpr uint32_t kIncompatJournalDev = 0x0008;     // 外部日志设备，拒绝
         constexpr uint32_t kIncompatMetaBg = 0x0010;         // 元数据块组，拒绝
         constexpr uint32_t kIncompatExtents = 0x0040;        // extent 树，接受
@@ -32,8 +35,19 @@ namespace Storage {
         constexpr uint32_t kIncompatEncrypt = 0x10000;       // 加密，拒绝
         constexpr uint32_t kIncompatCasefold = 0x20000;      // 大小写折叠目录，拒绝
 
-        // 接受的 INCOMPAT 位集合：只读最小实现能识别的位，不在集合内的未知位一律拒绝
-        constexpr uint32_t kIncompatAccepted = kIncompatFileType | kIncompatExtents | kIncompat64Bit | kIncompatFlexBg | kIncompatCsumSeed;
+        // Baleen 只读最小实现接受的 INCOMPAT 集合：原 kIncompatAccepted 的取值
+        // 内容与阶段 3 之前的内核只读实现相同：引导器能读的卷，当前阶段内核只读也必须能读
+        constexpr uint32_t kBaleenAccepted = kIncompatFileType | kIncompatExtents | kIncompat64Bit | kIncompatFlexBg | kIncompatCsumSeed;
+
+        // 旧名的等价别名：现有调用点与宿主夹具按旧名引用，语义与 kBaleenAccepted 完全相同
+        constexpr uint32_t kIncompatAccepted = kBaleenAccepted;
+
+        // 内核完整实现的最终接受集合：kBaleenAccepted 的超集
+        // RECOVER 在阶段 3 的日志回放落地后才可接受；当前阶段只读挂载不得按本集合判定
+        constexpr uint32_t kKernelAccepted = kBaleenAccepted | kIncompatRecover;
+
+        // 集合关系是契约：删除 kBaleenAccepted 的位等于不兼容改动，按 ABI 兼容规则走新版本
+        static_assert((kBaleenAccepted & ~kKernelAccepted) == 0, "kBaleenAccepted 必须是 kKernelAccepted 的子集");
 
         // 解析路径的必需位：目录项按 8 位 name_len + 1 字节类型解析（FILETYPE），
         // 文件与目录数据按 i_block 的 extent 树解析（EXTENTS）；缺失即不接受该卷，不猜测兼容布局
@@ -46,8 +60,8 @@ namespace Storage {
         // RO_COMPAT：只读挂载下只有 BIGALLOC 改变解析方式
         constexpr uint32_t kRoCompatBigalloc = 0x0200;       // 以簇为单位分配，extent 长度含义不同，拒绝
 
-        // INCOMPAT 是否全部可识别，有未知位或拒绝位即不受支持
-        constexpr bool IncompatSupported(uint32_t flags) { return (flags & ~kIncompatAccepted) == 0; }
+        // INCOMPAT 是否全部落在给定接受集合内；默认按当前阶段只读挂载的 kBaleenAccepted 判定
+        constexpr bool IncompatSupported(uint32_t flags, uint32_t accepted = kBaleenAccepted) { return (flags & ~accepted) == 0; }
 
         // 解析前提位是否齐全；缺位的卷在挂载阶段就拒绝，不拖到解析目录项或 extent 时才报
         constexpr bool IncompatHasRequired(uint32_t flags) { return (flags & kIncompatRequired) == kIncompatRequired; }

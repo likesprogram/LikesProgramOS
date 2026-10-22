@@ -1,8 +1,10 @@
 /* BootState.cpp
     引导状态记录的实现：槽位校验、最高代次选择、最旧槽位写入、刷盘、读回校验与受控恢复
 
-    记录字节表与写入顺序见 Docs/Specs/Baleen/引导状态记录.md 第二、四节；
+    记录字节表与写入顺序：
     校验用 CRC-32（IEEE 802.3 参数），整数按小端读写，保留字段必须为零
+    ModuleRevision 在 0x0D8..0x0E0（u64，回退目标修订号，0 = 无修订），0x0E0..0x0EC 是
+    12 字节保留；Checksum 覆盖 [0x000, 0x0EC)，格式口径不变、只扩保留区
     **格式尚未发布，只有一个版本 1**：读写用同一张字段表，不留兼容分支；
     版本号不是 1 的记录按损坏处理，不猜字段表
     一次提交按设备逻辑块落盘：块不大于槽位时写一个槽位（512 是块的整数倍）；
@@ -23,7 +25,7 @@ namespace Baleen {
     namespace Core {
         namespace BootState {
             namespace {
-                // 记录格式：标记“BLST”，版本 1 的 0xF0 字段表；字段偏移与规格第二节逐条对应
+                // 记录格式：标记“BLST”，版本 1 的 0xF0 字段表
                 constexpr uint32_t kMagic = 0x54534C42u;
                 // 槽位内字段偏移
                 constexpr uint32_t kFieldMagic = 0x000;
@@ -44,10 +46,19 @@ namespace Baleen {
                 constexpr uint32_t kFieldRevocationEpoch = 0x0A8;
                 constexpr uint32_t kFieldRevocationFloor = 0x0B0;
                 constexpr uint32_t kFieldRevokedKeyMask = 0x0B8;
-                constexpr uint32_t kFieldReserved2 = 0x0D8;
+                // 回退目标修订号：保留区 0x0D8..0x0E0 的 8 字节，0x0E0..0x0EC 仍是 12 字节保留；
+                // Checksum 覆盖 [0x000, 0x0EC)，新字段因此在覆盖范围内
+                constexpr uint32_t kFieldModuleRevision = 0x0D8;
+                constexpr uint32_t kFieldReserved2 = 0x0E0;
                 constexpr uint32_t kFieldChecksum = 0x0EC;
-                // 保留区长度：两处保留区都是 20 字节
-                constexpr uint32_t kReservedBytes = 20;
+                // 保留区长度：0x014 的 4 字节与 0x0E0 起的 12 字节，都必须为零
+                constexpr uint32_t kReservedBytes = 12;
+
+                // 字段偏移与记录长度互相对齐：偏移写错会让校验和覆盖不到新字段或留出缝
+                static_assert(kFieldModuleRevision + 8 == kFieldReserved2, "ModuleRevision 与保留区的边界必须相接");
+                static_assert(kFieldReserved2 + kReservedBytes == kFieldChecksum, "保留区必须恰好填到校验和之前");
+                static_assert(kFieldChecksum + 4 == kRecordBytes, "校验和必须是记录的最后 4 字节");
+                static_assert(kFieldModuleRevision == 0xD8, "ModuleRevision 的偏移固定为 0xD8");
 
                 // 设备逻辑块大小：块设备契约要求偏移与长度按它对齐
                 // 块大小不是 2 的幂或超过区域长度时返回 0：状态区域要按整块读写，块比区域大就没有可用形态
@@ -178,6 +189,8 @@ namespace Baleen {
                     memcpy(record.candidateBuildId, copy + kFieldCandidateBuildId, 32);
                     memcpy(record.candidateManifestDigest, copy + kFieldCandidateDigest, 32);
                     record.seenSecurityVersion = Get64(copy + kFieldSeenSecurityVersion);
+                    // 0 是合法值：旧格式记录没有这个字段，读方按“无修订”解释，不拒绝
+                    record.moduleRevision = Get64(copy + kFieldModuleRevision);
                     if (!CombinationValid(record)) return CopyState::Invalid;
                     return CopyState::Valid;
                 }
@@ -281,7 +294,7 @@ namespace Baleen {
                 if (generation == kGenerationMax) return false;
                 ++generation;
 
-                // 尝试身份缺省取写入代次（规格第二、四节）：Trying 记录必须非零，由代次填出
+                // 尝试身份缺省取写入代次：Trying 记录必须非零，由代次填出
                 Record effective = record;
                 if (effective.state == State::Trying && effective.attemptId == 0) effective.attemptId = generation;
                 if (!CombinationValid(effective)) return false;
@@ -306,6 +319,8 @@ namespace Baleen {
                 Put64(copy + kFieldRevocationEpoch, effective.revocation.epoch);
                 Put64(copy + kFieldRevocationFloor, effective.revocation.minimumSecurityVersion);
                 memcpy(copy + kFieldRevokedKeyMask, effective.revocation.revokedKeyMask, Revocation::kKeyMaskBytes);
+                // ModuleRevision：0 是合法值，表示无修订（旧格式记录或没有可回退修订）
+                Put64(copy + kFieldModuleRevision, effective.moduleRevision);
                 Put32(copy + kFieldChecksum, Crc32(copy, kFieldChecksum));
 
                 // 提交按设备逻辑块落盘：块不大于槽位时一次写一个槽位（512 是块的整数倍）；
@@ -327,7 +342,7 @@ namespace Baleen {
                 if (medium.Write(commitOffset, commitSource, commitBytes) != Storage::Error::Ok) return false;
 
                 // 刷介质缓存（写入顺序第 4 步）：后端没有刷新原语时基类返回 Ok，
-                // 该路径的持久化边界见 Docs/Specs/Baleen/引导状态记录.md 第五节
+                // 该路径的持久化边界取决于后端是否提供刷新原语
                 if (medium.Flush() != Storage::Error::Ok) return false;
 
                 // 读回校验（写入顺序第 5 步）：读回提交的那个逻辑块，核验目标槽位自身完整
@@ -405,13 +420,18 @@ namespace Baleen {
                 // 新候选的已试次数从零开始：它是“这一版试过几次”的账，换候选就重新记
                 record.triesDone = 0;
                 record.attemptId = 0;
+                // ModuleRevision 原样继承（含 0）：它描述的是已知良好侧的回退目标，候选发布不改变它；
+                // 空区域起步的 Record{} 没有已知良好侧，字段因此为 0
                 memcpy(record.candidateBuildId, candidateBuildId, 32);
                 memcpy(record.candidateManifestDigest, candidateManifestDigest, 32);
                 return Write(medium, stateOffset, stateBytes, record, writtenGeneration);
             }
 
-            bool ConfirmAttempt(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t attemptId, uint64_t& writtenGeneration) {
+            bool ConfirmAttempt(Storage::BlockDevice& medium, uint64_t stateOffset, uint32_t stateBytes, uint64_t attemptId, uint64_t moduleRevision, uint64_t& writtenGeneration) {
                 if (attemptId == 0) return false;
+                // 新写方写出的 Confirmed 记录 ModuleRevision 必须非零：
+                // 候选修订号由当前列表头解析，确认方传 0 说明调用方没有取到修订事实，拒绝写入
+                if (moduleRevision == 0) return false;
                 Record record;
                 if (Read(medium, stateOffset, stateBytes, record) != ReadResult::Ok) return false;
                 // 比较再提交：身份不符就不写，避免一次迟到的确认覆盖引导器已经推进的状态
@@ -419,6 +439,8 @@ namespace Baleen {
 
                 Record next = record;
                 next.state = State::Confirmed;
+                // 本次装载所用修订号成为回退目标：下次模块补丁发布后按它取回旧修订快照
+                next.moduleRevision = moduleRevision;
                 memcpy(next.confirmedBuildId, record.candidateBuildId, 32);
                 memcpy(next.confirmedManifestDigest, record.candidateManifestDigest, 32);
                 for (uint32_t i = 0; i < 32; ++i) {

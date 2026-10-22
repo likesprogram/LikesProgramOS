@@ -22,12 +22,11 @@ namespace hostbuild {
         static constexpr uint64_t kStateOffset = Baleen::LayoutDescriptor::kStateOffset;   // 引导状态区域的默认字节位置
         static constexpr uint64_t kStateBytes = Baleen::LayoutDescriptor::kStateBytes;     // 引导状态区域的默认长度
         static constexpr uint64_t kReservedEnd = 0x22000;                                  // 布局描述与状态区域合计占用的结束位置（不含），供组装器登记
-        static constexpr const char* kDefaultKernelPath = "/LikesProgram/System/LikesProgram.os";   // 内核路径的默认值，见 Docs/Specs/Common/系统卷布局.md
     };
 
-    // 组装参数：内核路径来自模板或参数，其余字段由组装器按实际布局给出
+    // 组装参数：内核路径必须由调用方显式给出（参数或模板），没有默认值；其余字段由组装器按实际布局给出
     struct BaleenLayoutSpec {
-        std::string kernel_path = BaleenLayout::kDefaultKernelPath;  // 内核镜像在系统卷内的绝对路径
+        std::string kernel_path;       // 内核镜像在系统卷内的绝对路径；空表示未给出，BuildBaleenLayout 拒绝
         std::string volume_image;      // 系统卷镜像路径，用于读卷标识
         uint64_t volume_offset = 0;    // 系统卷在介质上的起始字节偏移
         uint64_t volume_bytes = 0;     // 系统卷长度，字节；必须非 0

@@ -4,13 +4,14 @@
     检查对象是目标侧源码：Packages/Baleen/Core 的 SelectSet.cpp 与 BootState.cpp，
     按宿主选项编译后直接运行——选版决策、状态记录的副本选择与写入顺序都是将要交付的那份实现
     两处替身由本工具提供，因为它们不属于本工具的检查对象：
-    1. 清单验证（VerifyKernelSet）：按集目录返回夹具登记的结果，只核对选版怎么调用它、
-       结果怎么影响状态转换；清单结构、签名与摘要的真实验证由 CheckCrypto 与实机路径覆盖
+    1. 清单验证（VerifyKernelSet）：按集目录与清单来源返回夹具登记的结果，只核对选版怎么调用它、
+       结果怎么影响状态转换与修订选择；清单结构、签名与摘要的真实验证由 CheckCrypto / CheckRevocation
+       与实机路径覆盖。修订选择需要的“当前列表修订号”也用替身（ReadBootListRevision）返回
     2. 诊断输出（WriteDiagnostic）：不装控制台，把诊断行收进夹具供断言
 
     运行期写入方（Updater 的 Pending、Init 的 Confirmed 提交）尚未实现，本工具按同一记录格式
     在介质上构造 Pending 记录，这是 Pending 与候选路径在开发期的可复现入口；
-    记录字节表、副本布局与写入顺序见 Docs/Specs/Baleen/引导状态记录.md
+    记录字节表、副本布局与写入顺序都由目标侧实现给定，本工具不另立一份
 */
 
 #include <BootState.hpp>
@@ -49,7 +50,7 @@ namespace {
     // 选版启用前的扁平落点：不再是可直启形态，选择器必须拒绝
     constexpr const char* kFlatKernelPath = "/LikesProgram/System/LikesProgram.os";
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 60;
+    constexpr unsigned kCaseCount = 74;
     // 已跑用例数
     unsigned g_ran = 0;
 
@@ -97,6 +98,10 @@ namespace {
     std::string ArtifactPath(const uint8_t* buildId, const std::string& relative) { return SetDirectory(buildId) + "/" + relative; }
     // 集内内核镜像路径（清单登记在集目录根上的默认形态）
     std::string KernelPath(const uint8_t* buildId) { return ArtifactPath(buildId, kKernelName); }
+    // 旧修订快照的清单文件名：Manifest.<rev>.mft
+    std::string SnapshotManifestName(uint64_t revision) { return "Manifest." + std::to_string(revision) + ".mft"; }
+    // 旧修订快照的列表文件名：Modules.<rev>.list
+    std::string SnapshotBootListName(uint64_t revision) { return "Modules." + std::to_string(revision) + ".list"; }
     // 干净的消息摘要：夹具用集标识派生，只要求逐字节稳定
     void FillDigest(uint8_t digest[32], const uint8_t* buildId) {
         for (unsigned i = 0; i < 32; ++i) digest[i] = static_cast<uint8_t>(buildId[i] ^ 0x5Au);
@@ -227,21 +232,49 @@ namespace {
         Storage::Error m_openError = Storage::Error::NotFound;   // Open 的返回结论
     };
 
-    // 夹具登记的一条集：目录、标识与清单事实
+    // 夹具登记的一条集：目录、清单来源文件名、标识与清单事实
     struct SetEntry {
         std::string directory;      // 集目录路径
+        std::string manifestName;   // 清单来源文件名：空表示当前修订，否则是旧修订快照
         uint8_t buildId[32] = {};   // 集标识
+        uint64_t revision = 1;      // 该来源列表的修订号
         uint64_t securityVersion = 0;   // 清单的安全版本
         uint32_t artifacts = 1;     // 产物条目数
         uint8_t signerKeyId = 1;    // 清单的签名密钥编号
         bool verified = true;       // 清单验证是否通过
         std::string kernelPath = kKernelName;   // 清单 .os 条目的相对路径（可在子目录）
+        std::vector<std::string> listedArtifacts;   // 预装计划的条目路径（顺序即列表条目顺序）
         Baleen::Diagnostic failure{};   // 验证不通过时的原因
     };
+
+    // 替身的清单副本与列表副本：生产实现用静态存储承载，这里同样用静态缓冲模拟
+    // 验证通过时 facts 里的指针指向它们，生命期与生产实现一致（到下一次验证为止）
+    uint8_t s_stubManifest[0x100];
+    uint8_t s_stubBootList[64];
+    Baleen::Core::ListedArtifact s_stubPlan[Baleen::Core::kBootListMaxEntries];
+
+    // 填替身的清单副本：开头是清单标记，BuildId 落在清单头的 BuildId 字段偏移
+    void FillStubManifest(const SetEntry& entry) {
+        std::memset(s_stubManifest, 0, sizeof(s_stubManifest));
+        std::memcpy(s_stubManifest, "LPMS", 4);
+        std::memcpy(s_stubManifest + KernelSet::ManifestLayout::kFieldBuildId, entry.buildId, 32);
+    }
+
+    // 填替身的列表副本："LPML 1\nmajor 1\nrevision <rev>\n"，与真实列表同一个固定头；
+    // 返回列表字节数
+    uint32_t FillStubBootList(const SetEntry& entry) {
+        const std::string text = "LPML 1\nmajor 1\nrevision " + std::to_string(entry.revision) + "\n";
+        Require(text.size() < sizeof(s_stubBootList), "夹具列表副本缓冲不足");
+        std::memset(s_stubBootList, 0, sizeof(s_stubBootList));
+        std::memcpy(s_stubBootList, text.data(), text.size());
+        return static_cast<uint32_t>(text.size());
+    }
 
     // 一次清单验证调用的记录：核对选版传了什么
     struct VerifyCall {
         std::string directory;              // 被验证的集目录
+        std::string manifestName;           // 被验证的清单文件名（空表示当前修订）
+        std::string bootListName;           // 被读取的列表文件名（空表示当前修订）
         uint8_t expectedBuildId[32] = {};   // 调用方给的期望标识
         uint64_t seenSecurityVersion = 0;   // 调用方给的已见最高安全版本
         Baleen::Core::Revocation::Facts revocation{};   // 调用方给的有效吊销事实
@@ -271,50 +304,115 @@ namespace {
         MemoryMedium& Medium() { return m_medium; }
         // 注入吊销记录打开失败：模拟系统卷读不了签名吊销记录
         void SetRevocationOpenError(Storage::Error error) { m_fileSystem.SetOpenError(error); }
-        // 登记一条集：验证默认通过；artifactPath 是清单 .os 条目的相对路径
-        void AddSet(const uint8_t* buildId, uint64_t securityVersion, const char* artifactPath = kKernelName) {
+        // 登记一条当前修订的集：清单来源是 Manifest.mft / Modules.list
+        // revision 是该集当前 Modules.list 的修订号；artifactPath 是清单 .os 条目的相对路径
+        void AddSet(const uint8_t* buildId, uint64_t securityVersion, const char* artifactPath = kKernelName, uint64_t revision = 1) {
             SetEntry entry;
             entry.directory = SetDirectory(buildId);
             std::memcpy(entry.buildId, buildId, sizeof(entry.buildId));
             entry.securityVersion = securityVersion;
             entry.kernelPath = artifactPath;
+            entry.revision = revision;
             m_sets.push_back(entry);
         }
-        // 让一条已登记的集验证失败：给稳定编号与原因文本
-        void FailSet(const uint8_t* buildId, const char* code, const char* text) {
+        // 登记一条旧修订快照：清单来源是 Manifest.<rev>.mft / Modules.<rev>.list
+        void AddSnapshotSet(const uint8_t* buildId, uint64_t revision, uint64_t securityVersion, const char* artifactPath = kKernelName) {
+            AddSet(buildId, securityVersion, artifactPath, revision);
+            m_sets.back().manifestName = SnapshotManifestName(revision);
+        }
+        // 设置当前修订的列表修订号：修订选择用它判断目标修订是不是当前修订
+        void SetCurrentRevision(const uint8_t* buildId, uint64_t revision) {
             for (auto& entry : m_sets) {
                 if (entry.directory != SetDirectory(buildId)) continue;
+                if (!entry.manifestName.empty()) continue;
+                entry.revision = revision;
+                return;
+            }
+            Fail("夹具没有登记这条集的当前修订：" + SetDirectory(buildId));
+        }
+        // 设置一条集的预装条目：模拟清单 Type=2 条目与列表条目的对应关系
+        void SetPreloads(const uint8_t* buildId, const std::vector<std::string>& paths) {
+            for (auto& entry : m_sets) {
+                if (entry.directory != SetDirectory(buildId)) continue;
+                if (!entry.manifestName.empty()) continue;
+                entry.listedArtifacts = paths;
+                return;
+            }
+            Fail("夹具没有登记这条集的当前修订：" + SetDirectory(buildId));
+        }
+        // 让一条已登记的集验证失败：给稳定编号与原因文本；manifestName 空表示当前修订
+        void FailSet(const uint8_t* buildId, const char* code, const char* text, const char* manifestName = nullptr) {
+            const std::string name = manifestName == nullptr ? std::string() : std::string(manifestName);
+            for (auto& entry : m_sets) {
+                if (entry.directory != SetDirectory(buildId) || entry.manifestName != name) continue;
                 entry.verified = false;
                 entry.failure = Baleen::Diagnostic{code, text};
                 return;
             }
-            Fail("夹具没有登记这条集：" + SetDirectory(buildId));
+            Fail("夹具没有登记这条集：" + SetDirectory(buildId) + " 来源 " + name);
         }
-        // 替身的验证入口：命中登记条目则返回其结果，未登记按“清单不存在”处理
-        // 吊销事实按规格参与判定（被吊销的签名密钥、记录抬高的下限），与真实 ManifestVerify 一致；
+        // 替身读当前修订列表的修订号：只有登记了当前修订的集才有答案
+        bool CurrentRevision(const char* setDirectory, uint64_t& revision) const {
+            for (const auto& entry : m_sets) {
+                if (entry.directory != setDirectory) continue;
+                if (!entry.manifestName.empty()) continue;
+                revision = entry.revision;
+                return true;
+            }
+            return false;
+        }
+        // 替身的验证入口：命中登记条目（目录 + 清单来源）则返回其结果，未登记按“清单不存在”处理
+        // 吊销事实参与判定（被吊销的签名密钥、记录抬高的下限），与真实 ManifestVerify 一致；
         // 真实判定本身由 CheckRevocation 覆盖，这里核对的是选版有没有把事实传下来
-        Baleen::Diagnostic Verify(const char* setDirectory, const uint8_t expectedBuildId[32], uint64_t seenSecurityVersion, const Baleen::Core::Revocation::Facts& revocation, Baleen::Core::ManifestFacts& facts) {
+        // 验证通过时带回清单副本、列表副本与预装计划：生产实现用静态存储承载，交权前一直有效
+        Baleen::Diagnostic Verify(const char* setDirectory, const uint8_t expectedBuildId[32], uint64_t seenSecurityVersion, const Baleen::Core::Revocation::Facts& revocation, Baleen::Core::ManifestFacts& facts, const Baleen::Core::ManifestSource& source) {
             VerifyCall call;
             call.directory = setDirectory;
+            call.manifestName = source.manifestName == nullptr ? "" : source.manifestName;
+            call.bootListName = source.bootListName == nullptr ? "" : source.bootListName;
             std::memcpy(call.expectedBuildId, expectedBuildId, sizeof(call.expectedBuildId));
             call.seenSecurityVersion = seenSecurityVersion;
             call.revocation = revocation;
             m_calls.push_back(call);
             for (const auto& entry : m_sets) {
                 if (entry.directory != setDirectory) continue;
+                if (entry.manifestName != call.manifestName) continue;
                 // 选版必须按记录里的集标识推导目录：标识不符按集身份不一致拒绝
                 if (std::memcmp(entry.buildId, expectedBuildId, 32) != 0) return Baleen::Diagnostic{"E-CORE-65", "The manifest BuildId doesn't match the selected set"};
                 if (!entry.verified) return entry.failure;
                 if (Baleen::Core::Revocation::IsKeyRevoked(revocation.revokedKeyMask, entry.signerKeyId)) return Baleen::Diagnostic{"E-CORE-74", "The manifest signature key is revoked"};
                 if (entry.securityVersion < revocation.minimumSecurityVersion) return Baleen::Diagnostic{"E-CORE-66", "The manifest SecurityVersion is below what the device or the bootloader allows"};
-                // 防回滚（规格第三节第 6 条）：清单安全版本低于设备已见最高即拒绝，
+                // 防回滚：清单安全版本低于设备已见最高即拒绝，
                 // 替身实现这一条是为了核对选版有没有把设备的已见最高传下来
                 if (entry.securityVersion < seenSecurityVersion) return Baleen::Diagnostic{"E-CORE-66", "The manifest SecurityVersion is below what the device or the bootloader allows"};
                 std::memcpy(facts.buildId, entry.buildId, sizeof(facts.buildId));
                 FillDigest(facts.manifestDigest, entry.buildId);
                 facts.securityVersion = entry.securityVersion;
+                facts.bootListRevision = entry.revision;
+                facts.moduleMajor = 1;
                 facts.artifactCount = entry.artifacts;
                 facts.manifestBytes = 0x100;
+                // 清单副本与列表副本：静态缓冲模拟“签名值已归零的清单字节”与列表字节
+                FillStubManifest(entry);
+                facts.manifestCopy = s_stubManifest;
+                facts.bootListCopy = s_stubBootList;
+                facts.bootListBytes = FillStubBootList(entry);
+                // 预装计划：条目顺序即列表顺序，产物下标、长度与摘要按夹具的确定性规则派生
+                Require(entry.listedArtifacts.size() <= Baleen::Core::kBootListMaxEntries, "夹具预装条目超过上限");
+                for (std::size_t i = 0; i < entry.listedArtifacts.size(); ++i) {
+                    Baleen::Core::ListedArtifact& planned = s_stubPlan[i];
+                    planned.artifactIndex = static_cast<uint32_t>(i + 2);
+                    Require(entry.listedArtifacts[i].size() <= KernelSet::ManifestLayout::kEntryPathMaxBytes, "夹具预装路径超过上限");
+                    planned.pathBytes = static_cast<uint32_t>(entry.listedArtifacts[i].size());
+                    planned.dataBytes = 0x200 + i * 0x10;
+                    std::memcpy(planned.path, entry.listedArtifacts[i].data(), planned.pathBytes);
+                    planned.path[planned.pathBytes] = 0;
+                    for (uint32_t byte = 0; byte < KernelSet::ManifestLayout::kEntryDigestBytes; ++byte) {
+                        planned.digest[byte] = static_cast<uint8_t>(entry.buildId[byte] ^ 0xA5 ^ byte);
+                    }
+                }
+                facts.listedArtifacts = s_stubPlan;
+                facts.listedArtifactCount = static_cast<uint32_t>(entry.listedArtifacts.size());
                 // 生产读取方把清单 .os 条目的相对路径带回；这里按登记值填，选版必须原样使用
                 Require(entry.kernelPath.size() <= KernelSet::ManifestLayout::kEntryPathMaxBytes, "夹具产物路径超过上限");
                 std::memcpy(facts.kernelPath, entry.kernelPath.data(), entry.kernelPath.size());
@@ -339,7 +437,11 @@ namespace {
         const std::vector<VerifyCall>& Calls() const { return m_calls; }
         // 跑一次选版：layoutFlags 默认 0（缺省不降级），要测介质策略位时显式传位
         Baleen::Diagnostic Select(const char* layoutKernelPath, Baleen::Core::SelectedSet& selected, uint32_t layoutFlags = 0, uint64_t stateOffset = kStateOffset, uint32_t stateBytes = kStateBytes) {
-            return Baleen::Core::SelectKernelSet(m_fileSystem, m_medium, stateOffset, stateBytes, layoutKernelPath, layoutFlags, selected);
+            return Baleen::Core::BeginSetSelection(m_fileSystem, m_medium, stateOffset, stateBytes, layoutKernelPath, layoutFlags, selected);
+        }
+        // 两阶段选版的第二阶段：装载/预装失败后的回退
+        Baleen::Diagnostic AfterLoadFailure(const char* layoutKernelPath, const Baleen::Core::SelectedSet& failed, bool preloadFailed, const Baleen::Diagnostic& failure, Baleen::Core::SelectedSet& selected) {
+            return Baleen::Core::SelectAfterLoadFailure(m_fileSystem, m_medium, kStateOffset, kStateBytes, layoutKernelPath, 0, failed, preloadFailed, failure, selected);
         }
         // 按生产写入方的同一套接口写一份记录：开发期对 Updater / Init 的替身
         bool WriteRecord(const Record& record, uint64_t& generation) {
@@ -392,7 +494,7 @@ namespace {
         return record;
     }
 
-    // 夹具侧的槽位构造：按规格第二节的字节表拼接一个 512 字节槽位，校验和用夹具自己的 CRC-32
+    // 夹具侧的槽位构造：按记录字节表拼接一个 512 字节槽位，校验和用夹具自己的 CRC-32
     // 生产代码不会产生字段违规的记录，构造这类副本是为了核对读取方的逐项校验
     Bytes RawCopy(const Record& record, uint8_t stateValue, uint8_t flags, uint32_t reserved, bool checksumCorrect) {
         Bytes copy(BootState::kCopyBytes, 0);
@@ -414,6 +516,7 @@ namespace {
         Put64(copy, 0x0A8, record.revocation.epoch);        // RevocationEpoch
         Put64(copy, 0x0B0, record.revocation.minimumSecurityVersion);   // RevocationFloor
         std::memcpy(copy.data() + 0x0B8, record.revocation.revokedKeyMask, 32);
+        Put64(copy, 0x0D8, record.moduleRevision);          // ModuleRevision
         const uint32_t crc = FixtureCrc32(copy.data(), 0x0EC);
         Put32(copy, 0x0EC, checksumCorrect ? crc : (crc ^ 1u));
         return copy;
@@ -442,6 +545,19 @@ namespace {
         RequireSelectedPath(selected, buildId, KernelPath(buildId), attemptId);
     }
 
+    // 核对选中集的模块修订号与清单来源（当前修订 / 旧修订快照）
+    void RequireSelectedRevision(const Baleen::Core::SelectedSet& selected, uint64_t revision, bool snapshot) {
+        Require(selected.moduleRevision == revision, "选中的模块修订号不符：" + std::to_string(selected.moduleRevision));
+        Require(selected.snapshot == snapshot, std::string("选中的清单来源不符：期望") + (snapshot ? "旧修订快照" : "当前修订"));
+        Require(selected.handoff.manifest.bootListRevision == revision, "交接事实里的列表修订号与选中修订不符");
+    }
+
+    // 核对接手：选版没有定下目标集（失败时 selected 必须保持空）
+    void RequireNoSelected(const Baleen::Core::SelectedSet& selected) {
+        Require(selected.setDirectory[0] == '\0', "失败时不得定下目标集");
+        Require(!selected.verified, "失败时不得声称集已验证");
+    }
+
     // 核对夹具里出现过的诊断编号与条数
     void RequireDiagnostic(const Fixture& fixture, const char* code, unsigned count = 1) {
         unsigned seen = 0;
@@ -449,7 +565,7 @@ namespace {
         Require(seen == count, std::string("诊断 ") + code + " 出现 " + std::to_string(seen) + " 次，期望 " + std::to_string(count) + " 次");
     }
 
-    // 核对最后一次写入之后的顺序是“刷新 → 读回”：规格第四节第 3..5 步
+    // 核对最后一次写入之后的顺序是“刷新 → 读回”：写记录、刷介质缓存、读回校验三步
     void RequireWriteFlushReadOrder(Fixture& fixture) {
         const auto& events = fixture.Medium().Events();
         std::size_t write = events.size();
@@ -801,7 +917,8 @@ namespace {
         const auto makeStateUnknown = +[](Bytes& copy) { copy[0x010] = 9; FixChecksum(copy); };
         const auto makeFlags = +[](Bytes& copy) { copy[0x013] = 1; FixChecksum(copy); };
         const auto makeReserved = +[](Bytes& copy) { Put32(copy, 0x014, 1); FixChecksum(copy); };
-        const auto makeReservedTail = +[](Bytes& copy) { copy[0x0D8] = 1; FixChecksum(copy); };
+        // 0x0E0..0x0EC 是 12 字节保留区，非零必须拒绝（0x0D8 起是 ModuleRevision，不再是保留）
+        const auto makeReservedTail = +[](Bytes& copy) { Put32(copy, 0x0E0, 1); FixChecksum(copy); };
         const auto makeGenerationZero = +[](Bytes& copy) { Put64(copy, 0x008, 0); FixChecksum(copy); };
         const auto makeTriesTooMany = +[](Bytes& copy) { copy[0x011] = 200; FixChecksum(copy); };
         const auto makeConfirmedWithCandidate = +[](Bytes& copy) { copy[0x060] = 0x22; FixChecksum(copy); };
@@ -1015,11 +1132,12 @@ namespace {
         Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Trying, "Trying 记录必须读得回来");
         Require(read.attemptId == generation && read.triesDone == 2, "Trying 的尝试身份应取写入代次、已试次数保持 2");
         uint64_t confirmedGeneration = 0;
-        Require(BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, read.attemptId, confirmedGeneration), "身份相符的确认应成功");
+        Require(BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, read.attemptId, 4, confirmedGeneration), "身份相符的确认应成功");
         Require(confirmedGeneration == generation + 1, "确认写入的代次必须加一");
         Record after;
         Require(fixture.ReadRecord(after) == BootState::ReadResult::Ok && after.state == State::Confirmed, "确认后记录必须是 Confirmed");
         Require(after.triesDone == 2, "确认提交不得清零已试次数");
+        Require(after.moduleRevision == 4, "确认提交必须写入本次装载所用修订号");
         Require(after.attemptId == 0 && after.triesRemaining == 0, "确认后尝试身份与剩余次数应清零");
         Require(std::memcmp(after.confirmedBuildId, candidate.data(), 32) == 0, "确认应把候选转成已知良好集");
     }
@@ -1076,7 +1194,7 @@ namespace {
         }
     }
 
-    // 写入顺序：写 → 刷介质缓存 → 读回校验（规格第四节第 3..5 步）
+    // 写入顺序：写 → 刷介质缓存 → 读回校验
     void CaseWriteFlushReadOrder() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -1087,7 +1205,7 @@ namespace {
     }
 
     // 刷盘失败按写失败处理：不进行状态转换，回退已知良好集；已写出的字节不回收，
-    // 下一次启动按 Trying 判定的方向由掉电语义覆盖（规格第四节）
+    // 下一次启动按 Trying 判定的方向由掉电语义覆盖
     void CaseFlushFailure() {
         Fixture fixture;
         const auto confirmed = Id(0x11);
@@ -1375,7 +1493,7 @@ namespace {
         Require(sawDefault, "缺省集没有进入清单验证");
     }
 
-    // 没有状态记录时缺省集只做内嵌下限检查：已见最高按 0 传（规格第六节第 4 条）
+    // 没有状态记录时缺省集只做内嵌下限检查：已见最高按 0 传
     void CaseDefaultSetWithoutRecord() {
         Fixture fixture;
         const auto defaultId = Id(0x0D);
@@ -1709,6 +1827,355 @@ namespace {
         Require(fixture.Medium().Reads() == 0 && fixture.Medium().Writes() == 0, "过长路径不该碰介质");
     }
 
+    // —— 记录修订字段与两阶段回退 ——
+
+    // 记录布局：ModuleRevision 落在槽位 0xD8..0xE0、0x0E0..0x0EC 仍是 12 字节保留、记录有效长度 0xF0
+    void CaseModuleRevisionLayout() {
+        static_assert(BootState::kRecordBytes == 0xF0, "记录有效长度固定为 0xF0");
+        static_assert(BootState::kCopyBytes == 0x200, "一份槽位必须是 0x200 字节");
+        static_assert(BootState::kSlots == 8, "状态区域必须是八槽环形");
+        // 写方向：字段必须落在槽位的 0xD8..0xE0
+        {
+            Fixture fixture;
+            const auto confirmed = Id(0x11);
+            Record record = ConfirmedRecord(confirmed.data());
+            record.moduleRevision = 0x0102030405060708ull;
+            uint64_t generation = 0;
+            Require(fixture.WriteRecord(record, generation), "带 ModuleRevision 的记录写入失败");
+            const Bytes field = fixture.Medium().Slice(kStateOffset + 0x0D8, 8);
+            for (unsigned i = 0; i < 8; ++i) {
+                Require(field[i] == static_cast<uint8_t>(0x0102030405060708ull >> (8 * i)), "ModuleRevision 的落点必须是槽位偏移 0xD8");
+            }
+        }
+        // 读方向：夹具按记录字节表构造 0xD8 起的 8 字节，读取方必须解出
+        {
+            Fixture fixture;
+            const auto confirmed = Id(0x11);
+            Record record = ConfirmedRecord(confirmed.data());
+            record.generation = 3;
+            record.moduleRevision = 0x1122334455667788ull;
+            PutCopy(fixture, 0, RawCopy(record, static_cast<uint8_t>(State::Confirmed), 0, 0, true));
+            Record read;
+            Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "带非零 ModuleRevision 的记录必须被接受");
+            Require(read.moduleRevision == 0x1122334455667788ull, "ModuleRevision 必须从槽位偏移 0xD8 解出");
+        }
+        // 保留区仍在：0x0E0..0x0EC 任一字节非零都按不可用拒绝
+        {
+            Fixture fixture;
+            const auto confirmed = Id(0x11);
+            Record record = ConfirmedRecord(confirmed.data());
+            record.generation = 5;
+            record.moduleRevision = 9;
+            Bytes copy = RawCopy(record, static_cast<uint8_t>(State::Confirmed), 0, 0, true);
+            copy[0x0E0] = 1;
+            FixChecksum(copy);
+            PutCopy(fixture, 0, copy);
+            Record read;
+            Require(fixture.ReadRecord(read) == BootState::ReadResult::Corrupt, "保留区 0x0E0 非零必须按损坏拒绝");
+        }
+    }
+
+    // 写方义务：Write 原样读写、Repair 原样保留、PublishCandidate 继承、ConfirmAttempt 写本次修订
+    void CaseModuleRevisionWriters() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        const auto candidate = Id(0x22);
+        Record record = ConfirmedRecord(confirmed.data());
+        record.moduleRevision = 7;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(record, generation), "带修订号的记录写入失败");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.moduleRevision == 7, "ModuleRevision 必须原样读回");
+        uint64_t repaired = 0;
+        Require(fixture.RepairArea(repaired), "按有效副本修复失败");
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.moduleRevision == 7, "修复必须原样保留 ModuleRevision");
+        // 发布候选：ModuleRevision 继承已知良好侧，不因候选发布而改动
+        std::array<uint8_t, 32> digest{};
+        FillDigest(digest.data(), candidate.data());
+        Require(BootState::PublishCandidate(fixture.Medium(), kStateOffset, kStateBytes, candidate.data(), digest.data(), 3, generation), "发布候选失败");
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Pending, "发布后应停在 Pending");
+        Require(read.moduleRevision == 7, "发布候选不得改动回退目标修订号");
+        // Trying 上确认：写进本次装载所用修订号；修订号为零必须拒绝（新写方的 Confirmed 记录非零）
+        Record trying = read;
+        trying.state = State::Trying;
+        trying.triesRemaining = 2;
+        trying.attemptId = 0;
+        Require(fixture.WriteRecord(trying, generation), "Trying 记录写入失败");
+        Record tryingRead;
+        Require(fixture.ReadRecord(tryingRead) == BootState::ReadResult::Ok && tryingRead.state == State::Trying, "Trying 记录必须可读");
+        Require(tryingRead.attemptId == generation, "Trying 的尝试身份取写入代次");
+        Require(!BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, tryingRead.attemptId, 0, generation), "修订号为零的确认必须拒绝");
+        Require(BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, tryingRead.attemptId, 8, generation), "身份相符的确认应成功");
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Confirmed, "确认后应是 Confirmed");
+        Require(read.moduleRevision == 8, "确认必须把本次装载所用修订号写进记录");
+    }
+
+    // 受控清零后重建：空区域首次启动按当前 Modules.list 的 revision 写 ModuleRevision
+    void CaseClearRebuildRevision() {
+        Fixture fixture;
+        const auto confirmed = Id(0x0D);
+        fixture.AddSet(confirmed.data(), 5, kKernelName, 4);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data(), 0), generation), "铺底记录写入失败");
+        Require(fixture.ClearArea(), "受控清零失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+        Require(reason.code == nullptr, "清零后缺省集选版失败：" + Text(reason));
+        RequireSelected(selected, confirmed.data(), 0);
+        RequireSelectedRevision(selected, 4, false);
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok, "重建的 Confirmed 记录必须可读");
+        Require(read.state == State::Confirmed && read.generation == 1, "清零后重建必须是代次 1 的 Confirmed");
+        Require(read.moduleRevision == 4, "重建记录必须按当前列表修订写 ModuleRevision");
+    }
+
+    // 旧记录（ModuleRevision == 0）按“无修订”处理：按当前列表的 revision 解释，写回不升级旧记录
+    void CaseOldRecordRevisionCompatibility() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        fixture.AddSet(confirmed.data(), 0, kKernelName, 7);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "旧格式记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+        Require(reason.code == nullptr, "旧记录选版失败：" + Text(reason));
+        RequireSelected(selected, confirmed.data(), 0);
+        RequireSelectedRevision(selected, 7, false);
+        Require(fixture.Calls().size() == 1 && fixture.Calls().front().manifestName.empty(), "旧记录必须按当前修订取清单");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.moduleRevision == 0, "没有事实变化时不得把旧记录升级成带修订号");
+        Require(fixture.Medium().Writes() == 1, "没有事实变化时不该写回记录");
+    }
+
+    // 目标修订等于当前列表修订：取当前 Manifest.mft / Modules.list，不碰旧修订快照
+    void CaseRevisionCurrentSource() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        fixture.AddSet(confirmed.data(), 0, kKernelName, 5);
+        Record record = ConfirmedRecord(confirmed.data());
+        record.moduleRevision = 5;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(record, generation), "记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+        Require(reason.code == nullptr, "当前修订选版失败：" + Text(reason));
+        RequireSelectedRevision(selected, 5, false);
+        Require(fixture.Calls().size() == 1 && fixture.Calls().front().manifestName.empty(), "目标修订等于当前修订时必须读当前清单");
+    }
+
+    // 目标修订不等于当前列表修订：取旧修订快照 Manifest.<rev>.mft / Modules.<rev>.list
+    void CaseRevisionSnapshotSource() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        fixture.AddSet(confirmed.data(), 0, kKernelName, 5);
+        fixture.AddSnapshotSet(confirmed.data(), 2, 0);
+        Record record = ConfirmedRecord(confirmed.data());
+        record.moduleRevision = 2;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(record, generation), "记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+        Require(reason.code == nullptr, "旧修订选版失败：" + Text(reason));
+        RequireSelected(selected, confirmed.data(), 0);
+        RequireSelectedRevision(selected, 2, true);
+        Require(fixture.Calls().size() == 1, "修订选择只应验证选中的那一份来源");
+        Require(fixture.Calls().front().manifestName == SnapshotManifestName(2), "必须取旧修订快照 Manifest.2.mft，实际 " + fixture.Calls().front().manifestName);
+        Require(fixture.Calls().front().bootListName == SnapshotBootListName(2), "必须取旧修订快照列表 Modules.2.list");
+    }
+
+    // 旧修订快照验证失败：该目标不可选，不猜、不落到别的修订，也不写状态记录
+    void CaseRevisionSnapshotFailure() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        fixture.AddSet(confirmed.data(), 0, kKernelName, 5);
+        fixture.AddSnapshotSet(confirmed.data(), 2, 0);
+        fixture.FailSet(confirmed.data(), "E-CORE-64", "The manifest signature doesn't verify", SnapshotManifestName(2).c_str());
+        Record record = ConfirmedRecord(confirmed.data());
+        record.moduleRevision = 2;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(record, generation), "记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-64", "旧修订快照验签失败必须终止：" + Text(reason));
+        RequireNoSelected(selected);
+        Require(fixture.Medium().Writes() == 1, "目标不可选时不得写记录");
+    }
+
+    // 候选清单验证失败：写 Failed 后按记录里的回退目标修订改选上一修订
+    void CaseCandidateVerifyFailureRevisionFallback() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        const auto candidate = Id(0x22);
+        fixture.AddSet(confirmed.data(), 0, kKernelName, 5);
+        fixture.AddSnapshotSet(confirmed.data(), 2, 0);
+        fixture.AddSet(candidate.data(), 4, kKernelName, 5);
+        fixture.FailSet(candidate.data(), "E-CORE-64", "The manifest signature doesn't verify");
+        Record pending = CandidateRecord(State::Pending, candidate.data(), confirmed.data(), BootState::kDefaultTries);
+        pending.moduleRevision = 2;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(pending, generation), "Pending 记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+        Require(reason.code == nullptr, "候选失败后回退旧修订应成功：" + Text(reason));
+        RequireSelected(selected, confirmed.data(), 0);
+        RequireSelectedRevision(selected, 2, true);
+        RequireDiagnostic(fixture, "E-CORE-72");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Failed, "候选验证失败必须写 Failed");
+        Require(read.moduleRevision == 2, "Failed 记录必须保留回退目标修订号");
+    }
+
+    // 候选预装失败：写 Failed、WARN E-CORE-98，按尝试次数与回退目标修订改选上一修订
+    void CaseCandidatePreloadFailureFallback() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        const auto candidate = Id(0x22);
+        fixture.AddSet(confirmed.data(), 4, kKernelName, 5);
+        fixture.AddSnapshotSet(confirmed.data(), 2, 4);
+        fixture.AddSet(candidate.data(), 4, kKernelName, 5);
+        Record pending = CandidateRecord(State::Pending, candidate.data(), confirmed.data(), BootState::kDefaultTries);
+        pending.moduleRevision = 2;
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(pending, generation), "Pending 记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        const auto reason = fixture.Select(KernelPath(confirmed.data()).c_str(), selected);
+        Require(reason.code == nullptr, "候选选版失败：" + Text(reason));
+        RequireSelectedRevision(selected, 5, false);
+        Require(selected.attemptId != 0, "候选必须先写 Trying 再交权");
+        const Baleen::Diagnostic preloadFailure{"E-CORE-96", "The module load list is invalid"};
+        Baleen::Core::SelectedSet fallback;
+        const auto fallbackReason = fixture.AfterLoadFailure(KernelPath(confirmed.data()).c_str(), selected, true, preloadFailure, fallback);
+        Require(fallbackReason.code == nullptr, "候选预装失败必须回退而不是终止：" + Text(fallbackReason));
+        RequireSelected(fallback, confirmed.data(), 0);
+        RequireSelectedRevision(fallback, 2, true);
+        RequireDiagnostic(fixture, "E-CORE-98");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Failed, "候选预装失败必须写 Failed");
+        Require(read.attemptId == 0 && read.triesRemaining == 0, "Failed 的尝试身份与剩余次数必须清零");
+        Require(std::memcmp(read.candidateBuildId, candidate.data(), 32) == 0, "Failed 必须保留失败候选的现场");
+        Require(read.moduleRevision == 2, "回退目标修订号必须原样保留");
+    }
+
+    // 已知良好集装载失败：没有可回退的目标，原样终止，不写状态转换
+    void CaseKnownGoodLoadFailureTerminates() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        fixture.AddSet(confirmed.data(), 0);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        Require(fixture.Select(KernelPath(confirmed.data()).c_str(), selected).code == nullptr, "已知良好集选版失败");
+        Require(selected.attemptId == 0, "确认集启动不是试启动");
+        const Baleen::Diagnostic loadFailure{"E-CORE-57", "Load the kernel image into memory"};
+        Baleen::Core::SelectedSet fallback;
+        const auto reason = fixture.AfterLoadFailure(KernelPath(confirmed.data()).c_str(), selected, false, loadFailure, fallback);
+        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-57", "已知良好集失败必须原样终止：" + Text(reason));
+        RequireNoSelected(fallback);
+        Require(fixture.Medium().Writes() == 1, "已知良好集失败不写状态转换");
+    }
+
+    // 只读介质（写不成 Failed）：WARN 后按降级路径回退已知良好集，介质上仍停 Trying
+    void CaseReadOnlyLoadFailureDegrades() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        const auto candidate = Id(0x22);
+        // 已知良好集与候选同安全版本：试启动把已见版本抬到候选值之后，回退旧集不会被防回滚挡住
+        fixture.AddSet(confirmed.data(), 4);
+        fixture.AddSet(candidate.data(), 4);
+        Record pending = CandidateRecord(State::Pending, candidate.data(), confirmed.data(), BootState::kDefaultTries);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(pending, generation), "Pending 记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        Require(fixture.Select(KernelPath(confirmed.data()).c_str(), selected).code == nullptr, "候选选版失败");
+        Require(selected.attemptId != 0, "候选必须先写 Trying 再交权");
+        // 写失败等价于只读介质：Failed 落不了盘，只能按降级路径回退
+        fixture.Medium().FailWrite(true);
+        const Baleen::Diagnostic preloadFailure{"E-CORE-94", "The module file header isn't valid"};
+        Baleen::Core::SelectedSet fallback;
+        const auto reason = fixture.AfterLoadFailure(KernelPath(confirmed.data()).c_str(), selected, true, preloadFailure, fallback);
+        Require(reason.code == nullptr, "写不成 Failed 时应按降级路径继续回退：" + Text(reason));
+        RequireSelected(fallback, confirmed.data(), 0);
+        RequireSelectedRevision(fallback, 1, false);
+        RequireDiagnostic(fixture, "E-CORE-98");
+        RequireDiagnostic(fixture, "E-CORE-70");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Trying, "写不成时介质上仍是 Trying，下次启动按未确认处理");
+    }
+
+    // 回退目标与失败候选是同一集、同一修订：不重试同一组合，按“良好集也不可用”终止
+    void CaseFallbackSameCombination() {
+        Fixture fixture;
+        const auto same = Id(0x33);
+        fixture.AddSet(same.data(), 4, kKernelName, 5);
+        Record pending = CandidateRecord(State::Pending, same.data(), same.data(), BootState::kDefaultTries);
+        pending.moduleRevision = 5;   // 回退目标 = 候选集 + 候选修订
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(pending, generation), "Pending 记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        Require(fixture.Select(KernelPath(same.data()).c_str(), selected).code == nullptr, "候选选版失败");
+        RequireSelectedRevision(selected, 5, false);
+        const Baleen::Diagnostic loadFailure{"E-CORE-57", "Load the kernel image into memory"};
+        Baleen::Core::SelectedSet fallback;
+        const auto reason = fixture.AfterLoadFailure(KernelPath(same.data()).c_str(), selected, false, loadFailure, fallback);
+        Require(reason.code != nullptr && std::string(reason.code) == "E-CORE-57", "回退目标等于失败候选时必须按良好集不可用终止：" + Text(reason));
+        RequireNoSelected(fallback);
+        Require(fixture.Calls().size() == 1, "不得重试同一组合");
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Failed, "候选失败仍要留下 Failed 现场");
+    }
+
+    // 候选失败且没有已知良好集：写 Failed 后回退布局描述指定的缺省集
+    void CaseCandidateFailureDefaultSet() {
+        Fixture fixture;
+        const auto candidate = Id(0x22);
+        const auto defaultId = Id(0x0D);
+        // 缺省集与候选同安全版本：试启动抬高已见版本后，回退缺省集不会被防回滚挡住
+        fixture.AddSet(candidate.data(), 4);
+        fixture.AddSet(defaultId.data(), 4);
+        Record pending = CandidateRecord(State::Pending, candidate.data(), nullptr, BootState::kDefaultTries);
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(pending, generation), "Pending 记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        Require(fixture.Select(KernelPath(defaultId.data()).c_str(), selected).code == nullptr, "候选选版失败");
+        const Baleen::Diagnostic preloadFailure{"E-CORE-97", "There is no memory for preloading the boot closure modules"};
+        Baleen::Core::SelectedSet fallback;
+        const auto reason = fixture.AfterLoadFailure(KernelPath(defaultId.data()).c_str(), selected, true, preloadFailure, fallback);
+        Require(reason.code == nullptr, "没有已知良好集时应回退缺省集：" + Text(reason));
+        RequireSelected(fallback, defaultId.data(), 0);
+        RequireSelectedRevision(fallback, 1, false);
+        RequireDiagnostic(fixture, "E-CORE-98");
+        RequireDiagnostic(fixture, "E-CORE-72", 0);
+        Record read;
+        Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Failed, "候选失败必须写 Failed");
+    }
+
+    // 交接事实：清单副本、列表副本与预装计划随选版结果带出（预装与 BootInfo 的输入）
+    void CasePreloadPlanHandoff() {
+        Fixture fixture;
+        const auto confirmed = Id(0x11);
+        fixture.AddSet(confirmed.data(), 0);
+        fixture.SetPreloads(confirmed.data(), {"Modules/DevModel.1.0.0.osm", "Modules/Ext4.1.2.0.osm"});
+        uint64_t generation = 0;
+        Require(fixture.WriteRecord(ConfirmedRecord(confirmed.data()), generation), "记录写入失败");
+        Baleen::Core::SelectedSet selected;
+        Require(fixture.Select(KernelPath(confirmed.data()).c_str(), selected).code == nullptr, "选版失败");
+        const auto& facts = selected.handoff.manifest;
+        Require(facts.listedArtifactCount == 2, "预装计划条数不符");
+        Require(facts.listedArtifacts != nullptr, "预装计划指针为空");
+        Require(std::string(reinterpret_cast<const char*>(facts.listedArtifacts[0].path)) == "Modules/DevModel.1.0.0.osm", "预装计划第一条路径不符");
+        Require(facts.listedArtifacts[0].artifactIndex == 2 && facts.listedArtifacts[0].dataBytes == 0x200, "预装计划第一条的产物下标与长度不符");
+        Require(std::string(reinterpret_cast<const char*>(facts.listedArtifacts[1].path)) == "Modules/Ext4.1.2.0.osm", "预装计划第二条路径不符");
+        Require(facts.listedArtifacts[1].artifactIndex == 3 && facts.listedArtifacts[1].dataBytes == 0x210, "预装计划第二条的产物下标与长度不符");
+        Require(facts.listedArtifacts[0].digest[0] == static_cast<uint8_t>(confirmed.data()[0] ^ 0xA5), "预装计划的摘要必须来自清单条目");
+        // 清单副本与列表副本：交给内核的字节由验签时的缓冲承担，这里核对指针、长度与内容成立
+        Require(facts.manifestCopy != nullptr && facts.manifestBytes == 0x100, "清单副本指针或长度不符");
+        Require(std::memcmp(facts.manifestCopy, "LPMS", 4) == 0, "清单副本内容不符");
+        Require(facts.bootListCopy != nullptr, "列表副本指针为空");
+        const std::string list(reinterpret_cast<const char*>(facts.bootListCopy), facts.bootListBytes);
+        Require(list == "LPML 1\nmajor 1\nrevision 1\n", "列表副本内容不符：" + list);
+        Require(facts.moduleMajor == 1 && facts.bootListRevision == 1, "模块主版本与列表修订号不符");
+    }
+
     // 跑一个用例：失败时打印用例名后把原因抛给调用方
     void Case(const char* name, void (*body)()) {
         ++g_ran;
@@ -1789,19 +2256,41 @@ namespace {
         Case("子目录 .os 按清单路径装载", CaseManifestKernelSubdirectory);
         Case("布局路径与清单产物不符", CaseLayoutArtifactMismatch);
         Case("缺省路径过长停机", CaseDefaultPathTooLong);
+        Case("记录布局：ModuleRevision 与保留区", CaseModuleRevisionLayout);
+        Case("状态记录写方维护 ModuleRevision", CaseModuleRevisionWriters);
+        Case("清零后按当前列表修订重建记录", CaseClearRebuildRevision);
+        Case("旧记录零修订按当前列表解释", CaseOldRecordRevisionCompatibility);
+        Case("目标修订等于当前修订取当前清单", CaseRevisionCurrentSource);
+        Case("目标修订取旧修订快照", CaseRevisionSnapshotSource);
+        Case("旧修订快照验证失败终止", CaseRevisionSnapshotFailure);
+        Case("候选验证失败回退上一修订", CaseCandidateVerifyFailureRevisionFallback);
+        Case("候选预装失败回退上一修订", CaseCandidatePreloadFailureFallback);
+        Case("已知良好集装载失败终止", CaseKnownGoodLoadFailureTerminates);
+        Case("只读介质装载失败降级回退", CaseReadOnlyLoadFailureDegrades);
+        Case("回退目标等于失败候选不重试", CaseFallbackSameCombination);
+        Case("候选失败且无良好集回退缺省集", CaseCandidateFailureDefaultSet);
+        Case("预装计划与清单列表副本交接", CasePreloadPlanHandoff);
         Require(g_ran == kCaseCount, "内部回归用例数量不符");
         std::cout << "CheckSelect: " << g_ran << " 项用例全部通过" << std::endl;
     }
 }
 
-// 清单验证替身：按夹具登记的集目录返回结果，并核对调用方给的期望标识
+// 清单验证替身：按夹具登记的集目录与清单来源返回结果，并核对调用方给的期望标识
 // 真实的清单结构、签名与摘要验证由 ManifestVerify.cpp 承担，不在本工具里重复实现
 namespace Baleen {
     namespace Core {
-        Diagnostic VerifyKernelSet(Storage::FileSystem& fs, const char* setDirectory, const uint8_t expectedBuildId[32], uint64_t seenSecurityVersion, const Revocation::Facts& revocation, ManifestFacts& facts) {
+        Diagnostic VerifyKernelSet(Storage::FileSystem& fs, const char* setDirectory, const uint8_t expectedBuildId[32], uint64_t seenSecurityVersion, const Revocation::Facts& revocation, ManifestFacts& facts, const ManifestSource& source) {
             (void)fs;
             if (Fixture::Current() == nullptr) return Diagnostic{"E-CORE-61", "Read the kernel set manifest"};
-            return Fixture::Current()->Verify(setDirectory, expectedBuildId, seenSecurityVersion, revocation, facts);
+            return Fixture::Current()->Verify(setDirectory, expectedBuildId, seenSecurityVersion, revocation, facts, source);
+        }
+
+        // 当前修订列表修订号的替身：生产实现读集目录里的 Modules.list 固定头；
+        // 本工具没有存储层，只按夹具登记的当前修订返回，供修订选择路由
+        bool ReadBootListRevision(Storage::FileSystem& fs, const char* setDirectory, uint64_t& revision) {
+            (void)fs;
+            if (Fixture::Current() == nullptr) return false;
+            return Fixture::Current()->CurrentRevision(setDirectory, revision);
         }
     }
 
@@ -1901,24 +2390,26 @@ namespace {
         Require(BootState::PublishCandidate(fixture.Medium(), kStateOffset, kStateBytes, candidate.data(), digest.data(), BootState::kDefaultTries, generation), "空区域发布候选应成功");
 
         // 记录还是 Pending：确认不成立
-        Require(!BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, 1, generation), "Pending 记录上的确认应被拒绝");
+        Require(!BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, 1, 9, generation), "Pending 记录上的确认应被拒绝");
         // 选一次：写 Trying，尝试身份取写入代次
         Baleen::Core::SelectedSet selected;
         const auto reason = fixture.Select(KernelPath(candidate.data()).c_str(), selected);
         Require(reason.code == nullptr, "候选选版失败：" + Text(reason));
         Require(selected.attemptId == 2, "试启动身份应取写入代次 2");
+        Require(selected.moduleRevision == 1, "候选的模块修订号应取当前列表的 revision");
         // 身份不符：不写
-        Require(!BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, selected.attemptId + 1, generation), "身份不符的确认应被拒绝");
+        Require(!BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, selected.attemptId + 1, 9, generation), "身份不符的确认应被拒绝");
         Record read;
         Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Trying, "被拒绝的确认不应改动记录");
-        // 身份相符：一次写入提交，候选转成已知良好集
-        Require(BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, selected.attemptId, generation), "身份相符的确认应成功");
+        // 身份相符：一次写入提交，候选转成已知良好集；写进本次装载所用修订号
+        Require(BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, selected.attemptId, 9, generation), "身份相符的确认应成功");
         Require(fixture.ReadRecord(read) == BootState::ReadResult::Ok && read.state == State::Confirmed, "确认后应是 Confirmed");
         Require(std::memcmp(read.confirmedBuildId, candidate.data(), 32) == 0, "确认应把候选转成已知良好集");
         Require(std::memcmp(read.candidateBuildId, Id(0x00).data(), 32) == 0, "确认后候选字段应清零");
         Require(read.attemptId == 0 && read.triesRemaining == 0, "确认后尝试身份与剩余次数应清零");
+        Require(read.moduleRevision == 9, "确认后记录的 ModuleRevision 必须是本次装载所用修订号");
         // 迟到或重复的确认：记录已不是 Trying，拒绝且不写新代次
-        Require(!BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, selected.attemptId, generation), "已确认的记录再次确认应被拒绝");
+        Require(!BootState::ConfirmAttempt(fixture.Medium(), kStateOffset, kStateBytes, selected.attemptId, 9, generation), "已确认的记录再次确认应被拒绝");
         Record again;
         Require(fixture.ReadRecord(again) == BootState::ReadResult::Ok && again.generation == read.generation, "被拒绝的确认不应写新代次");
     }

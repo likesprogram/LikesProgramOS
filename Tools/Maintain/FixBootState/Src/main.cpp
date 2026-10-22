@@ -5,7 +5,10 @@
     报告、受控恢复（清零、按有效副本修复）与人工接受（下调已见最高安全版本）三个动作
     它不猜目标集、不碰系统卷：区域里两份都不像记录时只报告并拒绝修复，由操作者决定清零
     读写经与引导期、运行期同一份 BootState 实现，刷盘经 fsync，改动都留一行审计记录
-    命令形态与记录方式对应 Docs/Specs/Baleen/引导状态记录.md 第八节的两条恢复入口
+    记录里的 ModuleRevision（0x0D8，回退目标修订号）按兼容口径处理：
+    --report 展示（零标注无修订）、--repair 原样保留、--publish 原样继承、
+    --confirm 用 --revision 给本次装载所用修订号（新写方写出的 Confirmed 记录必须非零）
+    受控恢复的两条入口是清零与按有效副本修复，命令形态与记录方式一一对应
 */
 
 #include <BootState.hpp>
@@ -105,6 +108,8 @@ namespace {
         std::array<uint8_t, 32> candidateDigest{};    // 候选集清单摘要
         bool confirm = false;       // 提交确认：写 Confirmed 记录
         uint64_t confirmAttempt = 0;    // 要确认的尝试身份
+        uint64_t moduleRevision = 0;    // 本次装载所用模块修订号（--confirm 必填，写进 Confirmed 记录）
+        bool hasModuleRevision = false; // 是否给了 --revision
         std::string audit;          // 审计记录追加到的文件
     };
 
@@ -118,19 +123,24 @@ namespace {
             "  --image   镜像或整盘设备路径（不可写时只允许 --report）\n"
             "  --offset  状态区域偏移，默认 0x21000\n"
             "  --bytes   状态区域长度，默认 4096\n"
-            "  --report  只报告：每个槽位各自的结论、选中记录与全部字段\n"
-            "  --clear   受控恢复：清零全部槽位，回到出厂形态（选版按无记录直启缺省集）\n"
-            "  --repair  受控恢复：用一份有效副本重建损坏副本，代次加一\n"
+            "  --report  只报告：每个槽位各自的结论、选中记录与全部字段（含 ModuleRevision，零标注无修订）\n"
+            "  --clear   受控恢复：清零全部槽位，回到出厂形态（选版按无记录直启缺省集；\n"
+            "            之后首次启动重建 Confirmed 记录时按当前 Modules.list 的 revision 写 ModuleRevision）\n"
+            "  --repair  受控恢复：用一份有效副本重建损坏副本，代次加一（ModuleRevision 原样保留）\n"
             "  --accept-seen <版本>  人工接受：把已见最高安全版本下调到该值（防回滚的唯一例外）\n"
             "  --publish --build-id <64 位十六进制> --digest <64 位十六进制>\n"
             "                        发布候选：写 Pending 记录（候选标识、清单摘要与默认尝试次数）\n"
+            "                        ModuleRevision 原样继承上一份有效 Confirmed 记录的值，不因发布而改动\n"
             "                        这是运行期发布方 Updater 的写入步骤，运行期未就绪时由本工具代执行\n"
-            "  --confirm <尝试身份>  提交确认：记录仍是 Trying 且尝试身份相符时写 Confirmed\n"
+            "  --confirm <尝试身份> --revision <修订号>\n"
+            "                        提交确认：记录仍是 Trying 且尝试身份相符时写 Confirmed；\n"
+            "                        --revision 是本次装载所用模块修订号（来自当前 Modules.list 的 revision），\n"
+            "                        写进记录的 ModuleRevision 字段；新写方写出的 Confirmed 记录该字段必须非零\n"
             "                        这是运行期确认方 Init 的写入步骤，身份不符一律不写\n"
             "  --audit   把本次动作追加成一行审计记录\n"
             "\n"
             "没有动作时等同于 --report。退出码 0 成功、1 动作失败、2 参数错误\n"
-            "规格见 Docs/Specs/Baleen/引导状态记录.md 第八节\n";
+            "写入与审计规则固定\n";
     }
 
     // 解析命令行的版本号：十进制或 0x 前缀
@@ -181,6 +191,7 @@ namespace {
             else if (arg == "--build-id") options.candidateBuildId = Hex32(value("--build-id"), "候选集标识");
             else if (arg == "--digest") options.candidateDigest = Hex32(value("--digest"), "候选清单摘要");
             else if (arg == "--confirm") { options.confirm = true; options.confirmAttempt = Number(value("--confirm"), "要确认的尝试身份"); }
+            else if (arg == "--revision") { options.hasModuleRevision = true; options.moduleRevision = Number(value("--revision"), "模块修订号"); }
             else if (arg == "--audit") options.audit = value("--audit");
             else Fail("无法识别的参数：" + arg);
         }
@@ -191,6 +202,10 @@ namespace {
         Require(!(options.publish && (options.clear || options.repair || options.acceptSeen || options.confirm)), "--publish 不能与其它动作一起用");
         Require(!(options.confirm && (options.clear || options.repair || options.acceptSeen)), "--confirm 不能与其它动作一起用");
         Require(options.confirmAttempt == 0 || options.confirm, "--confirm 的尝试身份只能与 --confirm 一起给");
+        // 修订号只服务 --confirm：Confirmed 记录的 ModuleRevision 是本次装载所用修订号，
+        // --publish 的 ModuleRevision 由共用实现原样继承，不需要新参数
+        Require(!options.hasModuleRevision || options.confirm, "--revision 只能与 --confirm 一起用");
+        Require(!options.confirm || (options.hasModuleRevision && options.moduleRevision != 0), "--confirm 需要一个非零的 --revision（当前 Modules.list 的 revision）");
         Require(!options.publish || options.candidateBuildId != std::array<uint8_t, 32>{}, "--publish 需要一个非全零的 --build-id");
         return options;
     }
@@ -287,6 +302,10 @@ namespace {
                   << " 剩余尝试=" << static_cast<unsigned>(record.triesRemaining)
                   // 已试次数只增：它是对账用的——断电丢过一次提交时，这个数会露出来
                   << " 已试次数=" << static_cast<unsigned>(record.triesDone) << "\n";
+        // 回退目标修订号：0 是旧格式记录或没有可回退修订的形态，不是“修订 0”
+        std::cout << "  ModuleRevision=" << record.moduleRevision;
+        if (record.moduleRevision == 0) std::cout << "（无修订：按当前 Modules.list 的 revision 解释）";
+        std::cout << "\n";
         std::cout << "  已知良好集=" << HexBytes(record.confirmedBuildId, 32) << "\n";
         std::cout << "  候选集=" << HexBytes(record.candidateBuildId, 32) << "\n";
         std::cout << "  吊销事实：纪元=" << record.revocation.epoch
@@ -347,8 +366,8 @@ int main(int argc, char** argv) {
         } else if (options.confirm) {
             action = "--confirm";
             const uint64_t attempt = options.confirmAttempt;
-            ok = BootState::ConfirmAttempt(device, options.offset, options.bytes, attempt, generation);
-            detail = "尝试身份=" + std::to_string(attempt) + " 代次=" + std::to_string(generation);
+            ok = BootState::ConfirmAttempt(device, options.offset, options.bytes, attempt, options.moduleRevision, generation);
+            detail = "尝试身份=" + std::to_string(attempt) + " 修订号=" + std::to_string(options.moduleRevision) + " 代次=" + std::to_string(generation);
         } else {
             action = "--accept-seen";
             ok = BootState::AcceptSeenSecurityVersion(device, options.offset, options.bytes, options.acceptedVersion, generation);

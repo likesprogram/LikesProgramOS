@@ -38,7 +38,7 @@ SECTION .stub.head progbits alloc exec nowrite
 %IF ($ - $$) != STUB_HEAD_OFFSET + STUB_DIGEST_OFFSET
     %ERROR "Digest 未落在头内约定的偏移"
 %ENDIF
-    TIMES 32 DB 0                       ; Digest：由打包器按第四节填充
+    TIMES 32 DB 0                       ; Digest：由打包器填充
 %IF ($ - $$) != STUB_HEAD_OFFSET + STUB_HEAD_BYTES - STUB_RESERVE_BYTES
     %ERROR "保留区未落在头内约定的偏移"
 %ENDIF

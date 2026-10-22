@@ -9,8 +9,11 @@
 | `Include/Storage/`、`Src/Storage/` | 块设备、偏移视图、统一路径与文件系统抽象 | 同上 |
 | `Include/BootInfo.hpp` | 引导交接契约：尺寸、版本、固件状态、介质与内存图 | Baleen 各阶段、内核 |
 | `Include/KernelImage.hpp`、`Src/KernelImage.cpp` | 内核镜像数据的字段布局与校验，字节表见 [内核镜像数据](../../Docs/Specs/Baleen/内核镜像数据.md) | BaleenCore、内核侧 Core |
+| `Include/Sha256.hpp`、`Src/Sha256.cpp` | 共享 SHA-256 压缩核心与计数视图（Baleen 与内核同一份实现，避免两侧各写一份） | Baleen 各阶段、内核侧 Core、宿主工具 |
+| `Include/Manifest.hpp` | 内核集清单的公共语义类型（与验签工具共用） | BaleenCore、MakeManifest / SignManifest / CheckOsm |
+| `Include/ModulePath.hpp` | 模块集内路径解析与 `ModuleId` 派生（`Modules/<逻辑名>.<major>.<minor>.<patch>.osm` 与 `SHA-256("LPMOD01"‖逻辑名)[0:16)`），Baleen 与内核同源，见[模块修订与更新](../../Docs/Specs/模块修订与更新.md)第四节 | BaleenCore 的预装筛选、内核交接校验与装载器、宿主检查 |
 | `Include/BootState.hpp`、`Src/BootState.cpp` | 引导状态记录：八槽环形的槽位校验与选择、写入顺序（写 → 刷盘 → 读回）、槽位级检查与受控恢复（清零 / 按有效槽位修复）与人工接受，提交按设备逻辑块落盘（4Kn 上读—改—写整块），字节表见 [引导状态记录](../../Docs/Specs/Baleen/引导状态记录.md) | BaleenCore 的选版、运行期 Updater / Init、维护工具 [FixBootState](../../Tools/Maintain/FixBootState/README.md) |
-| `Include/Revocation.hpp`、`Src/Revocation.cpp` | 签名吊销记录（`LPRV`）：字节表、结构检查、签名覆盖准备、签名者自吊销拒绝、位图判定与并集，以及从系统卷读取的三态结论，见[内核集清单与签名](../../Docs/Specs/内核集清单与签名.md) 5.1、5.2 | BaleenCore 的选版、宿主工具 [MakeRevocation](../../Tools/Build/MakeRevocation/README.md) 与 [CheckRevocation](../../Tools/Test/CheckRevocation/README.md)；运行期读取方待内核存储阶段 |
+| `Include/Revocation.hpp`、`Src/Revocation.cpp` | 签名吊销记录（`LPRV`）：字节表、结构检查、签名覆盖准备、签名者自吊销拒绝、位图判定与并集，以及从系统卷读取的三态结论，见[内核集清单与签名](../../Docs/Specs/内核集清单与签名.md) 5.1、5.2 | BaleenCore 的选版、宿主工具 [MakeRevocation](../../Tools/Build/MakeRevocation/README.md) 与 [CheckRevocation](../../Tools/Test/CheckRevocation/README.md)；内核读取方属后续阶段（当前由引导器判定） |
 
 `BootState` 放在共用包是**规格要求的一部分**：运行期确认写入与引导期选择必须使用同一状态存储后端和记录格式（[内核集更新与回滚](../../Docs/Specs/内核集更新与回滚.md)第三节），因此两侧引用同一份实现，而不是各写一份“约定”。记录里的 `SeenSecurityVersion` 只在人工接受时下调（同样在本文件里实现），抬高由选择器随清单更新完成；记录还带吊销事实（纪元、下限、已吊销密钥位图），运行期写入方必须读—改—写、原样保留这三个字段与已试次数 `TriesDone`。**记录格式尚未发布，只有版本 1**：字段调整直接改字节表，不留兼容分支。
 
@@ -22,4 +25,4 @@
 
 接口的硬约束：不依赖 C++ 运行库（无异常、无 RTTI、不动态分配、不用虚析构），接口方法都有默认实现而不是纯虚函数（纯虚会让引导镜像链接 `__cxa_pure_virtual`），实例由提供方就地构造与销毁。
 
-构建是 32 位保护模式（`-m32`，`-ffreestanding`），对象产出在 `Out/Obj`；内核侧将按自己的编译选项引用同一份源码。`make` 与 `make clean` 只覆盖本包目录，子包通过 `upstream` 调用本包的规则。
+本包默认构建是 32 位保护模式（`-m32`，`-ffreestanding`），对象产出在 `Out/Obj`；内核侧按自己的 64 位编译选项重编同一份源码（`Packages/LikesProgramOS/Core` 与 `Packages/KernelModules` 的共用件），两侧共用声明、不共用目标文件。`make` 与 `make clean` 只覆盖本包目录，子包通过 `upstream` 调用本包的规则。

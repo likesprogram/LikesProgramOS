@@ -1,5 +1,5 @@
 # Makefile
-#    PackImage —— 宿主侧 Baleen 镜像与内核镜像打包工具（C++20）：填 BuildId 与 Digest 并校验
+#    PackImage —— 宿主侧镜像完整性工具（C++20）：Baleen 镜像填 BuildId 与 Digest，内核镜像只校验
 
 # 中间对象目录
 OBJ_DIR    ?= Obj
@@ -7,7 +7,7 @@ OBJ_DIR    ?= Obj
 BIN_DIR    ?= ../../Bin
 # 本工具的源目录
 SRC_DIR    := Src
-# 构建期工具共享的代码目录（内核镜像数据的填充与校验）
+# 构建期工具共享的代码目录（内核镜像数据的摘要计算与校验）
 COMMON_DIR := ../Common
 # 宿主工具跨分类共享的代码目录（镜像完整性头、摘要算法与宿主文件读写）
 ROOT_COMMON_DIR := ../../Common

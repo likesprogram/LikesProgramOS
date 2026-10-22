@@ -169,7 +169,7 @@ BaleenCore 的文件布局同构，只有格式标记与入口之后的代码不
 Digest = SHA-256(F[0x00:0x50] || 32 个零字节 || F[0x70:ImageBytes])
 ```
 
-这里的切片右端均不含，`||` 表示字节串拼接。`Magic`、版本、长度、入口、BuildId、所有保留字节、入口前缀、代码和落盘数据均被覆盖；只有摘要本身按规则归零，避免自引用。SHA-256 的标准依据为 NIST [Hash Functions](https://csrc.nist.gov/projects/hash-functions) 与其列出的 [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)；目标侧实现在 `Packages/Baleen/Common/Src/Sha256.cpp`，宿主侧实现在 `Tools/Common/Src/Sha256.cpp`。
+这里的切片右端均不含，`||` 表示字节串拼接。`Magic`、版本、长度、入口、BuildId、所有保留字节、入口前缀、代码和落盘数据均被覆盖；只有摘要本身按规则归零，避免自引用。SHA-256 的标准依据为 NIST [Hash Functions](https://csrc.nist.gov/projects/hash-functions) 与其列出的 [FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final)；目标侧实现在 `Packages/Common/Src/Sha256.cpp`，宿主侧实现在 `Tools/Common/Src/Sha256.cpp`。
 
 覆盖范围不包含介质上的描述符区、最后一个本地扇区的文件外填充、BSS、其他运行时缓冲、BaleenCore、`BaleenLayout.bin` 或内核集。
 
@@ -181,7 +181,7 @@ Digest = SHA-256(F[0x00:0x50] || 32 个零字节 || F[0x70:ImageBytes])
 
 ## 五、Baleen BuildId 的归属
 
-这里的 BuildId 标识 **Baleen 引导器构建**。它用于追踪 Stub 及未来与之配套的 Baleen 组件、检查打包时的构建配对，不能与 `.os`、`.osm` 和内核集构建清单的 BuildId 混用；后者的定义见 [内核集更新与回滚](../../../Docs/Specs/内核集更新与回滚.md)。
+这里的 BuildId 标识 **Baleen 引导器构建**。它用于追踪 Stub 及未来与之配套的 Baleen 组件、检查打包时的构建配对，不能与 `.os`、`.osm` 和内核集构建清单的构建级 BuildId 混用；后者的定义见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md) 2.2。
 
 BuildId 由 Baleen 构建阶段分配，32 字节按原样比较；应绑定确定的源码、配置与构建输入，并支持相同输入下的可复现构建。BuildId 必须先于文件摘要确定，不能从包含自身字段的最终文件摘要反推；不为它引入第二个自引用问题。
 
@@ -211,15 +211,18 @@ Stub 与 BaleenCore 的 BuildId 各自独立，且都覆盖在各自摘要的范
 
 IPL 没有验头不等于缺陷，这是现有边界。Stub 因自身头、BSS、A20、内存图，或 BaleenCore 的头、摘要与装载失败，应报告为 Stub 阶段错误；不能把错误归到 IPL，也不能失败后继续使用未检查的 BaleenCore。
 
-## 七、尚待后续设计与实现
+## 七、阶段边界与仍待后续
 
-| 项目 | 当前尚未确定或实现的内容 |
+下表不再列“未实现清单”，只记录 Stub 对外的阶段边界与后续阶段才补的部分；已实现能力的契约见第三、四、六节。
+
+| 项目 | 当前状态与边界 |
 | --- | --- |
-| BaleenCore 的镜像内结构 | 完整性头与入口前缀已定（2.3，与 Stub 同构）；头之后的代码、段、重定位与对齐仍由 BaleenCore 后续自行定义 |
-| Stub 实模式服务 | 磁盘服务含读盘与裸块写盘：写盘按同样的窗口约束执行 `AH=43h`、失败即返回，只服务引导状态区；读盘服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转；两层读盘回退与 HDD 的 `AH=02h` 回退是项目的有界重试策略，不承诺无 EDD 或任意几何的机器都能读完整段。A20 与模式识别由 `Packages/Common` 的 `Platform::Cpu` 提供 |
-| Baleen 构建元数据 | BuildId 的派生规则、输入与规范化编码已定（第五节与 [PackImage 说明](../../../Tools/Build/PackImage/README.md)）；统一清单与 UEFI 携带方式仍未定 |
-| 验证与认证 | Baleen 镜像自身的执行前认证依赖固件信任链，无密钥摘要不是信任根；项目自有的签名与信任锚定义在内核集层，见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)，选版与清单验签由 BaleenCore 与 UEFI 侧各自承担（两侧复用同一份 `SelectSet` / `ManifestVerify` 实现，见 [BaleenCore 职责与当前实现](../Core/README.md) 与 [UEFI 侧说明](../Uefi/README.md)）；头字段与摘要的构建期、运行期检查见第三、四节，行为回归见第六节的 `CheckStub` |
-| BaleenCore / UEFI 的上层职责 | `BaleenLayout.bin` 的格式与位置、Ext4 只读实现、内核集验证与选版已由 BaleenCore 与 UEFI 侧各自落地（UEFI 复用同一份实现）；剩余未定项随发布工程与用户空间阶段确定。验证、选版与状态记录的规格见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)与[引导状态记录](../../../Docs/Specs/Baleen/引导状态记录.md) |
+| BaleenCore 的镜像内结构 | 对外契约已定：完整性头与入口前缀（2.3，与 Stub 同构）；头之后的代码、段、重定位与对齐由 BaleenCore 的链接脚本与代码自行定义，不是跨阶段 ABI。后续内部结构变化不改变 Stub 契约 |
+| Stub 实模式服务 | **已实现**：磁盘服务含读盘与裸块写盘（写盘按同样的窗口约束执行 `AH=43h`、失败即返回，只服务引导状态区）；读盘服务只接受低 1MiB 的目的地，需要高位缓冲的调用方要自备中转。边界：两层读盘回退与 HDD 的 `AH=02h` 回退是项目的有界重试策略，不承诺无 EDD 或任意几何的机器都能读完整段。A20 与模式识别由 `Packages/Common` 的 `Platform::Cpu` 提供 |
+| Baleen 构建元数据 | BuildId 的派生规则、输入与规范化编码已定（第五节与 [PackImage 说明](../../../Tools/Build/PackImage/README.md)）；跨包的统一清单与 UEFI 携带方式不在 Stub 契约内，随发布工程确定，当前不影响引导阶段验证 |
+| 验证与认证 | **已定**：Baleen 镜像自身的执行前认证依赖固件信任链，无密钥摘要不是信任根；项目自有的签名与信任锚从内核集开始，见[内核集清单与签名](../../../Docs/Specs/内核集清单与签名.md)，选版与清单验签由 BaleenCore 与 UEFI 侧各自承担（两侧复用同一份 `SelectSet` / `ManifestVerify` 实现）；头字段与摘要的构建期、运行期检查见第三、四节，行为回归见第六节的 `CheckStub` |
+| BaleenCore / UEFI 的上层职责 | **已落地**：`BaleenLayout.bin`、Ext4 只读实现、内核集验证与选版由 BaleenCore 与 UEFI 侧各自实现（UEFI 复用同一份实现）；剩余未定项随发布工程与用户空间阶段确定 |
+| 工程验证 | **已完成（不含实机）**：结论、用例矩阵与证据入口见 [Baleen 验证报告](../../../Docs/Test/Baleen-验证报告.md) |
 
 不得仅为满足头格式而在 `Stub/Out/Bin/` 生成同名空壳或停机件，让顶层“真实产物优先”逻辑误把它当成正式实现。`Tools/Build/MakePayloads` 生成的占位 BaleenCore 是一段真正的 32 位映像：它带完整性与头入口，经 Stub 校验头与摘要后被装入，再经交权块调用 Stub 的控制台打印标识后停机，用来证明定位、装载、校验与交权真的走通；它不是 BaleenCore 实现，不代表 Baleen 已能引导内核。
 

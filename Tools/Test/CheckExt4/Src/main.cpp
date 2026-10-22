@@ -17,7 +17,7 @@
     缺 mkfs 时按基础设施缺失报告（退出码 2），--strict 把它当作失败
 */
 
-#include <AhciCommand.hpp>
+#include <Storage/AhciCommand.hpp>
 #include <BiosBlockDevice.hpp>
 #include <DiskFlush.hpp>
 #include <Ext4.hpp>
@@ -61,7 +61,7 @@ namespace {
     // 模拟低内存与窗口：readSectors 只接受落低 1MiB、16 字节对齐的目的地
     constexpr uint32_t kLowBytes = 1024 * 1024;
     constexpr uint32_t kWindowBytes = 64 * 1024;
-    // 夹具文件的事实：路径按系统卷布局布置，见 Docs/Specs/Common/系统卷布局.md
+    // 夹具文件的事实：路径按系统卷的落点布置（/LikesProgram/System 下）
     constexpr const char* kKernelPath = "/LikesProgram/System/LikesProgram.os";      // 内核镜像路径
     constexpr const char* kModulePath = "/LikesProgram/System/Modules/Module.osm";   // 模块路径
     constexpr const char* kSystemDir = "/LikesProgram/System";                       // 内核集目录

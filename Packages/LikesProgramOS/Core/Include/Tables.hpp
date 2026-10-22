@@ -3,7 +3,6 @@
 
     机制取自 Packages/Common 的 Platform::Gdt / Platform::Idt（按 64 位编译一份），
     策略由内核给出：内核与用户段、DPL、TSS 与 IST、异常门指向 Core.asm 的桩
-    装载细节与两种模式的字节差异见 Docs/Specs/CPU描述符表.md
 */
 
 #pragma once

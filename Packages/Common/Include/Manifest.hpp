@@ -1,7 +1,7 @@
 /* Manifest.hpp
     内核集清单（LPMS）的结构定义：字节表偏移、固定值与尺寸约束
 
-    字节表见 Docs/Specs/内核集清单与签名.md 第二节；宿主侧工具按本文件生成与签名，
+    字节表偏移、固定值与尺寸约束由本文件定义；宿主侧工具按本文件生成与签名，
     引导选择器按同一份偏移解析与验签，两侧共用这一处定义
 */
 
@@ -30,9 +30,10 @@ namespace KernelSet {
         constexpr uint32_t kManifestMaxBytes = 0x10000;
         // 签名算法取值：1 为 Ed25519；其他值拒绝，没有“不验证”取值
         constexpr uint8_t kAlgorithmEd25519 = 1;
-        // 产物类型取值：1 为 .os，2 为 .osm
+        // 产物类型取值：1 为 .os，2 为 .osm，3 为 Modules.list（内核侧书写的模块加载列表，非装载载荷）
         constexpr uint8_t kTypeOs = 1;
         constexpr uint8_t kTypeOsm = 2;
+        constexpr uint8_t kTypeBootList = 3;
 
         // 头部与条目区字段偏移，相对清单起点
         constexpr uint32_t kFieldMagic = 0x000;

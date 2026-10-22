@@ -38,6 +38,9 @@ namespace Kernel {
 
     const char* InstallBootPaging() {
         static_assert(kPdTables > 0, "引导页表必须至少覆盖一张页目录的范围");
+        // 三个窗口各占一个独立 PML4 槽位：恒等映射、直映射与 MMIO 窗口不能互相覆盖
+        static_assert(kMmioWindowPml4Index != kPml4IdentityIndex, "MMIO 窗口不能占用恒等映射的 PML4 槽位");
+        static_assert(kMmioWindowPml4Index != kPml4PhysMapIndex, "MMIO 窗口不能占用直映射的 PML4 槽位");
         // 上位表：恒等映射与直映射窗口各接一棵子树
         s_pml4[kPml4IdentityIndex] = reinterpret_cast<uintptr_t>(s_pdptIdentity) | kPresentRw;
         s_pml4[kPml4PhysMapIndex] = reinterpret_cast<uintptr_t>(s_pdptPhysMap) | kPresentRw;
@@ -52,5 +55,21 @@ namespace Kernel {
         const uintptr_t table = reinterpret_cast<uintptr_t>(s_pml4);
         asm volatile("MOV %0, %%CR3" : : "r"(table) : "memory");
         return nullptr;
+    }
+
+    // 把调用方建好的页表子树挂进 MMIO 窗口槽位：页表页在恒等映射的内核 .bss 里，物理地址即指针值
+    // 调用方（MmioMap）负责 PDPT/PD/PT 的内容与 4 KiB PTE 的缓存禁用属性，这里只管挂接与刷 TLB
+    const char* InstallVirtualWindow(uintptr_t virtualBase, uintptr_t pdptPhysical) {
+        if (virtualBase != kMmioWindowBase) return "the MMIO window base doesn't match the reserved PML4 slot";
+        if ((pdptPhysical & 0xFFFull) != 0) return "the MMIO window page table isn't 4 KiB aligned";
+        s_pml4[kMmioWindowPml4Index] = pdptPhysical | kPresentRw;
+        FlushTlb();
+        return nullptr;
+    }
+
+    // 重载 CR3：页表修改后让 TLB 全失效（窗口映射的 Unmap 与挂接都走这里）
+    void FlushTlb() {
+        const uintptr_t table = reinterpret_cast<uintptr_t>(s_pml4);
+        asm volatile("MOV %0, %%CR3" : : "r"(table) : "memory");
     }
 }

@@ -1,7 +1,7 @@
 /* Revocation.cpp
     内核集签名吊销记录的实现：结构检查、签名覆盖、签名者规则与系统卷读取
 
-    签名覆盖规则见 Docs/Specs/内核集清单与签名.md 第五节：签名值 64 字节视作零，
+    签名覆盖规则：签名值 64 字节视作零，
     对整份记录签名；与清单验签同一套零代入办法，区别只在本格式没有变长部分
     验签经回调调用（Packages/Common 不依赖加密实现），公钥由调用方按信任锚表提供
     无运行库环境只用到 memcpy，就地声明；读缓冲是静态存储，不在栈上开
@@ -103,7 +103,7 @@ namespace Baleen {
                 // 签名者规则：自吊销的记录不成立——泄露的密钥不能靠签一份记录把自己留下
                 if (IsKeyRevoked(declared.revokedKeyMask, signerKeyId)) return kReasonSelfRevoked;
 
-                // 签名值先取出，该字段归零后整份记录参与验签（与清单 2.1 同一套办法）
+                // 签名值先取出，该字段归零后整份记录参与验签（与清单验签同一套办法）
                 uint8_t signatureValue[kSignatureValueBytes];
                 memcpy(signatureValue, bytes + kSignatureValueAt, kSignatureValueBytes);
                 for (uint32_t i = 0; i < kSignatureValueBytes; ++i) bytes[kSignatureValueAt + i] = 0;

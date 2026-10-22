@@ -3,7 +3,7 @@
 
     这里的函数只做机制，既不打印也不停机：诊断行与步骤顺序由 _Stub_Main 决定，日志集中在一处
     实现在 Src/LoadCore.cpp，文件名用「装载 BaleenCore」这个动作，避免与 Baleen 的 BaleenCore 阶段混同
-    CoreDescriptor 的字节表见 Packages/Baleen/Stub/README.md 第二节，镜像头的布局与字段来自
+    CoreDescriptor 的字节表由 Desc.inc 的字段偏移给出，镜像头的布局与字段来自
     Packages/Baleen/Common/Include/ImageHeader.hpp，两种镜像同构
 */
 

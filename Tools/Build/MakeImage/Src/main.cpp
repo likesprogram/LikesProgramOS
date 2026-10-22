@@ -84,7 +84,7 @@ namespace {
         std::string system_volume;                                         // 系统卷镜像（Ext4）
         std::string iso_name;                                              // 系统卷在 ISO 内的文件名
         std::string layout;                                                // 布局描述模板：提供内核路径，位置字段仍由本工具回填
-        std::string kernel_path;                                           // 内核路径覆盖值；空表示取模板或默认路径
+        std::string kernel_path;                                           // 内核路径；空表示取模板，两者都没有时报错（旧扁平默认已退役）
         std::vector<std::pair<std::string, std::string>> files;            // ISO 路径 -> 宿主路径
         std::vector<std::pair<std::string, std::optional<uint64_t>>> raw;  // 宿主路径 -> 偏移
         std::string manifest;                                              // 构建清单输出路径
@@ -94,7 +94,7 @@ namespace {
         bool stub_unchecked = false;                                       // 是否免除 Stub 头与摘要校验
         bool core_unchecked = false;                                       // 是否免除 BaleenCore 头与摘要校验
         bool help = false;                                                 // 是否只要帮助
-        // 记录损坏时允许退到缺省集：写进布局描述的标志位（默认不置位，见布局描述第七节）
+        // 记录损坏时允许退到缺省集：写进布局描述的标志位（默认不置位）
         bool degrade_without_record = false;                               // 布局描述：记录损坏时退到缺省集
     };
 
@@ -132,8 +132,8 @@ namespace {
             "  --esp PATH               混合镜像的 ESP 分区内容（必须 FAT16）\n"
             "  --system-volume PATH     系统卷镜像（Ext4）：作为连续 ISO 文件存放，并写 Ext4 分区项\n"
             "  --iso-name NAME          系统卷在 ISO 内的文件名，默认取源文件名\n"
-            "  --layout PATH            布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；默认用旧扁平路径 /LikesProgram/System/LikesProgram.os（选版启用的引导器会拒绝，见 E-CORE-84）\n"
-            "  --kernel-path PATH       覆盖内核路径（卷内绝对路径），优先于模板\n"
+            "  --layout PATH            布局描述模板：取其内核路径，卷标识与位置字段由本工具回填；与 --kernel-path 至少给一个，没有默认路径\n"
+            "  --kernel-path PATH       内核路径（卷内绝对路径），优先于模板；显式给扁平路径只用于构造 E-CORE-84 负例\n"
             "  --file ISO路径=宿主路径   附加文件，可重复（中间目录自动建立）\n"
             "  --raw 宿主路径[@偏移]     原始载荷，可重复；偏移须 4096 对齐，省略则自动分配\n"
             "  --stub-unchecked         免除 Stub 头与摘要校验：只给测试夹具与特殊用途，正式构建不要用\n"
@@ -250,7 +250,7 @@ namespace {
             if (bytes == 0) throw std::runtime_error("El Torito EFI 引导镜像为空：" + options.efi);
             // 与 ESP 同一条规则：必须是 FAT16
             RequireFat16Image(options.efi, "El Torito EFI 引导镜像");
-            // 16 位扇区计数容得下 4 MiB 的 FAT16；镜像更大时按规范上限写，并在下面提示
+            // 16 位扇区计数容得下 4 MiB 的 FAT16；镜像更大时按 0xFFFF 上限写，并在下面提示
             if ((bytes + 511) / 512 > 0xFFFF) {
                 std::cerr << "MakeImage: El Torito 的扇区计数是 16 位（上限 65535 个 512 字节扇区），"
                           << "引导目录里按上限写，" << options.efi
@@ -374,8 +374,10 @@ namespace {
             if (options.degrade_without_record) spec.flags |= Baleen::LayoutDescriptor::kFlagDegradeWithoutRecord;
             if (!options.kernel_path.empty()) spec.kernel_path = options.kernel_path;
             else if (!options.layout.empty()) spec.kernel_path = ReadTemplateKernelPath(options.layout);
-            // 选版启用的引导器只接受 KernelSets/<BuildId>/<相对路径> 形态：默认模板的旧扁平路径
-            // 会生成无法通过选版的镜像，这里提前告警而不是静默产出
+            // 内核路径必须显式给出：旧扁平默认路径已退役，不再静默产出必被选版拒绝的镜像
+            if (spec.kernel_path.empty()) throw std::runtime_error("布局描述缺少内核路径：用 --kernel-path 指定，或用 --layout 模板提供（旧的扁平默认路径已退役）");
+            // 选版启用的引导器只接受 KernelSets/<BuildId>/<相对路径> 形态：显式给出的其它形态
+            // 会生成无法通过选版的镜像，这里提前告警而不是静默产出（仅供构造 E-CORE-84 负例）
             if (spec.kernel_path.find("/KernelSets/") == std::string::npos)
                 std::cerr << "MakeImage: 警告：布局描述的内核路径推不出 KernelSets/<BuildId>/ 形态，选版启用的引导器会拒绝启动（E-CORE-84）：" << spec.kernel_path << "\n";
             const std::vector<uint8_t> block = BuildBaleenLayout(spec);
@@ -399,7 +401,7 @@ namespace {
         catalog.bios = BootCatalogEntry{build.boot_lba, FileSize(options.boot_image), options.load_segment};
         if (build.efi.has_value()) {
             BootCatalogEntry entry{static_cast<uint32_t>(build.efi->offset / kBlock), build.efi->bytes, 0};
-            if ((build.efi->bytes + 511) / 512 > 0xFFFF) entry.sector_count = 0xFFFF;  // 字段写不下，按规范上限写
+            if ((build.efi->bytes + 511) / 512 > 0xFFFF) entry.sector_count = 0xFFFF;  // 字段写不下，按 16 位上限 0xFFFF 写
             catalog.efi = entry;
         }
         catalog.signature = options.volume_id;

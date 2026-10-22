@@ -1,8 +1,8 @@
 /* BaleenLayout.cpp
     Baleen 布局描述的宿主侧编码实现：Ext4 卷标识读取、模板解析与字段回填
 
-    字节表与校验规则的单点定义是 Docs/Specs/Baleen/布局描述.md；本文件不改变格式，
-    只按规格生成字节；保留字段一律写 0，校验和覆盖 [0x000, 0x140)
+    字节表的字段常量与校验规则取自目标侧 LayoutDescriptor.hpp；本文件不改变格式，
+    只按这些常量回填字节；保留字段一律写 0，校验和覆盖 [0x000, 0x140)
 */
 
 #include <BaleenLayout.h>
@@ -138,6 +138,8 @@ namespace hostbuild {
         // 生成器提前报错，避免产出一份目标侧不接受的布局描述
         const uint32_t unknownFlags = spec.flags & ~Baleen::LayoutDescriptor::kKnownFlags;
         if (unknownFlags != 0) throw std::runtime_error("布局描述包含未定义的标志位 " + Hex32(unknownFlags) + "（已定义位 " + Hex32(Baleen::LayoutDescriptor::kKnownFlags) + "）");
+        // 内核路径必须显式给出：旧的扁平默认路径已退役，缺路径不产出会被选版拒绝的布局描述
+        if (spec.kernel_path.empty()) throw std::runtime_error("布局描述缺少内核路径：必须由调用方显式给出（参数或模板），没有默认值");
         CheckKernelPath(spec.kernel_path);
         if (spec.volume_image.empty()) throw std::runtime_error("布局描述需要系统卷镜像以读取卷标识");
         if (spec.volume_bytes == 0) throw std::runtime_error("布局描述的系统卷长度必须非 0");

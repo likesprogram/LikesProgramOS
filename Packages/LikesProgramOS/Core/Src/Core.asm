@@ -33,9 +33,13 @@ SECTION .kernel.data progbits alloc nowrite
 %ENDIF
     TIMES 32 DB 0                       ; Digest：由打包器按摘要覆盖区间填充
 %IF ($ - $$) != 0x68
+    %ERROR "ModuleMajor 未落在数据内约定的偏移"
+%ENDIF
+    DW KERNEL_MODULE_MAJOR              ; 模块主版本：本发布线，.osm 必须与它相等
+%IF ($ - $$) != 0x6A
     %ERROR "保留区未落在数据内约定的偏移"
 %ENDIF
-    TIMES 24 DB 0                       ; Reserved：全 0
+    TIMES 22 DB 0                       ; Reserved：全 0
 %IF ($ - $$) != KERNEL_DATA_BYTES
     %ERROR "内核镜像数据长度不是约定的 0x80"
 %ENDIF

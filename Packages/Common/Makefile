@@ -30,7 +30,7 @@ CXXFLAGS  ?= -m32 -std=c++20 -Os -ffreestanding -fno-exceptions -fno-rtti -fno-p
 NASMFLAGS ?= -f elf32 -Werror
 
 # C++ 源与产物
-CPP_OBJS  := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Descriptor.o KernelImage.o)
+CPP_OBJS  := $(addprefix $(OBJ_DIR)/,Print.o SerialTarget.o DebugPortTarget.o Cpu.o Descriptor.o KernelImage.o Sha256.o)
 # 存储抽象的产物：错误模型、统一路径、偏移视图与文件系统抽象
 STORAGE_OBJS := $(addprefix $(OBJ_DIR)/,Error.o Path.o SubDevice.o FileSystem.o)
 # 引导状态记录与吊销记录的产物：引导期选择器、运行期写入方（Updater / Init）与维护工具共用同一份协议

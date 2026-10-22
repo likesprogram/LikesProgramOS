@@ -1,0 +1,21 @@
+# Frozen.tsv
+#   已发布接口版本的槽位冻结基线：稳定名、版本、槽数与槽位定义摘要
+#   摘要 = 该版本槽位定义（每槽 "<槽号>\t<槽名>\t<签名>" 以 LF 连接）的 SHA-256 前 16 字节
+#   由 MakeContract --freeze 追加，此后只增行、不改行；首次写入发生在 T5.1 的 v1 冻结
+Block.Registry	1	4	0e733b963dbdae4d281061c81c65c67f
+Boot.Volume	1	1	f00dd5a6ba4dc42108972cdcef3c7af0
+Core.Abi	1	3	a14c96704a901325082421e7df5e2445
+Core.Boot	1	2	70007354930d181a68acfe053a154f09
+Core.Dma	1	2	56472b73ac9a580631d336ba02ee3884
+Core.Log	1	4	cabe7f63558830b00d03ae133be142ca
+Core.Mem	1	4	f1b2387a2681a5d8924939d04f762b65
+Core.Mmio	1	2	ca4b3241571342edab8226ef549815b5
+Core.Object	1	4	fe30a995d61c749b15d59ae8620397e3
+Core.Page	1	5	79b8baec100fb62e5fb0e72135142cf8
+Core.PhysMap	1	3	3159bd99a64b667270b6eac872d40c50
+Core.Time	1	3	f77a27b123a920f108e72021e32b52e4
+Dev.Model	1	6	2ceb03a8ffa2269b721a457a11c99153
+Dev.Model	2	7	4ff885acf2d502b1a267546f0d5eb383
+Drv.Loader	1	4	4b55ab02c8096d619d77c79f635989bf
+Fs.Vfs	1	8	fc9833244a76c67b1d65ec7c87dbc9ea
+Usb.Host	1	6	846df441dbecd18001b817e382d43bee
