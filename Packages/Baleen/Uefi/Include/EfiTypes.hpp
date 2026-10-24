@@ -72,13 +72,20 @@ namespace Baleen {
 
         static_assert(sizeof(TableHeader) == 24, "EFI_TABLE_HEADER 不是 24 字节");
 
-        // 简单文本输出协议：只需要 OutputString，前面的成员按规范占位
+        // 简单文本输出协议：只用到 OutputString 与 SetAttribute，其余成员按规范顺序占位
+        // 成员顺序见 UEFI 2.10 §12.4：Reset、OutputString、TestString、QueryMode、SetMode、
+        // SetAttribute、ClearScreen、SetCursorPosition、EnableCursor、Mode
         struct SimpleTextOutput {
             void* reset;                                                     // 复位
             EfiStatus (BALEEN_EFIAPI *outputString)(SimpleTextOutput*, const char16_t*);    // 输出 UTF-16 字符串
+            void* testString;                                                // 占位：本阶段不调用
+            void* queryMode;                                                 // 占位：本阶段不调用
+            void* setMode;                                                   // 占位：本阶段不调用
+            EfiStatus (BALEEN_EFIAPI *setAttribute)(SimpleTextOutput*, uintptr_t);   // 设置文本属性（前景 | 背景 << 4）
         };
 
         static_assert(offsetof(SimpleTextOutput, outputString) == 8, "OutputString 的偏移已变");
+        static_assert(offsetof(SimpleTextOutput, setAttribute) == 40, "SetAttribute 的偏移已变");
 
         // —— 图形输出协议（GOP，UEFI 2.10 §12.9）：屏幕事实的唯一来源 ——
         // 像素格式：GOP 的 EFI_GRAPHICS_OUTPUT_PIXEL_FORMAT 取值，本阶段只支持前两种 32 位打包格式

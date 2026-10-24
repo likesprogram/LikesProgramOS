@@ -78,6 +78,9 @@ TRUST_ANCHOR_SRC := $(LOCAL_OUT_DIR)/TrustAnchors.cpp
 TRUST_ANCHOR_TEXT := $(LOCAL_OUT_DIR)/TrustAnchors.txt
 # 当前密钥的信任锚编号：KEY_ID 由顶层 export 下来（默认 1），签名工具与锚表用同一个编号
 KEY_ID         ?= 1
+# KEY_ID 的内容戳：make 不追踪变量值变化，锚表配方取 $(KEY_ID) 而前提里只有源文件；
+# 把当前值写成文件，KEY_ID 变了才刷新时间戳，锚表随之重建，增量 `make KEY_ID=2` 不会拿旧锚表
+KEY_ID_STAMP   := $(LOCAL_OUT_DIR)/KeyId
 # 保留锚条目（生成输入，进版本库）：轮换窗口里仍要承认的旧公钥，默认空；
 # 旧公钥由这份输入复现，不依赖本地构建产物
 # 可覆盖：变体构建用 --anchors 给一份含第二把公钥的锚文本（绝对路径亦可）
@@ -148,9 +151,15 @@ $(MAKE_KEYS):
 $(KEYS_DIR)/Development.sec: $(MAKE_KEYS)
 	$(MAKE_KEYS) --out $(KEYS_DIR)
 
+# KEY_ID 内容戳：每次 make 检查一次（依赖 FORCE）；内容没变就不写，时间戳不动，锚表不重建
+$(KEY_ID_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' "$(KEY_ID)" | cmp -s - $@ || printf '%s\n' "$(KEY_ID)" > $@
+
 # 信任锚源与锚文本：当前密钥与保留锚条目合并导出；换锚 = 换密钥文件并重建引导器，
-# 打开轮换窗口 = 往保留锚条目里追加旧公钥。两份产物由同一次调用生成，保证同源
-$(TRUST_ANCHOR_SRC) $(TRUST_ANCHOR_TEXT) &: $(MAKE_KEYS) $(KEYS_DIR)/Development.sec $(ANCHORS_FILE)
+# 打开轮换窗口 = 往保留锚条目里追加旧公钥。两份产物由同一次调用生成，保证同源；
+# KEY_ID 也在前提里（走内容戳）：锚表里的 KeyId 与签名清单用的编号必须同代
+$(TRUST_ANCHOR_SRC) $(TRUST_ANCHOR_TEXT) &: $(MAKE_KEYS) $(KEYS_DIR)/Development.sec $(ANCHORS_FILE) $(KEY_ID_STAMP)
 	@mkdir -p $(dir $(TRUST_ANCHOR_SRC)) $(dir $(TRUST_ANCHOR_TEXT))
 	$(MAKE_KEYS) --out $(KEYS_DIR) --anchor-cpp $(TRUST_ANCHOR_SRC) --anchor-text $(TRUST_ANCHOR_TEXT) \
 	    --key-id $(KEY_ID) $(if $(ANCHORS_FILE),--anchors $(ANCHORS_FILE),)

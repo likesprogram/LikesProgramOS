@@ -7,11 +7,13 @@
     （BALEEN_EFIAPI）声明，背后是一块 64 KiB 的内存介质，函数里按固件语义核对介质标识、
     介质在位、块数整倍数、缓冲对齐与范围——这样「未对齐缓冲经内部对齐缓冲中转」那条路径
     才真的被检查到，而不是只看返回值
-    内存图部分：假启动服务表提供 getMemoryMap / allocatePool / freePool，取图缓冲用宿主堆代替
-    固件池，脚本能制造 BufferTooSmall 与格式非法，并按用例核对池分配的调用次数、缓冲尺寸与归还
+    内存图与交接缓冲部分：假启动服务表提供 getMemoryMap / allocatePool / freePool 与
+    allocatePages / freePages，取图缓冲用宿主堆代替固件池，页分配按脚本返回候选地址并记录
+    每次归还；脚本能制造 BufferTooSmall、格式非法与分配失败，并按用例核对调用次数与归还
     覆盖范围：块设备的绑定事实与拒绝、读写的参数校验与错误映射、介质更换与拔出、
     对齐中转的直读与跨多次下发、块大小超过中转上限时的已知边界；
-    固件内存图退出启动服务前后两种可用性视角、BufferTooSmall 重取与 MapKey、格式与参数拒绝
+    固件内存图退出启动服务前后两种可用性视角、BufferTooSmall 重取与 MapKey、格式与参数拒绝；
+    交接缓冲分配器的页数与恒等映射指针、避开引导器 / 内核跨度后的降上界重试与逐段归还
 */
 
 #include <BootInfo.hpp>
@@ -42,6 +44,7 @@ namespace {
     using Baleen::Uefi::EfiStatus;
     using Baleen::Uefi::MemoryDescriptor;
     using Baleen::Uefi::MemoryMap;
+    using Baleen::Uefi::UefiAllocator;
 
     // 模拟介质规模：64 KiB、512 字节逻辑块，共 128 块
     constexpr uint32_t kMediumBytes = 64 * 1024;
@@ -52,7 +55,11 @@ namespace {
     // 实现的中转上限，与 EfiBlockDevice 的 kTransferBytes 同值
     constexpr uint32_t kTransferBytes = 4096;
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 25;
+    constexpr unsigned kCaseCount = 29;
+    // 假页分配脚本的候选地址容量：避让重试的候选按这份脚本依次返回
+    constexpr uint32_t kFakePageScript = 8;
+    // 假页归还记录的容量：用例按它核对每一次候选都被交还
+    constexpr uint32_t kFakePageFreed = 16;
     // 已跑用例数
     unsigned g_ran = 0;
 
@@ -696,6 +703,36 @@ namespace {
     // 假启动服务背后的内存图与池分配状态
     FakeMemoryServices g_fakeMemory;
 
+    // ———— 假页分配 ————
+
+    // 假页分配的脚本与记录：allocatePages 按脚本顺序返回候选地址，用尽后返回兜底地址；
+    // 用例按调用次数、入参上界与归还记录核对避让行为
+    struct FakePageServices {
+        // 一次归还记录：交还的物理起址与页数
+        struct Freed {
+            uint64_t address;   // 归还的物理起址
+            uint64_t pages;     // 归还的页数
+        };
+        uint64_t addresses[kFakePageScript] = {};   // 脚本化的候选物理地址，按调用顺序返回
+        uint32_t addressCount = 0;                  // 已装入的候选地址数
+        uint32_t nextAddress = 0;                   // 下一个要返回的候选地址下标
+        uint64_t fallbackAddress = 0;               // 候选地址用尽后的返回地址，0 表示报错
+        uint32_t allocateCalls = 0;                 // allocatePages 收到的调用次数
+        uint32_t freeCalls = 0;                     // freePages 收到的调用次数
+        uint32_t lastAllocType = 0;                 // 最近一次请求的分配方式
+        uint32_t lastMemoryType = 0;                // 最近一次请求的内存类型
+        uint64_t lastPages = 0;                     // 最近一次请求的页数
+        uint64_t lastLimit = 0;                     // 最近一次分配的入参上界（AllocateMaxAddress）
+        uint64_t lastFreeAddress = 0;               // 最近一次归还的起址
+        uint64_t lastFreePages = 0;                 // 最近一次归还的页数
+        Freed freed[kFakePageFreed] = {};           // 归还记录，按发生顺序
+        uint32_t freedCount = 0;                    // 已记录的归还次数
+        bool allocationFails = false;               // 脚本开关：页分配一律失败
+    };
+
+    // 假页分配背后的状态
+    FakePageServices g_fakePages;
+
     // EFI_OUT_OF_RESOURCES：假池分配在脚本要求失败或宿主 malloc 失败时回报
     constexpr EfiStatus kFakeOutOfResources = Baleen::Uefi::kStatusErrorBit | 9;
 
@@ -712,8 +749,11 @@ namespace {
         descriptor.attributes = 0;
     }
 
-    // 把假内存图与池分配记录复位，每个用例都从同一份干净状态开始
-    void ResetFakeMemory() { g_fakeMemory = FakeMemoryServices{}; }
+    // 把假内存图、池分配与页分配的记录复位，每个用例都从同一份干净状态开始
+    void ResetFakeMemory() {
+        g_fakeMemory = FakeMemoryServices{};
+        g_fakePages = FakePageServices{};
+    }
 
     // 假取图：脚本先回报一次「缓冲太小」并写出所需字节数，之后把描述符数组拷进调用方缓冲；
     // 成功时写回 MapKey、描述符长度与版本，描述符长度可由脚本改成不合规值
@@ -762,14 +802,55 @@ namespace {
         return Baleen::Uefi::kStatusSuccess;
     }
 
-    // 假启动服务表：只填本工具用到的三个成员，其余成员按规范顺序留空
+    // 假页分配：先记下入参上界与页数，再按脚本顺序返回候选地址，用尽后返回兜底地址；
+    // 兜底地址为 0、脚本要求失败或入参为空都回报「资源不足」
+    EfiStatus BALEEN_EFIAPI FakeAllocatePages(uint32_t allocType, uint32_t memoryType, uint64_t pages, uint64_t* memory) {
+        ++g_fakePages.allocateCalls;
+        g_fakePages.lastAllocType = allocType;
+        g_fakePages.lastMemoryType = memoryType;
+        g_fakePages.lastPages = pages;
+        if (g_fakePages.allocationFails || memory == nullptr) return kFakeOutOfResources;
+        // AllocateMaxAddress 的入参上界会被固件改写成分配结果：先记下它再改写
+        g_fakePages.lastLimit = *memory;
+        uint64_t address = g_fakePages.fallbackAddress;
+        if (g_fakePages.nextAddress < g_fakePages.addressCount) address = g_fakePages.addresses[g_fakePages.nextAddress++];
+        if (address == 0) return kFakeOutOfResources;
+        *memory = address;
+        return Baleen::Uefi::kStatusSuccess;
+    }
+
+    // 假页释放：记下起址与页数，脚本恒成功；用例按记录核对每次候选都被交还
+    EfiStatus BALEEN_EFIAPI FakeFreePages(uint64_t memory, uint64_t pages) {
+        ++g_fakePages.freeCalls;
+        g_fakePages.lastFreeAddress = memory;
+        g_fakePages.lastFreePages = pages;
+        if (g_fakePages.freedCount < kFakePageFreed) {
+            g_fakePages.freed[g_fakePages.freedCount].address = memory;
+            g_fakePages.freed[g_fakePages.freedCount].pages = pages;
+        }
+        ++g_fakePages.freedCount;
+        return Baleen::Uefi::kStatusSuccess;
+    }
+
+    // 脚本化页分配的候选地址序列与用尽后的兜底地址（0 表示用尽后报错）
+    void ScriptPageAddresses(const uint64_t* addresses, uint32_t count, uint64_t fallback) {
+        Require(count <= kFakePageScript, "页分配脚本超出用例容量");
+        for (uint32_t i = 0; i < count; ++i) g_fakePages.addresses[i] = addresses[i];
+        g_fakePages.addressCount = count;
+        g_fakePages.nextAddress = 0;
+        g_fakePages.fallbackAddress = fallback;
+    }
+
+    // 假启动服务表：只填本工具用到的五个成员，其余成员按规范顺序留空
     BootServices g_bootServices = {};
 
-    // 装配假启动服务表：只给取图与池分配/释放赋值，别的成员本工具不碰
+    // 装配假启动服务表：只给取图、池分配/释放与页分配/释放赋值，别的成员本工具不碰
     void InitFakeBootServices() {
         g_bootServices.getMemoryMap = &FakeGetMemoryMap;
         g_bootServices.allocatePool = &FakeAllocatePool;
         g_bootServices.freePool = &FakeFreePool;
+        g_bootServices.allocatePages = &FakeAllocatePages;
+        g_bootServices.freePages = &FakeFreePages;
     }
 
     // 成功时应返回空诊断（code 为空）
@@ -891,6 +972,148 @@ namespace {
         Require(g_fakeMemory.freeCalls == 1, "用例结束应归还取图缓冲");
     }
 
+    // ———— 交接缓冲分配器 ————
+
+    // 用例：无避让跨度时一次分配成功——地址、页数与恒等映射指针；低 1 MiB、越出低 4 GiB 与
+    // 固件分配失败都在交还候选之后拒绝，且不登记
+    void CaseUefiAllocatorSingle() {
+        ResetFakeMemory();
+        UefiAllocator allocator;
+        allocator.Install(&g_bootServices);
+        // 5000 字节要两页
+        const uint64_t scripted[] = {0x20000000};
+        ScriptPageAddresses(scripted, 1, 0);
+        Baleen::Core::PreloadSpan span;
+        Require(allocator.Allocate(5000, span), "无避让跨度时分配应成功");
+        Require(span.phys == 0x20000000 && span.bytes == 5000, "落点应是固件返回的地址与请求长度");
+        Require(span.data == reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(0x20000000)), "落点指针应按恒等映射取物理地址");
+        Require(allocator.Count() == 1, "成功分配应登记一段落点");
+        Require(g_fakePages.allocateCalls == 1 && g_fakePages.freeCalls == 0, "一次分配不应归还");
+        Require(g_fakePages.lastAllocType == Baleen::Uefi::kAllocateMaxAddress, "分配方式应是 AllocateMaxAddress");
+        Require(g_fakePages.lastMemoryType == Baleen::Uefi::kMemoryLoaderData, "内存类型应是引导器数据");
+        Require(g_fakePages.lastPages == 2, "5000 字节应向上取整成 2 页");
+        Require(g_fakePages.lastLimit == Baleen::Uefi::kLowMemoryLimit - 1, "首次分配的上界应是低 4 GiB 的最高字节");
+        // 零字节与未绑定启动服务的分配直接失败，不触碰固件
+        Baleen::Core::PreloadSpan rejected;
+        Require(!allocator.Allocate(0, rejected), "零字节分配应失败");
+        UefiAllocator unbound;
+        Require(!unbound.Allocate(4096, rejected), "未绑定启动服务时分配应失败");
+        Require(g_fakePages.allocateCalls == 1, "被拒绝的请求不应调用 allocatePages");
+        // 落在低 1 MiB 的候选：交还固件之后失败，不登记
+        ScriptPageAddresses(nullptr, 0, 0x80000);
+        Require(!allocator.Allocate(4096, rejected), "低 1 MiB 之下的候选应失败");
+        Require(g_fakePages.freeCalls == 1 && g_fakePages.freed[0].address == 0x80000 && g_fakePages.freed[0].pages == 1, "低 1 MiB 的候选应交还固件");
+        Require(allocator.Count() == 1, "失败候选不应登记");
+        // 整段越出低 4 GiB 的候选：同样交还后失败
+        ScriptPageAddresses(nullptr, 0, 0x100000000ull);
+        Require(!allocator.Allocate(4096, rejected), "越出低 4 GiB 的候选应失败");
+        Require(g_fakePages.freeCalls == 2 && g_fakePages.freed[1].address == 0x100000000ull, "越界的候选应交还固件");
+        // 固件分配失败：不登记也不归还
+        g_fakePages.allocationFails = true;
+        Require(!allocator.Allocate(4096, rejected), "固件分配失败应直接返回失败");
+        Require(g_fakePages.allocateCalls == 4 && g_fakePages.freeCalls == 2 && allocator.Count() == 1, "分配失败不应归还也不应登记");
+    }
+
+    // 用例：设置避让跨度后，落在内核跨度里的首次候选先交还固件、上界降到跨度起点之下重试，
+    // 第二次落在跨度外即成功；引导器跨度同样被避开，0 长度的跨度视为不存在
+    void CaseUefiAllocatorAvoid() {
+        ResetFakeMemory();
+        const uint64_t loaderBegin = 0x400000;    // 引导器自身装载跨度 [4 MiB, 5 MiB)
+        const uint64_t loaderBytes = 0x100000;
+        const uint64_t kernelBegin = 0x1000000;   // 内核固定装载跨度 [16 MiB, 20 MiB)
+        const uint64_t kernelBytes = 0x400000;
+        UefiAllocator allocator;
+        allocator.Install(&g_bootServices);
+        allocator.SetAvoid(loaderBegin, loaderBytes, kernelBegin, kernelBytes);
+        // 第一次候选落在内核跨度内，第二次给跨度之下的地址
+        const uint64_t scripted[] = {0x1100000, 0xFFF000};
+        ScriptPageAddresses(scripted, 2, 0);
+        Baleen::Core::PreloadSpan span;
+        Require(allocator.Allocate(4096, span), "避开内核跨度后应分配成功");
+        Require(g_fakePages.allocateCalls == 2, "相交的候选被归还后应再分配一次");
+        Require(g_fakePages.freeCalls == 1, "相交的候选应交还固件一次");
+        Require(g_fakePages.freed[0].address == 0x1100000 && g_fakePages.freed[0].pages == 1, "被交还的应是落在内核跨度里的那段");
+        Require(g_fakePages.lastLimit == kernelBegin - 1, "重试的上界应降到相交跨度起点之下");
+        Require(span.phys == 0xFFF000, "最终落点应是第二次返回的地址");
+        Require(span.phys + span.bytes <= kernelBegin || span.phys >= kernelBegin + kernelBytes, "最终落点不得与内核跨度相交");
+        Require(allocator.Count() == 1, "最终落点应登记");
+        // 引导器跨度同样避开：新分配器的首次候选落在引导器跨度内
+        UefiAllocator loaderAllocator;
+        loaderAllocator.Install(&g_bootServices);
+        loaderAllocator.SetAvoid(loaderBegin, loaderBytes, kernelBegin, kernelBytes);
+        const uint32_t callsBefore = g_fakePages.allocateCalls;
+        const uint64_t loaderScript[] = {0x480000, 0x300000};
+        ScriptPageAddresses(loaderScript, 2, 0);
+        Baleen::Core::PreloadSpan loaderSpan;
+        Require(loaderAllocator.Allocate(4096, loaderSpan), "避开引导器跨度后应分配成功");
+        Require(g_fakePages.allocateCalls == callsBefore + 2, "引导器跨度内的候选也应被归还后重试");
+        Require(g_fakePages.freed[1].address == 0x480000 && loaderSpan.phys == 0x300000, "最终落点应是引导器跨度之下的地址");
+        // 0 长度表示调用方没有该事实：同样的地址不再触发避让
+        UefiAllocator zeroLength;
+        zeroLength.Install(&g_bootServices);
+        zeroLength.SetAvoid(kernelBegin, 0, kernelBegin, 0);
+        const uint64_t zeroScript[] = {0x1100000};
+        ScriptPageAddresses(zeroScript, 1, 0);
+        Baleen::Core::PreloadSpan zeroSpan;
+        Require(zeroLength.Allocate(4096, zeroSpan), "0 长度的跨度应视为不存在");
+        Require(zeroSpan.phys == 0x1100000, "0 长度的跨度不应触发避让");
+    }
+
+    // 用例：避让跨度覆盖全部候选——持续返回重叠地址时每轮候选都交还固件，上界无法再降即失败且不登记
+    void CaseUefiAllocatorAvoidExhausted() {
+        ResetFakeMemory();
+        UefiAllocator allocator;
+        allocator.Install(&g_bootServices);
+        // 内核跨度 [16 MiB, 32 MiB)；兜底地址也落在它里面，候选永远不合规
+        const uint64_t kernelBegin = 0x1000000;
+        const uint64_t kernelBytes = 0x1000000;
+        allocator.SetAvoid(0, 0, kernelBegin, kernelBytes);
+        ScriptPageAddresses(nullptr, 0, 0x1100000);
+        Baleen::Core::PreloadSpan span;
+        Require(!allocator.Allocate(4096, span), "候选永远落在内核跨度里时分配应失败");
+        Require(g_fakePages.allocateCalls == 2 && g_fakePages.freeCalls == 2, "每次候选都应交还固件，上界降不下去时提前失败");
+        Require(allocator.Count() == 0, "失败之后不应登记任何落点");
+        Require(span.phys == 0, "失败时应清空落点");
+        for (uint32_t i = 0; i < g_fakePages.freedCount && i < kFakePageFreed; ++i) {
+            Require(g_fakePages.freed[i].address == 0x1100000 && g_fakePages.freed[i].pages == 1, "交还的候选应与固件返回的一致");
+        }
+        Require(g_fakePages.lastLimit == kernelBegin - 1, "第二次分配的上界应已降到内核跨度起点之下");
+    }
+
+    // 用例：ReleaseAll 按登记的页数逐段归还；逐段 Release 之后整体归还不得重复 FreePages
+    void CaseUefiAllocatorRelease() {
+        ResetFakeMemory();
+        UefiAllocator allocator;
+        allocator.Install(&g_bootServices);
+        const uint64_t scripted[] = {0x30000000, 0x28000000};
+        // 8192 字节与 4097 字节各要两页
+        ScriptPageAddresses(scripted, 2, 0);
+        Baleen::Core::PreloadSpan first;
+        Baleen::Core::PreloadSpan second;
+        Require(allocator.Allocate(8192, first), "第一段应分配成功");
+        Require(allocator.Allocate(4097, second), "第二段应分配成功");
+        Require(allocator.Count() == 2, "两段都应登记");
+        allocator.ReleaseAll();
+        Require(g_fakePages.freeCalls == 2, "ReleaseAll 应按已分配表归还两段");
+        Require(allocator.Count() == 0, "ReleaseAll 之后登记表应清空");
+        Require(g_fakePages.freed[0].address == 0x28000000 && g_fakePages.freed[0].pages == 2, "后登记的那段应先归还且页数按登记值");
+        Require(g_fakePages.freed[1].address == 0x30000000 && g_fakePages.freed[1].pages == 2, "先登记的那段也应归还且页数按登记值");
+        allocator.ReleaseAll();
+        Require(g_fakePages.freeCalls == 2, "空表上的 ReleaseAll 不应再碰固件");
+        // 逐段归还：只交还那一段并移出登记表，之后整体归还不得重复 FreePages
+        ScriptPageAddresses(scripted, 2, 0);
+        Baleen::Core::PreloadSpan third;
+        Baleen::Core::PreloadSpan fourth;
+        Require(allocator.Allocate(8192, third), "重新分配第一段应成功");
+        Require(allocator.Allocate(8192, fourth), "重新分配第二段应成功");
+        allocator.Release(third);
+        Require(g_fakePages.freeCalls == 3 && g_fakePages.lastFreeAddress == 0x30000000 && g_fakePages.lastFreePages == 2, "Release 应按登记页数归还这一段");
+        Require(allocator.Count() == 1, "Release 之后登记表应只剩一段");
+        allocator.ReleaseAll();
+        Require(g_fakePages.freeCalls == 4 && g_fakePages.lastFreeAddress == 0x28000000, "剩下的那段由 ReleaseAll 归还");
+        Require(allocator.Count() == 0, "收尾后登记表应清空");
+    }
+
     // 跑全部用例并核对数量
     void RunCases() {
         InitFakeBootServices();
@@ -919,6 +1142,10 @@ namespace {
         Case("memorymap 退出前后两种视角", CaseMemoryMapViews);
         Case("memorymap 缓冲太小重取", CaseMemoryMapRetry);
         Case("memorymap 参数与格式拒绝", CaseMemoryMapReject);
+        Case("allocator 单次分配与拒绝路径", CaseUefiAllocatorSingle);
+        Case("allocator 避开内核与引导器跨度", CaseUefiAllocatorAvoid);
+        Case("allocator 避让候选耗尽", CaseUefiAllocatorAvoidExhausted);
+        Case("allocator 逐段与整体归还", CaseUefiAllocatorRelease);
         Require(g_ran == kCaseCount, "用例数量与登记不符");
         std::cout << "CheckEfiBlockDevice: " << g_ran << " 项用例全部通过" << std::endl;
     }

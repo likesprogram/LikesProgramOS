@@ -212,17 +212,25 @@ namespace {
 
     // 播报启动来源：介质与卷的位置事实、引导器占用区间、卷标识与内核路径
     // 未提供的字段按 0 原样报出，字符串与线索缺失或不可读时用 "-" 占位
+    // 字段按用途分组分行：位置事实、介质与占用区间、卷标识、线索与路径各自成行
+    // 路径本身长度不定，单独占一行
     void ReportBootSource(const Boot::Info* info) {
         Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
         Print::Write("Boot=Kind=");
         Print::WriteHex(info->deviceKind);
         Print::Write(" Layout=");
         Print::WriteHex64(info->layoutOffset);
-        Print::Write(" Volume=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("Volume=");
         Print::WriteHex64(info->volumeOffset);
         Print::Write("/");
         Print::WriteHex64(info->volumeBytes);
-        Print::Write(" State=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("State=");
         Print::WriteHex64(info->stateOffset);
         Print::Write("/");
         Print::WriteHex64(info->stateBytes);
@@ -235,7 +243,10 @@ namespace {
         Print::WriteHex64(info->loaderBegin);
         Print::Write("/");
         Print::WriteHex64(info->loaderBytes);
-        Print::Write(" Uuid=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("Uuid=");
         for (uint32_t i = 0; i < Boot::InfoLayout::kVolumeUuidBytes; ++i) WriteByteHex(info->volumeUuid[i]);
         Print::Write("\r\n");
 
@@ -244,19 +255,26 @@ namespace {
         Print::WriteHex(info->devicePathBytes);
         Print::Write(" Device=");
         ReportDeviceClue(info);
-        Print::Write(" Path=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("Path=");
         ReportKernelPath(info);
         Print::Write("\r\n");
     }
 
     // 播报交接包事实：三类缓冲区间、记录数与模块字节合计，以及集身份与修订
+    // 构建标识固定 64 个十六进制字符，单独占一行；其余字段按用途分组
     void ReportHandoffFacts(const Kernel::HandoffFacts& handoff) {
         Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
         Print::Write("Handoff=Manifest=");
         Print::WriteHex64(handoff.manifestRange.phys);
         Print::Write("/");
         Print::WriteHex(handoff.manifestRange.bytes);
-        Print::Write(" List=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("List=");
         Print::WriteHex64(handoff.listRange.phys);
         Print::Write("/");
         Print::WriteHex(handoff.listRange.bytes);
@@ -265,16 +283,23 @@ namespace {
         Print::Write(" Bytes=");
         Print::WriteHex(static_cast<uint32_t>(handoff.moduleBytes));
         Print::Write("\r\n");
+
         Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
         Print::Write("Set=");
         for (uint32_t i = 0; i < Boot::InfoLayout::kKernelSetBuildIdBytes; ++i) WriteByteHex(handoff.buildId[i]);
-        Print::Write(" Major=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("Major=");
         Print::WriteHex(handoff.moduleMajor);
         Print::Write(" Rev=");
         Print::WriteHex64(handoff.moduleRevision);
         Print::Write(" Entries=");
         Print::WriteHex(handoff.manifest.entryCount);
-        Print::Write(" Modules=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("Modules=");
         Print::WriteHex(handoff.list.count);
         Print::Write(" Closure=");
         Print::WriteHex(handoff.closureCount);
@@ -349,7 +374,10 @@ namespace {
         Print::WriteHex64(handoff.manifestCopy.phys);
         Print::Write(" List=");
         Print::WriteHex64(handoff.listCopy.phys);
-        Print::Write(" Records=");
+        Print::Write("\r\n");
+
+        Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+        Print::Write("Records=");
         Print::WriteHex64(handoff.recordsCopy.phys);
         Print::Write(" Modules=");
         Print::WriteHex(handoff.recordCount);
@@ -529,7 +557,9 @@ namespace {
             Print::WriteHex(facts.deviceHandle);
             Print::Write(" bytes=");
             Print::WriteHex(binding.ops->BlockBytes(binding.context));
-            Print::Write(" capacity=");
+            Print::Write("\r\n");
+            Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+            Print::Write("capacity=");
             Print::WriteHex64(binding.ops->CapacityBytes(binding.context));
             Print::Write("\r\n");
         }
@@ -1031,7 +1061,9 @@ extern "C" void _Kernel_Main(const Boot::Info* info) {
     Print::WriteHex(s_cpu.HasLongMode() ? 1 : 0);
     Print::Write(" Tsc=");
     Print::WriteHex(s_cpu.HasTsc() ? 1 : 0);
-    Print::Write(" Apic=");
+    Print::Write("\r\n");
+    Kernel::Tags::WriteTag(Kernel::Tags::Tag::Continue);
+    Print::Write("Apic=");
     Print::WriteHex(s_cpu.HasApic() ? 1 : 0);
     Print::Write(" Nx=");
     Print::WriteHex(s_cpu.HasNx() ? 1 : 0);

@@ -1,5 +1,6 @@
 /* EfiTextTarget.cpp
     EfiTextTarget 的实现：窄字符按字节扩展到 UTF-16 后交给固件控制台
+    显示属性转给固件的 SetAttribute；固件不实现时忽略，写入不受影响
 */
 
 #include <Print/EfiTextTarget.hpp>
@@ -12,6 +13,11 @@ namespace Baleen {
 
         bool EfiTextTarget::Ready() const {
             return m_console != nullptr && m_console->outputString != nullptr;
+        }
+
+        void EfiTextTarget::SetAttribute(uint8_t attribute) {
+            if (!Ready() || m_console->setAttribute == nullptr) return;
+            (void)m_console->setAttribute(m_console, static_cast<uintptr_t>(attribute));
         }
 
         void EfiTextTarget::Write(const char* text) {

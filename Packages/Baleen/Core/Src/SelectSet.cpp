@@ -16,6 +16,7 @@
 #include <BootState.hpp>
 #include <Diagnostics.hpp>
 #include <Ed25519.hpp>
+#include <LayoutCheck.hpp>
 #include <LayoutDescriptor.hpp>
 #include <Libc.hpp>
 #include <ManifestVerify.hpp>
@@ -34,8 +35,8 @@ namespace Baleen {
             constexpr Diagnostic kFailLayoutKernelMismatch{BALEEN_STAGE_CODE("85"), "The layout kernel path doesn't match the verified kernel artifact"};
             // 读状态区域失败：设备已见最高版本与持久吊销事实未知，不能当成“无记录”按零事实启动
             constexpr Diagnostic kFailStateRead{BALEEN_STAGE_CODE("89"), "The boot state record can't be read; refusing to continue without the device facts"};
-            // 状态区域参数非法：长度不足、起点未按块对齐、块大小非法，布局/介质不满足状态区契约
-            constexpr Diagnostic kFailStateArea{BALEEN_STAGE_CODE("90"), "The boot state area is invalid: check StateOffset and StateBytes"};
+            // 状态区域参数非法的编号是 E-CORE-90：由 LayoutCheck::kFailStateArea 单点定义，
+            // 布局校验与这里的运行期判断共用同一份，不在本文件重复
             // 状态代次耗尽：有效记录已到代次上限，写不进新记录；状态区域只能修复或清除
             constexpr Diagnostic kFailStateGeneration{BALEEN_STAGE_CODE("92"), "The boot state generation is exhausted; repair the state area"};
             // 列表非法：这里的触发点是“旧修订快照的文件名与内容不是同一修订”与修订文件名拼装失败，
@@ -527,7 +528,7 @@ namespace Baleen {
             // 读失败：设备事实未知，拒绝按零事实启动（否则一次 I/O 错误就把防回滚降一档）
             if (read == BootState::ReadResult::IoError) return kFailStateRead;
             // 参数非法：布局或介质不满足状态区契约，同样不能当成“无记录”
-            if (read == BootState::ReadResult::InvalidArea) return kFailStateArea;
+            if (read == BootState::ReadResult::InvalidArea) return LayoutCheck::kFailStateArea;
             // 没有状态区域与空区域按“无记录”处理：验证缺省集，可写时把看到的事实持久化
             if (read == BootState::ReadResult::NoRegion || read == BootState::ReadResult::Empty)
                 return SelectDefault(fs, medium, stateOffset, stateBytes, 0, setRoot, layoutKernelPath, fromRecord, nullptr, selected);
@@ -572,7 +573,7 @@ namespace Baleen {
             const BootState::ReadResult read = BootState::Read(medium, stateOffset, stateBytes, record);
             if (read == BootState::ReadResult::Corrupt) return kFailStateCorrupt;
             if (read == BootState::ReadResult::IoError) return kFailStateRead;
-            if (read == BootState::ReadResult::InvalidArea) return kFailStateArea;
+            if (read == BootState::ReadResult::InvalidArea) return LayoutCheck::kFailStateArea;
             // 候选预装失败的回退是 WARN：本次不终止，改选已知良好集或上一修订
             if (preloadFailed) WriteDiagnostic(PrintTargets::Tag::Warn, kWarnCandidatePreload, failure.text);
 

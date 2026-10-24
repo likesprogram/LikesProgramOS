@@ -25,7 +25,7 @@
 
 namespace {
     // 用例总数：与用例表长度核对，防止用例被误删
-    constexpr unsigned kCaseCount = 51;
+    constexpr unsigned kCaseCount = 52;
     // 已跑用例数
     unsigned g_ran = 0;
     // 失败用例数
@@ -157,13 +157,31 @@ namespace {
         unsigned reads = 0;                   // 读回调次数
         unsigned writes = 0;                  // 写回调次数
         unsigned flushes = 0;                 // 刷新回调次数
+        // 依次返回的块大小覆盖值（0 表示用 blockBytes）：模拟探测与切窗口之间的块大小事实变化
+        std::uint32_t blockBytesSequence[3] = {};
+        // 块大小查询次数：按次取 blockBytesSequence
+        unsigned blockBytesCalls = 0;
+        // 依次返回的容量覆盖值（0 表示用实际容量）：模拟探测与切窗口之间的容量事实变化
+        std::uint64_t capacitySequence[2] = {};
+        // 容量查询次数：按次取 capacitySequence
+        unsigned capacityCalls = 0;
     };
 
-    // 伪块设备 ops：块大小
-    uint32_t FakeBlockBytes(void* context) { return static_cast<FakeBlock*>(context)->blockBytes; }
+    // 伪块设备 ops：块大小（blockBytesSequence 非 0 时按查询次数覆盖）
+    uint32_t FakeBlockBytes(void* context) {
+        FakeBlock& block = *static_cast<FakeBlock*>(context);
+        const unsigned call = block.blockBytesCalls++;
+        if (call < 3 && block.blockBytesSequence[call] != 0) return block.blockBytesSequence[call];
+        return block.blockBytes;
+    }
 
-    // 伪块设备 ops：容量
-    uint64_t FakeCapacityBytes(void* context) { return static_cast<FakeBlock*>(context)->bytes.size(); }
+    // 伪块设备 ops：容量（capacitySequence 非 0 时按查询次数覆盖）
+    uint64_t FakeCapacityBytes(void* context) {
+        FakeBlock& block = *static_cast<FakeBlock*>(context);
+        const unsigned call = block.capacityCalls++;
+        if (call < 2 && block.capacitySequence[call] != 0) return block.capacitySequence[call];
+        return block.bytes.size();
+    }
 
     // 伪块设备 ops：可写
     uint32_t FakeWritable(void* context) { return static_cast<FakeBlock*>(context)->writable ? 1 : 0; }
@@ -1017,7 +1035,7 @@ namespace {
             MarkVolumeStart(device.block, 0x200);
             Require(VfsModule::MountSystemVolume(&g_bootInfo, &facts) == Storage::Error::NotFound, "missing ext4 was accepted");
         } });
-        cases.push_back({ "MountSystemVolume skips misaligned or oversized candidates", [] {
+        cases.push_back({ "MountSystemVolume needs a registered ext4 before probing candidates", [] {
             InitModule();
             FakeFs fileSystem;
             const FileSystemOps ops = FakeFsOps();
@@ -1033,8 +1051,50 @@ namespace {
             g_bootInfo.volumeOffset = 0x200;
             g_bootInfo.volumeBytes = 0x400;
             g_bootInfo.mediumBytes = 0;
-            // 没登记 ext4：先返回 NotFound
+            // 只登记了 fakefs、缺 ext4：在探测候选之前就返回 NotFound
             Require(VfsModule::MountSystemVolume(&g_bootInfo, &facts) == Storage::Error::NotFound, "missing ext4 was accepted");
+        } });
+        // 候选跳过：未对齐与越界候选必须被探测循环跳过，不读盘且不参与匹配，最终只挂载合法候选
+        cases.push_back({ "MountSystemVolume skips misaligned and oversized candidates and mounts the valid one", [] {
+            InitModule();
+            FakeFs fileSystem;
+            fileSystem.format = "ext4";
+            const FileSystemOps ops = FakeFsOps();
+            FileSystemId id = 0;
+            Require(VfsModule::RegisterFileSystem(&ops, &fileSystem, &id) == Storage::Error::Ok, "registration failed");
+            // 未对齐候选：探测时报告块大小 4096（切窗口时 512），卷区段起点 0x400 不是 4096 的整数倍 → 跳过
+            DeviceFixture misaligned;
+            FillBlock(misaligned.block, 0x2000, 512);
+            misaligned.block.blockBytesSequence[1] = 4096;
+            MarkVolumeStart(misaligned.block, 0x400);
+            PublishDevice(misaligned, 0x10);
+            // 越界候选：探测时报告容量 0x400（切窗口时用实际容量），卷区段起点已到容量边界 → 跳过
+            DeviceFixture oversized;
+            FillBlock(oversized.block, 0x2000, 512);
+            oversized.block.capacitySequence[0] = 0x400;
+            MarkVolumeStart(oversized.block, 0x400);
+            PublishDevice(oversized, 0x11);
+            // 合法候选：块大小 512、容量 0x2000，区段 0x400..0x800 落在容量内且区段起点有 FAKEFS 魔数
+            DeviceFixture valid;
+            FillBlock(valid.block, 0x2000, 512);
+            MarkVolumeStart(valid.block, 0x400);
+            PublishDevice(valid, 0x12);
+            g_bootInfo = Boot::Info{};
+            std::memcpy(g_bootInfo.volumeUuid, fileSystem.uuid, 16);
+            g_bootInfo.volumeOffset = 0x400;
+            g_bootInfo.volumeBytes = 0x400;
+            SystemVolumeFacts facts{};
+            Require(VfsModule::MountSystemVolume(&g_bootInfo, &facts) == Storage::Error::Ok, "the valid candidate wasn't mounted");
+            Require(facts.bytes == sizeof(SystemVolumeFacts), "facts length is wrong");
+            Require(std::memcmp(facts.volumeUuid, fileSystem.uuid, 16) == 0, "facts uuid is wrong");
+            Require(g_log.lines == 1 && std::strcmp(g_log.tag, "OK") == 0, "success marker wasn't logged");
+            Require(VfsModule::MountCount() == 1, "successful mount isn't in the mount table");
+            // 被跳过的候选不应发生读盘（跳过发生在切窗口与挂载之前），合法候选必须被实际探测过
+            Require(misaligned.block.reads == 0, "the misaligned candidate was probed");
+            Require(oversized.block.reads == 0, "the oversized candidate was probed");
+            Require(valid.block.reads > 0, "the valid candidate wasn't probed");
+            Require(VfsModule::Unmount("/") == Storage::Error::Ok, "unmounting the system volume failed");
+            Require(VfsModule::MountCount() == 0, "mount table isn't empty after unmount");
         } });
         cases.push_back({ "MountSystemVolume rejects an identity mismatch", [] {
             InitModule();

@@ -186,7 +186,8 @@ extern "C" KernelError _Module_Init(const KernelAbiContext* context) {
     }
     LogText("xhci: controller added handle=");
     LogHex(g_controllerHandle);
-    LogText(" ports=");
+    LogText("\r\n");
+    LogText("xhci: ports=");
     LogHex(g_controller.maxPorts);
     LogText(" slots=");
     LogHex(g_controller.maxSlots);

@@ -21,7 +21,7 @@
 
 ## 二、启动流程与诊断行
 
-`_Kernel_Main` 的步骤顺序固定，每步一行标签诊断（内核侧标签按[输出通道与Print](../../../Docs/Specs/输出通道与Print.md)的同一文本写法，没有显示属性）；失败行带 `E-KRN` 稳定编号，行格式见[内核诊断编号](../../../Docs/Specs/内核诊断编号.md)：
+`_Kernel_Main` 的步骤顺序固定，每步一行标签诊断（内核侧标签按[输出通道与Print](../../../Docs/Specs/输出通道与Print.md)的同一文本写法与同一张属性表，屏幕目标存在时着色）；失败行带 `E-KRN` 稳定编号，行格式见[内核诊断编号](../../../Docs/Specs/内核诊断编号.md)：
 
 1. 按 `BootInfo` 声明的通道装配早期控制台并打印横幅 `[ KERNEL ] LikesProgramOS kernel`
 2. 核对自身内核镜像数据：固定字段与内核事实，再把 `ImageBytes`、`MemoryBytes`、`LoadAddress`、`EntryOffset` 与链接布局（`__image_end`、`__bss_end`、入口符号）交叉比对；摘要不重复取，引导器已在交接前比对（失败落 `E-KRN-10`–`14`）

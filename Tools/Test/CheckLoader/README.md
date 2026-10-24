@@ -6,7 +6,7 @@
 
 ```sh
 make -C Tools/Test/CheckLoader
-Tools/Bin/CheckLoader        # CheckLoader: 60 cases, 0 failed
+Tools/Bin/CheckLoader        # CheckLoader: 60/60 cases passed
 ```
 
 ## 用例分组（60 项，数量固定）
@@ -37,5 +37,5 @@ Tools/Bin/CheckLoader        # CheckLoader: 60 cases, 0 failed
 
 ## 退出码与输出
 
-- `0`：全部用例通过，最后一行打印 `CheckLoader: 60 cases, 0 failed`
+- `0`：全部用例通过，最后一行打印 `CheckLoader: 60/60 cases passed`
 - `1`：有失败用例，失败行打印 `FAIL <用例名> - <detail>`

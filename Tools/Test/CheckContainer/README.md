@@ -20,13 +20,13 @@ Tools/Bin/CheckContainer --modules Packages/KernelModules/Out/Modules
 **用例（89 项）**：每个用例打印 `[ OK ]` 或 `[ FAIL ]`，失败返回 1；用例数固定，运行时与实跑数核对，防止用例被误删。负例按 `Kernel::ContainerError` 分类断言（不按文本子串）。
 
 - **正例（5）**：全部真实容器通过；合成容器通过并核对视图字段；重定位按索引读取（越界索引被拒）；导出 / 导入槽位访问器（越界索引被拒）；可选表全空的容器通过
-- **文件头与表区（30）**：空指针、短于 0x80、魔数、未知版本、`HeaderBytes`、`Flags`、`TotalBytes` 不符或超 64 MiB、`ImageBytes` 非页倍数、保留字段非零、段数 0/超 16、`SectionEntryBytes`、导出数超 128、`ImportEntryBytes`、`DependencyEntryBytes`、重定位数超 65536、段表/导出表/导入表/依赖表/重定位表偏移不对齐或越界、字符串表越界/区间越界/末字节非 NUL
+- **文件头与表区（28）**：空指针、短于 0x80、魔数、未知版本、`HeaderBytes`、`Flags`、`TotalBytes` 不符或超 64 MiB、`ImageBytes` 非页倍数、保留字段非零、段数 0/超 16、`SectionEntryBytes`、导出数超 128、`ImportEntryBytes`、`DependencyEntryBytes`、重定位数超 65536、段表/导出表/导入表/依赖表/重定位表偏移不对齐或越界、字符串表越界/区间越界/末字节非 NUL
 - **模块身份与模块名（6）**：`ModuleId` 全零、`ModuleVersionMajor` 为零、`KernelAbiMin` 为零、模块名偏移与字节数不一致、模块名越出字符串表、段名偏移越出字符串表
 - **段表（13）**：未知类型、W+X、类型与权限不符、对齐非法、`MemoryOffset` 未按 4 KiB 对齐、`MemoryBytes` 非 4 KiB 倍数、内存区间越过 `ImageBytes`、内存区间重叠、BSS 带文件字节、非 BSS 无文件字节、`FileBytes` 超过 `MemoryBytes`、文件偏移未 4 字节对齐、文件区间越界
 - **入口（3）**：`EntryInit` 为零、`EntryInit` 不在 TEXT、`EntryActivate` 不在 TEXT
 - **表区重叠（2）**：依赖表与重定位表重叠、导出槽位表与导入表重叠
 - **导出表（9）**：版本为零、标识全零、保留字段非零、槽数为零 / 超 64、槽位表偏移不对齐 / 越界、槽位不在 TEXT、同标识同版本重复
-- **导入表（13）**：标识全零、`MinVersion` 为零、版本区间颠倒、保留字段非零、槽数为零 / 超 64、回填表偏移不对齐 / 越界、回填槽不在可写段 / 未 8 字节对齐 / 越界、同标识重复
+- **导入表（12）**：标识全零、`MinVersion` 为零、版本区间颠倒、保留字段非零、槽数为零 / 超 64、回填表偏移不对齐 / 越界、回填槽不在可写段 / 未 8 字节对齐 / 越界、同标识重复
 - **依赖表（6）**：标识全零、自依赖、`MinMajor` 为零、`Flags` 非零、版本区间颠倒、同标识重复
 - **重定位表（5）**：未知类型、保留字节非零、目标在 TEXT、目标未按宽度对齐、目标越出可写段
 

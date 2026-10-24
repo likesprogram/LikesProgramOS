@@ -4,7 +4,8 @@
     固件控制台收 UTF-16，前端给的是窄字符：本目标按字节逐个扩展到 UTF-16 再下发，
     不做其它转义或翻译——换行由调用方按 "\r\n" 写好，与其它阶段一致
     文本超过内部缓冲时按缓冲容量分段下发，长路径不会被截断
-    显示属性不实现：固件控制台没有 VGA 那样的属性字节，标签的等级靠文本自己表达
+    显示属性经固件的 SetAttribute 设置，属性编码与 VGA 一致（前景低 4 位、背景高 4 位），
+    标签着色方式因此与 BIOS 路径相同；固件不接受属性时写入照常进行
 */
 
 #pragma once
@@ -24,6 +25,8 @@ namespace Baleen {
             bool Ready() const override;
             // 写入以 '\0' 结尾的窄字符文本；未绑定时丢弃
             void Write(const char* text) override;
+            // 设置后续写入的显示属性；未绑定或固件没有该能力时忽略
+            void SetAttribute(uint8_t attribute) override;
 
         private:
             // 一次下发的 UTF-16 缓冲：超长文本按它分段

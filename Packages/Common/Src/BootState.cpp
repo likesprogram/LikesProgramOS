@@ -69,10 +69,13 @@ namespace Baleen {
                     return blockBytes;
                 }
 
-                // 状态区域是否可用块设备读写：起点按逻辑块对齐，长度至少覆盖整个区域
+                // 状态区域是否可用块设备读写：起点同时满足设备逻辑块对齐与 4096 对齐，长度至少覆盖整个区域
+                // 前者是设备整块读写的契约（偏移与长度按逻辑块对齐），后者是布局契约
+                // （规格 §四要求 StateOffset 是 4096 的整数倍）；4Kn 上区域恰好一个逻辑块
                 bool AreaReady(uint64_t stateOffset, uint32_t stateBytes, uint32_t blockBytes) {
                     if (blockBytes == 0 || stateOffset == 0 || stateBytes < kAreaBytes) return false;
-                    return (stateOffset & (blockBytes - 1)) == 0;
+                    if ((stateOffset & (blockBytes - 1)) != 0) return false;
+                    return (stateOffset & (kAreaBytes - 1)) == 0;
                 }
 
                 // 区域读缓冲：全部槽位一次读完

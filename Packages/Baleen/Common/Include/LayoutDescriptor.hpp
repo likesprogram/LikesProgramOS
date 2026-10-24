@@ -47,6 +47,13 @@ namespace Baleen {
         // 引导状态区域的默认位置与长度
         static constexpr uint64_t kStateOffset = 0x21000;
         static constexpr uint32_t kStateBytes = 0x1000;
+        // 状态区域起点对齐：4096 的整数倍，使 512 / 1024 / 2048 / 4096 逻辑块下都能整块读写
+        static constexpr uint64_t kStateAlign = 0x1000;
+        // 描述符区默认字节偏移：位置表见一级引导契约；IPL 槽可覆盖，读取方不读槽，
+        // 布局校验只按这个默认位置作为保留区保守判定
+        static constexpr uint64_t kDescriptorOffset = 0x22000;
+        // 描述符区保守占位：按最大本地扇区 4096 字节计，即 [0x22000, 0x23000)
+        static constexpr uint32_t kDescriptorBytes = 0x1000;
 
         // 校验和：覆盖 [0, kChecksumBytes) 逐字节按无符号相加，取低 32 位
         // 只用于检测写损与非预期字节变化，不构成认证

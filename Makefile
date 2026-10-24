@@ -22,13 +22,17 @@
 #                                 例：make run-win hdd qemu built bios / make run-win iso qemu built uefi
 #      make deliverables          构建默认两份镜像与全部验证变体（4Kn、降级、三份吊销/防回滚现场）
 #      make variants              只构建验证变体镜像
-#      make reproducible-check    两次 clean-all + 全量构建并比对 51 份交付物 sha256；
+#      make release-guard         断言四个载荷变量都指向真实产物（占位件回退直接失败）；
+#                                 deliverables 与 check-all 的镜像批次已包含该门禁
+#      make reproducible-check    两次 clean-all + 全量构建并比对交付物 sha256
+#                                 （主镜像、验证变体、镜像 JSON、运行期与两修订变体；份数随交付集变化，不写死）；
 #                                 要求 .cache/Keys/Development.sec 已存在（外部密钥输入，不自动生成）
 #                                 日志与两份哈希清单留在 /tmp/repro-check-*
 #      make clean                 删除顶层 Out/；make clean-all 连同子包与两类工具的产物
 #
 #      make check-all [WITH_BOOT=1]
-#                                 把验证收成一条命令：宿主侧 30 个检查工具（994 例）串行执行，
+#                                 把验证收成一条命令：宿主侧 30 个检查工具（1000 例，带 30 工具 / 1000 例
+#                                 的固定门禁）串行执行，
 #                                 输出一张“通过/失败 + 用例计数”表；WITH_BOOT=1 再跑十二档
 #                                 启动矩阵（BIOS 六档：HDD / ISO / HDD 当 U 盘 / ISO 写入 U 盘 ×
 #                                 QEMU，HDD / CD × Bochs；UEFI 五档：HDD / ISO / U 盘 / 4Kn U 盘 /
@@ -54,6 +58,8 @@
 #    系统卷由 Packages/LikesProgramOS 生成并含内核映像；
 #    布局描述由组装器生成；Stub、BaleenCore、UEFI 侧与内核侧 Core 已有阶段性实现，
 #    每个占位件都写明身份，构建时会打印实际用到的那一份）
+#    默认 make 允许占位件回退，便于本地先跑通组装；交付与验证入口由 release-guard 把
+#    “交付物用了占位件”判失败（deliverables 与 check-all 的镜像批次都挂了这个门禁）
 
 # 顶层产物目录
 OUT_DIR       ?= Out
@@ -149,6 +155,12 @@ RUNTIME_IMAGES := $(IMAGE_RUNTIME_FAULT) $(IMAGE_RUNTIME_OPTIONAL) $(IMAGE_RUNTI
 # 修订 2 = 同一集目录里按 MODULE_REVISION=2 另生成并签名的清单与列表（模块文件相同）。
 # 两份快照都进同一个集目录：Baleen 按 BootState.ModuleRevision 选回退目标修订，内核串口打印 Rev=<n>
 REVISION1_STAGE  := $(OUT_DIR)/Revision1Stage
+# 修订 1 快照的 stamp：两份拷贝都写好并校验通过后才 touch（规则见下文“修订 1 快照”）；修订 2 依赖它
+REVISION1_STAMP  := $(REVISION1_STAGE)/.stamp
+# 修订 1 快照的两个来源文件：由系统卷包（LikesProgramOS）的配方一次产出；
+# 干净树上它们不存在，由下面“缺失时构建 LikesProgramOS 包”的规则补出
+REVISION1_SOURCE_MANIFEST := Packages/LikesProgramOS/Out/KernelSetStage/Manifest.mft
+REVISION1_SOURCE_LIST     := Packages/LikesProgramOS/Out/KernelSetStage/Modules.list
 REVISION2_DIR    := $(OUT_DIR)/Revision2
 REVISION2_VOLUME := $(REVISION2_DIR)/LikesProgram.img
 IMAGE_REVISION2  := $(OUT_DIR)/LikesProgram.rev2.hdd
@@ -297,7 +309,7 @@ RUN_WINDOWED := $(filter run-win,$(MAKECMDGOALS))
 RUN_LABEL := $(if $(RUN_WINDOWED),run-win,run)
 
 .DEFAULT_GOAL := all
-.PHONY: all images deliverables variants iso hdd packages modules tools core-generated contract-generated test-tools maintain-tools compile-db payloads payload-report run run-win run-check run-uefi check-all reproducible-check clean clean-all help qemu bochs built usb bios uefi
+.PHONY: all images deliverables variants iso hdd packages modules tools core-generated contract-generated test-tools maintain-tools compile-db payloads payload-report release-guard run run-win run-check run-uefi check-all reproducible-check clean clean-all help qemu bochs built usb bios uefi
 
 # 默认目标
 all: images
@@ -305,8 +317,8 @@ all: images
 # 两份镜像
 images: $(ISO) $(HDD)
 
-# 全部交付物：默认两份镜像 + 验证变体
-deliverables: images variants
+# 全部交付物：默认两份镜像 + 验证变体 + 占位件门禁（交付不允许占位件载荷）
+deliverables: images variants release-guard
 
 # 验证变体镜像：4Kn、降级策略位与三份吊销/防回滚现场
 variants: $(VARIANT_IMAGES)
@@ -354,14 +366,15 @@ maintain-tools:
 
 # —— 验证：一条命令跑完宿主侧全部检查，可选追加启动矩阵 ——
 # 前提：test-tools 先把 30 个检查工具建到 Tools/Bin；WITH_BOOT=1 时再建出默认镜像与全部验证变体
-# （4Kn / 降级 / 吊销三档都在依赖里：脚本默认按 Out/ 下的变体路径读镜像）
+# （4Kn / 降级 / 吊销三档都在依赖里：脚本默认按 Out/ 下的变体路径读镜像），并用 release-guard
+# 拦下“镜像用了占位件载荷”的现场；宿主-only 模式不建镜像，也不强制门禁
 # 参数经 CHECK_ALL_ARGS 透传，如 CHECK_ALL_ARGS="--timeout 120"
 # EVIDENCE_DIR=<Out 之外的目录> 转成脚本的 --evidence，把验证记录留到构建产物之外
 # ACCEPT=1 是扩展验证：启动矩阵与状态演练之外再跑失败注入、4Kn 与 NVMe 控制器、
 # 引导状态机多轮与吊销/防回滚三档
 EVIDENCE_DIR ?= $(EVIDENCE)
 CHECK_ALL_DEPS := test-tools maintain-tools \
-                  $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),images $(VARIANT_IMAGES) $(RUNTIME_IMAGES) $(REVISION_IMAGES)) \
+                  $(if $(filter 1,$(WITH_BOOT)$(ACCEPT)),images $(VARIANT_IMAGES) $(RUNTIME_IMAGES) $(REVISION_IMAGES) release-guard) \
                   $(if $(filter 1,$(ACCEPT)),$(INJECT_IMAGES) $(CONTROLLER_IMAGES))
 CHECK_ALL_ARGS ?=
 
@@ -516,17 +529,42 @@ $(IMAGE_RUNTIME_FAULT): $(RUNTIME_FIXTURE_DIR)/fault/LikesProgram.img payloads
 $(IMAGE_RUNTIME_OPTIONAL): $(RUNTIME_FIXTURE_DIR)/optional/LikesProgram.img payloads
 	$(call assemble-runtime-hdd,$@,$(RUNTIME_FIXTURE_DIR)/optional/KernelPath,$(RUNTIME_FIXTURE_DIR)/optional/LikesProgram.img)
 
+# Optional 成功版 .osm：optional-ok 变体的输入，由 Optional 目录的 Makefile.ok 产出
+# （见 Packages/KernelModules/Optional/README.md 的官方命令）。顶层原本没有它的规则：
+# 干净树上文件不存在时 $(RUNTIME_FIXTURE_DIR)/optional-ok/... 的前提会报 “No rule to make target”，
+# 这里补一条“缺失时调官方入口”的规则；文件在就按已最新跳过，增量构建不受影响
+$(RUNTIME_OPTIONAL_OK_OSM):
+	@$(MAKE) -C Packages/KernelModules/Optional -f Makefile.ok package
+	@test -f $@ || { echo "Optional 成功版 .osm 没有产出：$@"; exit 1; }
+
 $(IMAGE_RUNTIME_OPTIONAL_OK): $(RUNTIME_FIXTURE_DIR)/optional-ok/LikesProgram.img payloads
 	$(call assemble-runtime-hdd,$@,$(RUNTIME_FIXTURE_DIR)/optional-ok/KernelPath,$(RUNTIME_FIXTURE_DIR)/optional-ok/LikesProgram.img)
 
 # 修订 1 快照：正式集构建完成后把清单与列表拷出来；PREVIOUS_REVISION_DIR 需要这两个文件名
-$(REVISION1_STAGE)/Manifest.mft: $(SYSTEM_VOLUME)
+# 目标是 stamp 而不是某个拷贝文件：一次拷贝产出两份文件，单产物名声明会让“只删掉其中一份”的现场
+# 逃过重建（修订 2 夹具因此拿到缺文件的快照）。
+# 两个来源文件由系统卷包的配方一次产出：这里给它们一条“缺失时构建 LikesProgramOS 包”的规则，
+# 干净树与增量都可解析；**不能把它们的前提写成顶层 $(SYSTEM_VOLUME)**——那是解析期按 wildcard
+# 取值的变量，干净树上会回退到占位件路径（没有生成规则），本目标因此在干净树无法展开。
+# 用 stamp 保证两份拷贝与来源同代；来源文件变化（系统卷重建）时 mtime 更新会触发重拷。
+# 快照不完整（任一份拷贝缺失）时把 FORCE 挂到 stamp 上强制重拷一次：stamp 只能证明“拷过”，
+# 感知不到拷贝被删；旧的 Manifest.mft 已存在但没有 .stamp 时同理，第一次 make 会重拷一次，属预期行为
+$(REVISION1_SOURCE_MANIFEST) $(REVISION1_SOURCE_LIST) &:
+	@$(MAKE) -C Packages/LikesProgramOS
+	@test -f $(REVISION1_SOURCE_MANIFEST) -a -f $(REVISION1_SOURCE_LIST) || { echo "系统卷包没有产出修订快照的来源：$(REVISION1_SOURCE_MANIFEST) / $(REVISION1_SOURCE_LIST)"; exit 1; }
+
+ifeq ($(and $(wildcard $(REVISION1_STAGE)/Manifest.mft),$(wildcard $(REVISION1_STAGE)/Modules.list)),)
+$(REVISION1_STAMP): FORCE
+endif
+$(REVISION1_STAMP): $(REVISION1_SOURCE_MANIFEST) $(REVISION1_SOURCE_LIST)
 	@mkdir -p $(REVISION1_STAGE)
-	@cp Packages/LikesProgramOS/Out/KernelSetStage/Manifest.mft Packages/LikesProgramOS/Out/KernelSetStage/Modules.list $(REVISION1_STAGE)/
+	@cp $(REVISION1_SOURCE_MANIFEST) $(REVISION1_SOURCE_LIST) $(REVISION1_STAGE)/
+	@test -f $(REVISION1_STAGE)/Manifest.mft && test -f $(REVISION1_STAGE)/Modules.list || { echo "修订 1 快照不完整：$(REVISION1_STAGE) 下缺 Manifest.mft 或 Modules.list（KernelSetStage 还没产出？先构建系统卷）"; exit 1; }
+	@touch $@
 
 # 修订 2 夹具卷：同一份内核与模块，MODULE_REVISION=2 另生成并签名；修订 1 作为旧快照一并放进集目录
 # 集目录落在 $(REVISION2_DIR)/Static 下，不覆盖正式集目录；正式镜像不受影响
-$(REVISION2_VOLUME): $(REVISION1_STAGE)/Manifest.mft payloads
+$(REVISION2_VOLUME): $(REVISION1_STAMP) payloads
 	@$(MAKE) -C Packages/LikesProgramOS KERNEL_IMAGE=$(abspath $(KERNEL_IMAGE_DEFAULT)) \
 	    OUT_DIR=$(abspath $(REVISION2_DIR)) KERNEL_SETS_BASE=$(abspath $(REVISION2_DIR)/Static) \
 	    MODULE_REVISION=2 PREVIOUS_MODULE_REVISION=1 \
@@ -649,6 +687,39 @@ payload-report:
 	    printf '            未提供（组装器将拒绝或回退并警告）\n'; \
 	fi
 	@printf '  布局模板  %s\n' "$(if $(LAYOUT),$(LAYOUT)（外部模板）,无（组装器按 $(KERNEL_PATH_FILE) 的路径生成）)"
+
+# —— 交付门禁：载荷必须来自真实产物 ——
+# STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME 在真实产物缺席时会静默回退到 $(PAYLOAD_DIR) 下的占位件
+# （见上方载荷变量）。默认 make 保留这个回退：本地快速组装不必先全量构建子包。但交付与验证入口不能
+# 带着占位件过账——占位件装出来的镜像只验证了组装器，不能按真实载荷的结论交付或验收。
+# 四个变量是递归展开的（?= + wildcard），在配方执行的时刻才求值：payloads 建完之后才看得到真实产物，
+# 所以本目标依赖 payloads，保证门禁看到的是本次构建的实际载荷。
+# 判断口径与 payload-report 的“<- 占位件”标记同源（值里是否含 $(PAYLOAD_DIR)），另加文件存在性校验
+release-guard: payloads
+	@failed=0; \
+	check_payload() { \
+	    name=$$1; value=$$2; \
+	    if [ -z "$$value" ]; then \
+	        printf 'release-guard: %s 为空，交付物需要真实载荷\n' "$$name" >&2; failed=1; return; \
+	    fi; \
+	    case "$$value" in \
+	        *'$(PAYLOAD_DIR)'*) \
+	            printf 'release-guard: %s 回退到了占位件：%s（交付/验证入口必须用真实载荷）\n' "$$name" "$$value" >&2; \
+	            failed=1; return ;; \
+	    esac; \
+	    if [ ! -f "$$value" ]; then \
+	        printf 'release-guard: %s 指向的文件不存在：%s\n' "$$name" "$$value" >&2; failed=1; \
+	    fi; \
+	}; \
+	check_payload STUB "$(STUB)"; \
+	check_payload CORE "$(CORE)"; \
+	check_payload EFI_IMAGE "$(EFI_IMAGE)"; \
+	check_payload SYSTEM_VOLUME "$(SYSTEM_VOLUME)"; \
+	if [ $$failed -ne 0 ]; then \
+	    printf 'release-guard: 失败：交付物混进了占位件；先构建子包产出真实载荷，再 make payloads\n' >&2; \
+	    exit 1; \
+	fi; \
+	printf 'release-guard: 通过：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME 都是真实产物\n'
 
 
 # —— 启动：make run / run-win <hdd|iso> <qemu|bochs> <built|usb> <bios|uefi> ——
@@ -779,8 +850,10 @@ help:
 	    '  make run-uefi          = make run iso qemu built uefi' \
 	    '  make deliverables      构建默认两份镜像与全部验证变体（4Kn / 降级 / 吊销三档）' \
 	    '  make variants          只构建验证变体镜像' \
+	    '  make release-guard     断言四个载荷变量都指向真实产物（占位件回退直接失败）' \
 	    '  make check-all [WITH_BOOT=1]' \
-	    '                         宿主侧 30 个检查工具（994 例）串行跑完，出一张“通过/失败 + 用例计数”表；' \
+	    '                         宿主侧 30 个检查工具（1000 例）串行跑完，出一张“通过/失败 + 用例计数”表；' \
+	    '                         宿主段带固定门禁：工具数与用例数不等于 30 / 1000 直接判失败（静默删例即红）' \
 	    '                         WITH_BOOT=1 先建默认镜像与全部验证变体，再跑十二档启动矩阵' \
 	    '                         （BIOS 六档 + UEFI 五档；32 位 UEFI 固件可用时再加 IA32 一档），' \
 	    '                         每档九列：进内核 / 刷新路径 / 诊断编号 / 预装 / 闭包 Init / 挂卷 /' \
@@ -792,9 +865,11 @@ help:
 	    '  make check-all ACCEPT=1  扩展验证：再加失败注入（旧注入 11 档 + Baleen 交接包 6 档 + 坏容器/Init 失败 2 档）、' \
 	    '                         NVMe 与 4Kn 介质控制器、引导状态机多轮、吊销/防回滚三档' \
 	    '                         参数透传：CHECK_ALL_ARGS="--out /tmp/check --timeout 120"' \
-	    '  make reproducible-check 两次 clean-all + 全量构建，比对 51 份交付物 sha256（要求 .cache/Keys 已有密钥）' \
+	    '  make reproducible-check 两次 clean-all + 全量构建，比对交付物 sha256（含镜像 JSON、运行期与两修订变体；' \
+	    '                          份数随交付集变化，不写死；要求 .cache/Keys 已有密钥）' \
 	    '  make clean             删除 $(OUT_DIR)/；clean-all 连同子包与两类工具' \
 	    '  磁盘分区单位：DISK_SECTOR_BYTES=512（默认）或 4096；只影响 Ext4 分区项，ESP 固定双份' \
-	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME（默认取真实产物，缺失时用占位件）' \
+	    '  载荷变量：STUB / CORE / EFI_IMAGE / SYSTEM_VOLUME（默认取真实产物，缺失时用占位件）；' \
+	    '            交付与验证入口要求真实产物，占位件回退由 release-guard 判失败' \
 	    '  布局描述：LAYOUT=<路径> 为可选外部模板；仓库内没有生产者，缺省由组装器按 $(KERNEL_PATH_FILE) 生成' \
 	    '  可变构建因素：SOURCE_DATE_EPOCH（默认 0）/ KEY_ID（默认 1）/ ALT_KEYS_DIR（第二把临时密钥目录，默认 .cache/AltKeys）'

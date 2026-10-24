@@ -13,9 +13,10 @@
         UEFI 装载路径用这份视角核对内核的固定装载跨度并构造 BootInfo
     取图缓冲是固件池内存，退出启动服务之前不释放：释放会改变内存图，让手上的 MapKey 作废
 
-    交接缓冲（清单副本、列表副本、记录数组、模块字节）由 UefiAllocator 分配：
-    Baleen 映像可能被固件装到 4GiB 以上，而内核只按低 4GiB 恒等映射读这些缓冲，
-    因此它们必须落在低 4GiB，且失败时要能逐段归还
+    交接缓冲（清单副本、列表副本、记录数组、模块字节）与内核镜像的固件中转缓冲都由
+    UefiAllocator 分配：Baleen 映像可能被固件装到 4GiB 以上，而内核只按低 4GiB 恒等映射
+    读这些缓冲，因此它们必须落在低 4GiB；退出启动服务之后内核镜像与静态内存尾部会覆盖
+    引导器跨度与内核固定装载跨度，落点还要避开这两段（E-CORE-97），且失败时要能逐段归还
 */
 
 #pragma once
@@ -69,17 +70,21 @@ namespace Baleen {
         };
 
         // 交接缓冲分配器：预装机制的落点分配在 UEFI 侧走固件页分配
-        // 清单副本、列表副本、记录数组与模块字节都经它分配，全部限在低 4GiB（内核按恒等映射读）；
+        // 清单副本、列表副本、记录数组、模块字节与内核镜像中转缓冲都经它分配，全部限在低 4GiB
+        // （内核按恒等映射读），并避开低 1 MiB、引导器自身跨度与内核固定装载跨度（E-CORE-97）；
         // 每次分配都记进已分配表，失败路径按表 FreePages 回收，成功交权后不再归还——
         // 那几段内存随 BootInfo 交给内核，内核入口按记录把它们标为已占用
         class UefiAllocator final : public Baleen::Core::SpanAllocator {
         public:
-            // 已分配区间的槽位上限：30 个模块落点加上清单 / 列表 / 记录三份副本，留余量
+            // 已分配区间的槽位上限：30 个模块落点加上清单 / 列表 / 记录三份副本与内核中转缓冲，留余量
             static constexpr uint32_t kMaxSpans = Baleen::Core::kPreloadSlots + 4;
 
             // 绑定启动服务表：使用期间须有效，退出启动服务之后不可再调用
             void Install(BootServices* bootServices) { m_bootServices = bootServices; }
-            // 分配一段 4 KiB 对齐、整段落在低 4GiB 的落点；失败返回 false
+            // 设置两段“不得落进去”的装载跨度：引导器自身与内核的固定装载跨度，
+            // 0 长度表示调用方没有该事实；与 BIOS 侧 MemoryMapAllocator 的避让语义相同（E-CORE-97）
+            void SetAvoid(uint64_t loaderBegin, uint64_t loaderBytes, uint64_t kernelBegin, uint64_t kernelBytes);
+            // 分配一段 4 KiB 对齐、整段落在低 4GiB 且避开两段装载跨度的落点；失败返回 false
             bool Allocate(uint32_t bytes, Baleen::Core::PreloadSpan& span) override;
             // 归还一段落点：按记录的页数 FreePages，无论固件是否接受都从已分配表里移除
             void Release(const Baleen::Core::PreloadSpan& span) override;
@@ -89,12 +94,22 @@ namespace Baleen {
             uint32_t Count() const { return m_count; }
 
         private:
+            // 不得落进去的装载跨度：物理起址与字节长度
+            struct AvoidSpan {
+                uint64_t begin;   // 物理起址
+                uint64_t bytes;   // 字节长度，0 表示不避开
+            };
             // 已分配区间：物理起址与页数，ReleaseAll 按它逐段归还
             struct Span {
                 uint64_t phys;    // 物理起址
                 uint32_t pages;   // 页数
             };
+            // 候选区间 [address, address+bytes) 是否与任一段避让跨度相交；
+            // 相交时 avoidBegin 取相交跨度里较小的起点，便于一次把分配上界降够
+            bool AvoidOverlap(uint64_t address, uint64_t bytes, uint64_t& avoidBegin) const;
             BootServices* m_bootServices = nullptr;   // 启动服务表（不拥有，退出启动服务后失效）
+            AvoidSpan m_loader = {};                  // 引导器自身装载跨度
+            AvoidSpan m_kernel = {};                  // 内核固定装载跨度
             Span m_spans[kMaxSpans] = {};             // 已分配区间
             uint32_t m_count = 0;                     // 已分配区间数量
         };

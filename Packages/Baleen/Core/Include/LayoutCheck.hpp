@@ -7,6 +7,7 @@
 
 #include <Diagnostics.hpp>
 #include <LayoutDescriptor.hpp>
+#include <LayoutStateArea.hpp>
 
 namespace Baleen {
     namespace Core {
@@ -22,6 +23,9 @@ namespace Baleen {
             constexpr Diagnostic kFailPathBytes{BALEEN_STAGE_CODE("25"), "The layout descriptor kernel path length is invalid"};
             constexpr Diagnostic kFailPathAbsolute{BALEEN_STAGE_CODE("26"), "The layout descriptor kernel path isn't absolute"};
             constexpr Diagnostic kFailVolumeBytes{BALEEN_STAGE_CODE("27"), "The layout descriptor volume length is zero"};
+            // 引导状态区域参数非法：长度不足、起点未按 4096 对齐、与保留区重叠都属于这一类
+            // 与 SelectSet 共用同一编号与文本，布局校验在选版之前先报
+            constexpr Diagnostic kFailStateArea{BALEEN_STAGE_CODE("90"), "The boot state area is invalid: check StateOffset and StateBytes"};
             // 路径语法不只是一条“首字符是 /”：分量必须非空，且不许出现 . 与 ..
             constexpr Diagnostic kFailPathSyntax{BALEEN_STAGE_CODE("93"), "The layout descriptor kernel path is invalid"};
 
@@ -67,7 +71,13 @@ namespace Baleen {
                 return true;
             }
 
-            // 校验布局描述：固定字段、标志位、保留字段、校验和、尾部保留区与内核路径语法
+            // 引导状态区域形态的判据在 LayoutStateArea 单点实现（宿主生成器也复用同一份）：
+            // 这里只把它映射成本阶段的编号，不另写一份判据
+            inline Diagnostic CheckStateArea(const uint8_t* block) {
+                return Baleen::LayoutStateArea::Valid(block) ? Diagnostic{} : kFailStateArea;
+            }
+
+            // 校验布局描述：固定字段、标志位、保留字段、校验和、尾部保留区、内核路径语法与状态区域形态
             // 成功返回空 code；任一不通过返回对应编号
             inline Diagnostic Check(const uint8_t* block) {
                 using Baleen::LayoutDescriptor;
@@ -87,7 +97,8 @@ namespace Baleen {
                 if (block[LayoutDescriptor::kFieldKernelPath] != '/') return kFailPathAbsolute;
                 if (!PathValid(block + LayoutDescriptor::kFieldKernelPath, pathBytes, true)) return kFailPathSyntax;
                 if (Get64(block + LayoutDescriptor::kFieldVolumeBytes) == 0) return kFailVolumeBytes;
-                return Diagnostic{};
+                // 状态区域形态放在已有判据之后：布局校验阶段先报，不等到读取状态区域时才发现
+                return CheckStateArea(block);
             }
         }
     }

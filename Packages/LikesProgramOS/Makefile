@@ -108,6 +108,9 @@ SIGN_KEY      := $(KEYS_DIR)/Development.sec
 SECURITY_VERSION ?= 1
 # 当前密钥的信任锚编号：顶层 export；签名与锚表命中核对用同一个编号
 KEY_ID           ?= 1
+# KEY_ID 的内容戳：make 不追踪变量值变化。清单签名用 $(KEY_ID)、锚表也用 $(KEY_ID)，
+# 两边必须同代；把当前值写成文件，KEY_ID 变了才刷新时间戳，卷随之重建，不会留旧密钥签名的清单
+KEY_ID_STAMP     := $(OUT_DIR)/KeyId
 # 信任锚文本（BaleenCore 生成物）：签名时核对“签名密钥确实在锚表里”，check 里回验清单签名。
 # 引导器内嵌的锚表由 Baleen/Core 包生成；本包只读它，缺失时让那个包现生成一次
 TRUST_ANCHORS_FILE ?= ../Baleen/Core/Out/TrustAnchors.txt
@@ -125,7 +128,7 @@ STATIC_FILES  := $(shell find $(STATIC_DIR) -path $(KERNEL_SETS_DIR) -prune -o -
 STATIC_DIRS   := $(shell find $(STATIC_DIR) -path $(KERNEL_SETS_DIR) -prune -o -type d -print 2>/dev/null)
 
 .DEFAULT_GOAL := all
-.PHONY: all kernel check clean clean-all help
+.PHONY: all kernel check clean clean-all help FORCE
 
 all: $(SYSTEM_VOLUME)
 
@@ -158,13 +161,26 @@ $(SIGN_KEY):
 	@$(MAKE) -C ../../Tools/Build/MakeKeys
 	../../Tools/Bin/MakeKeys --out $(KEYS_DIR)
 
-# 信任锚文本是 BaleenCore 的生成物：独立构建本包时按需让那个包生成一次
-$(TRUST_ANCHORS_FILE):
+# KEY_ID 内容戳：每次 make 检查一次（依赖 FORCE）；内容没变就不写，时间戳不动，卷不重建
+$(KEY_ID_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' "$(KEY_ID)" | cmp -s - $@ || printf '%s\n' "$(KEY_ID)" > $@
+
+# FORCE：无产物的空目标，让依赖它的规则每次 make 都跑一次（是否真变化由规则自己用 cmp 判断）
+FORCE:
+
+# 信任锚文本是 BaleenCore 的生成物：独立构建本包时按需让那个包生成一次。
+# 前提里挂本包的 KEY_ID 内容戳：顶层 packages 的串行顺序里本包先于 Baleen/Core 构建，
+# 增量 `make KEY_ID=2` 时锚表目标若只按“文件存在”判断就会沿用旧编号的锚表，
+# 随后 SignManifest 直接拒绝（锚表里没有 KeyId 2）。挂上内容戳后：
+# KEY_ID 变 → 本包 stamp 刷新 → 本目标过期 → 子 make 进 Core 重建锚表（Core 侧同样按内容戳判断）。
+# KEY_ID 不变时 stamp 内容相同、不写文件，本目标不会过期，锚表也不重建。
+$(TRUST_ANCHORS_FILE): $(KEY_ID_STAMP)
 	@$(MAKE) -C ../Baleen/Core trust-anchors
 
 # 系统卷：先在集暂存目录派生 BuildId、写最终 .os 与清单并签名，再按 BuildId 落进集目录组装卷根
 # 集目录按当前 BuildId 重建：同一份内核产物只保留一个集，历史集不随卷发布
-$(SYSTEM_VOLUME): $(KERNEL_IMAGE) $(STATIC_FILES) $(STATIC_DIRS) $(MODULE_OSMS) $(MAKE_MANIFEST) $(SIGN_MANIFEST) $(SIGN_KEY) $(TRUST_ANCHORS_FILE) $(REVOCATION_FILE) Makefile
+$(SYSTEM_VOLUME): $(KERNEL_IMAGE) $(STATIC_FILES) $(STATIC_DIRS) $(MODULE_OSMS) $(MAKE_MANIFEST) $(SIGN_MANIFEST) $(SIGN_KEY) $(TRUST_ANCHORS_FILE) $(REVOCATION_FILE) $(KEY_ID_STAMP) Makefile
 	@command -v $(MKFS) >/dev/null 2>&1 || { echo "缺少 $(MKFS)（e2fsprogs，需要支持 -d 的版本）"; exit 1; }
 	@set -e; \
 	mkdir -p "$(OUT_DIR)"; \
@@ -224,7 +240,7 @@ $(SYSTEM_VOLUME): $(KERNEL_IMAGE) $(STATIC_FILES) $(STATIC_DIRS) $(MODULE_OSMS) 
 # 以清单 Type=2 条目与 Modules.list 条目登记进集目录（列表由全部 .osm 自动生成），再组装一份独立的系统卷。
 # 集目录、暂存区与卷根都落在 RUNTIME_OUT_DIR 下，不碰 Static/ 的正式集目录；正式卷配方保持一致，
 # 只有显式构建本目标的验证变体才带运行期夹具
-$(RUNTIME_VOLUME): $(KERNEL_IMAGE) $(MODULE_OSMS) $(MAKE_MANIFEST) $(SIGN_MANIFEST) $(SIGN_KEY) $(TRUST_ANCHORS_FILE) $(STATIC_FILES) $(STATIC_DIRS) Makefile
+$(RUNTIME_VOLUME): $(KERNEL_IMAGE) $(MODULE_OSMS) $(MAKE_MANIFEST) $(SIGN_MANIFEST) $(SIGN_KEY) $(TRUST_ANCHORS_FILE) $(STATIC_FILES) $(STATIC_DIRS) $(KEY_ID_STAMP) Makefile
 	@command -v $(MKFS) >/dev/null 2>&1 || { echo "缺少 $(MKFS)（e2fsprogs，需要支持 -d 的版本）"; exit 1; }
 	@test -n "$(RUNTIME_MODULES)" -o -n "$(PATCH_MODE)" || { echo "RUNTIME_MODULES 与 PATCH_MODE 都为空：变体卷没有意义"; exit 1; }
 	@set -e; \

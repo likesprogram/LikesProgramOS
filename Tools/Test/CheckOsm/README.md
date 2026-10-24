@@ -11,7 +11,7 @@ Tools/Bin/CheckOsm
 
 ## 检查内容
 
-**用例（77 项）**：每个用例打印 `[ OK ]` 或 `[ FAIL ]`，任一失败返回 1；用例数固定，运行时与实跑数核对，防止用例被误删。
+**用例（78 项）**：每个用例打印 `[ OK ]` 或 `[ FAIL ]`，任一失败返回 1；用例数固定，运行时与实跑数核对，防止用例被误删。
 
 - **正例**：写出器构造的规范容器（`TEXT`/`RODATA`/`DATA`/`BSS` 各一页、一条导出、一条导入、一条依赖、两条重定位）通过解析与字段复算，包括 `ModuleId`/`InterfaceId` 派生、版本、ABI 范围、入口、槽表与回填槽、重定位按目标升序；空的可选表、整页文件字节、无人类可读模块名都按合法容器接受；同一构造输入两次打包字节一致；`RELATIVE32` 条目被接受；依赖图正例（A→B）通过
 - **头部与表区负例**：魔数、未知容器版本、`HeaderBytes`、`Flags`、`TotalBytes` 与实际长度不符、`ImageBytes` 非 4 KiB 倍数、保留字段非零、段数 0、`SectionEntryBytes`/`ImportEntryBytes`/`DependencyEntryBytes` 不符、段表/导出表/重定位表偏移不对齐或越界、表区重叠、字符串表越界、字符串表末字节非 NUL、段名偏移越界、导出/重定位/依赖条目数超上限、`ModuleId` 全零、`ModuleVersionMajor` 为零、`KernelAbiMin` 为零、模块名偏移与字节数不一致、模块名越出字符串表

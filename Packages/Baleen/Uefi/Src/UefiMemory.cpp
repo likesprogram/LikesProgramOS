@@ -1,6 +1,7 @@
 /* UefiMemory.cpp
     MemoryMap 的实现：分配取图缓冲、反复取图、把描述符转成 BootInfo 的条目；
-    UefiAllocator 的实现：交接缓冲的页分配、逐段归还与失败路径的整体回收
+    UefiAllocator 的实现：交接缓冲的页分配（低 4GiB、避开低 1 MiB 与两段装载跨度）、
+    逐段归还与失败路径的整体回收
 */
 
 #include <UefiMemory.hpp>
@@ -26,6 +27,10 @@ namespace {
         return type == kMemoryConventional || type == kMemoryBootServicesCode || type == kMemoryBootServicesData ||
                type == kMemoryLoaderCode || type == kMemoryLoaderData;
     }
+
+    // 避让重试的轮数上限：每次相交把分配上界降到相交跨度起点之下，
+    // 引导器与内核两段跨度各最多消耗一轮，4 轮留一倍余量，也防止固件行为异常时死循环
+    constexpr uint32_t kAvoidRounds = 4;
 }
 
 namespace Baleen {
@@ -103,28 +108,74 @@ namespace Baleen {
             m_key = 0;
         }
 
+        void UefiAllocator::SetAvoid(uint64_t loaderBegin, uint64_t loaderBytes, uint64_t kernelBegin, uint64_t kernelBytes) {
+            m_loader.begin = loaderBegin;
+            m_loader.bytes = loaderBytes;
+            m_kernel.begin = kernelBegin;
+            m_kernel.bytes = kernelBytes;
+        }
+
+        bool UefiAllocator::AvoidOverlap(uint64_t address, uint64_t bytes, uint64_t& avoidBegin) const {
+            // 候选区间整段在低 4GiB 内，不会回绕；跨度一侧用减法判定相交，避免 begin + bytes 回绕
+            const AvoidSpan* const spans[] = {&m_loader, &m_kernel};
+            bool hit = false;
+            for (const AvoidSpan* const avoid : spans) {
+                if (avoid->bytes == 0) continue;   // 0 长度表示调用方没有该事实
+                if (address >= avoid->begin) {
+                    if (address - avoid->begin >= avoid->bytes) continue;   // 候选在跨度起点之上：不相交
+                } else if (avoid->begin - address >= bytes) {
+                    continue;   // 跨度起点在候选末端之外：不相交
+                }
+                if (!hit || avoid->begin < avoidBegin) avoidBegin = avoid->begin;
+                hit = true;
+            }
+            return hit;
+        }
+
         bool UefiAllocator::Allocate(uint32_t bytes, Baleen::Core::PreloadSpan& span) {
             span = Baleen::Core::PreloadSpan{};
             if (m_bootServices == nullptr || m_bootServices->allocatePages == nullptr) return false;
             if (bytes == 0 || m_count >= kMaxSpans) return false;
             const uint64_t pages = (static_cast<uint64_t>(bytes) + kPageBytes - 1) / kPageBytes;
-            // 上界取低 4GiB 的最高字节：固件把整段分配在它之下，页对齐后必然整段落在恒等映射里
-            uint64_t address = kLowMemoryLimit - 1;
-            if (IsError(m_bootServices->allocatePages(kAllocateMaxAddress, kMemoryLoaderData, pages, &address)) || address == 0) return false;
             const uint64_t total = pages * kPageBytes;
-            // 固件承诺“分配在给定地址之下”，这里再自核一次：整段在低 4GiB 内且不回绕
-            if (address >= kLowMemoryLimit || total > kLowMemoryLimit - address) {
-                m_bootServices->freePages(address, pages);
-                return false;
+            // 上界取低 4GiB 的最高字节：固件把整段分配在它之下，页对齐后必然整段落在恒等映射里
+            uint64_t limit = kLowMemoryLimit - 1;
+            // 从高往下的避让重试：落在引导器 / 内核跨度里的候选先还给固件，再把上界降到相交跨度
+            // 起点之下重试；轮数固定，避免固件行为异常时死循环
+            for (uint32_t round = 0; round < kAvoidRounds; ++round) {
+                uint64_t address = limit;
+                if (IsError(m_bootServices->allocatePages(kAllocateMaxAddress, kMemoryLoaderData, pages, &address)) || address == 0) return false;
+                // 固件承诺“分配在给定地址之下”，这里再自核一次：整段在低 4GiB 内且不回绕
+                if (address >= kLowMemoryLimit || total > kLowMemoryLimit - address) {
+                    m_bootServices->freePages(address, pages);
+                    return false;
+                }
+                // 低 1 MiB 留给固件残留与内核早期代码：上界只能往下调，
+                // 固件落到它之下说明这个上界下已经拿不到合规落点，再降只会更差，直接失败
+                if (address < Baleen::Core::kPreloadLowLimit) {
+                    m_bootServices->freePages(address, pages);
+                    return false;
+                }
+                // 与引导器或内核的装载跨度相交：先还给固件，绝不登记进已分配表；
+                // 再把上界降到相交跨度起点之下重试，整段分配在上界之下的前提下降一次即可
+                uint64_t avoidBegin = 0;
+                if (AvoidOverlap(address, total, avoidBegin)) {
+                    m_bootServices->freePages(address, pages);
+                    // 上界必须严格降低，否则下一轮只会拿到同一落点
+                    if (avoidBegin == 0 || avoidBegin - 1 >= limit) return false;
+                    limit = avoidBegin - 1;
+                    continue;
+                }
+                span.phys = address;
+                // 引导期固件按恒等映射运行，物理地址可直接当可写指针用
+                span.data = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(address));
+                span.bytes = bytes;
+                m_spans[m_count].phys = address;
+                m_spans[m_count].pages = static_cast<uint32_t>(pages);
+                ++m_count;
+                return true;
             }
-            span.phys = address;
-            // 引导期固件按恒等映射运行，物理地址可直接当可写指针用（与内核镜像中转缓冲同一写法）
-            span.data = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(address));
-            span.bytes = bytes;
-            m_spans[m_count].phys = address;
-            m_spans[m_count].pages = static_cast<uint32_t>(pages);
-            ++m_count;
-            return true;
+            return false;
         }
 
         void UefiAllocator::Release(const Baleen::Core::PreloadSpan& span) {

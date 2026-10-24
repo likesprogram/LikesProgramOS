@@ -13,6 +13,7 @@
 #include <stdexcept>
 
 #include <HostIo.h>
+#include <LayoutStateArea.hpp>
 
 namespace hostbuild {
     namespace {
@@ -72,6 +73,13 @@ namespace hostbuild {
         std::string Hex32(uint32_t value) {
             char text[11] = {};
             std::snprintf(text, sizeof(text), "0x%08X", value);
+            return text;
+        }
+
+        // 把 64 位值写成 0x 前缀的十六进制，供状态区域参数报错使用
+        std::string Hex64(uint64_t value) {
+            char text[19] = {};
+            std::snprintf(text, sizeof(text), "0x%llX", static_cast<unsigned long long>(value));
             return text;
         }
 
@@ -163,6 +171,13 @@ namespace hostbuild {
         Put32Le(block.data() + kFieldStateBytes, static_cast<uint32_t>(spec.state_bytes));
         Put16Le(block.data() + kFieldPathBytes, static_cast<uint16_t>(spec.kernel_path.size()));
         std::copy(spec.kernel_path.begin(), spec.kernel_path.end(), block.begin() + static_cast<std::ptrdiff_t>(kFieldPath));
+        // 引导状态区域的形态按目标侧同一份判据自检（布局描述规格 §五步骤 3）：4096 对齐、最小 4096 字节、
+        // 端点不回绕、不与布局描述块 / 描述符区 / 系统卷重叠；不通过就拒绝产出，
+        // 不让一份目标侧必然以 E-CORE-90 / E-UEFI-90 拒绝的布局描述进镜像
+        if (!Baleen::LayoutStateArea::Valid(block.data())) {
+            throw std::runtime_error(std::string("布局描述的引导状态区域参数非法（E-CORE-90 / E-UEFI-90）：StateOffset=") + Hex64(spec.state_offset) +
+                " StateBytes=" + std::to_string(spec.state_bytes) + "，须按 4096 对齐、至少 4096 字节，且不与布局描述块 / 描述符区 / 系统卷重叠");
+        }
         Put32Le(block.data() + kFieldChecksum, Baleen::LayoutDescriptor::Checksum(block.data()));
         return block;
     }

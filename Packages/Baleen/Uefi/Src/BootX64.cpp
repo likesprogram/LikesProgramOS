@@ -8,7 +8,8 @@
 
     只有内核镜像、清单副本、列表副本、预装记录与模块字节全部就绪才交权：装载或预装失败都按
     两阶段选版回退（候选集失败改选已知良好集，已知良好集失败终止），不交出残缺的交接现场；
-    交接缓冲经 UefiAllocator 放在低 4GiB，失败路径逐段 FreePages 回收
+    交接缓冲与内核中转缓冲经 UefiAllocator 放在低 4GiB，避开低 1 MiB 与引导器 / 内核两段装载
+    跨度，失败路径按已分配表逐段 FreePages 回收
 
     与 BaleenCore 的差别只在载体：介质来自块设备协议而不是 BIOS 读盘服务，
     控制台来自固件简单文本输出（退出启动服务后换成直接驱动的串口），内存图来自固件而不是 E820；
@@ -319,6 +320,7 @@ namespace {
 
     // 播报本次选定的目标集：集标识按字节顺序的 64 位小写十六进制，与集目录名同一串字符
     // 回退改选之后同样播报一次，日志里能看出交接用的是哪一份
+    // 集标识固定 64 个字符，单独占一行；尝试身份与修订写在续行
     void ReportSelectedSet() {
         Baleen::PrintTargets::WriteTag(Tag::Continue);
         Print::Write("Set=");
@@ -327,7 +329,9 @@ namespace {
             const char text[3] = { kHexDigits[s_selected.buildId[i] >> 4], kHexDigits[s_selected.buildId[i] & 0x0f], '\0' };
             Print::Write(text);
         }
-        Print::Write(" Attempt=");
+        Print::Write("\r\n");
+        Baleen::PrintTargets::WriteTag(Tag::Continue);
+        Print::Write("Attempt=");
         Print::WriteHex64(s_selected.attemptId);
         Print::Write(" Rev=");
         Print::WriteHex64(s_selected.moduleRevision);
@@ -459,7 +463,9 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Print::WriteHex(s_medium->BlockBytes());
     Print::Write(" Bytes=");
     Print::WriteHex64(s_medium->CapacityBytes());
-    Print::Write(" Rw=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Tag::Continue);
+    Print::Write("Rw=");
     Print::WriteHex(s_medium->Writable() ? 1 : 0);
     if (s_medium == &s_efiMedium) {
         Print::Write(" Removable=");
@@ -590,9 +596,9 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     s_handoffAllocator.Install(bootServices);
     Baleen::Core::KernelFacts kernelFacts;
     uint64_t kernelSpan = 0;
-    uint64_t staging = 0;
-    uint64_t stagingPages = 0;
-    uint8_t* stagingImage = nullptr;
+    // 内核镜像的固件中转缓冲：经交接缓冲分配器分配，低 4GiB 且避开两段装载跨度；
+    // 成功交权后不归还，MoveBytes 搬完即弃
+    Baleen::Core::PreloadSpan stagingSpan{};
     for (;;) {
         // —— 内核镜像：按选中集的路径定位、读取并校验数据与整幅摘要 ——
         // 装载区在退出启动服务之后按最终内存图核对：退出前看到的“可用”不等于本阶段能写
@@ -618,22 +624,22 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
             Print::Write("\r\n");
 
             // —— 内核镜像先读进固件分配的中转缓冲：镜像数据声明的固定装载地址在本阶段退出启动服务
-            //    之前可能正落在固件启动服务内存里，不能直接写入；AllocatePages 保证中转缓冲的归属 ——
+            //    之前可能正落在固件启动服务内存里，不能直接写入；交接缓冲分配器保证中转缓冲的归属 ——
             kernelSpan = kernelFacts.memoryBytes > kernelFacts.imageBytes ? kernelFacts.memoryBytes : kernelFacts.imageBytes;
-            stagingPages = (static_cast<uint64_t>(kernelFacts.imageBytes) + kPageBytes - 1) / kPageBytes;
-            staging = 0;
-            const EfiStatus stagingStatus = bootServices->allocatePages(kAllocateAnyPages, kMemoryLoaderData, stagingPages, &staging);
-            if (IsError(stagingStatus) || staging == 0) {
+            // 交接落点必须避开引导器自身跨度与内核固定装载跨度：退出启动服务后内核镜像与静态内存尾部
+            // 会覆盖这两段，预装缓冲与中转缓冲落进去会在交权时被改写（E-CORE-97）
+            s_handoffAllocator.SetAvoid(s_loaderBegin, s_loaderBytes, kernelFacts.loadAddress, kernelSpan);
+            if (!s_handoffAllocator.Allocate(kernelFacts.imageBytes, stagingSpan)) {
                 failure = kFailKernelMemory;
             } else {
                 Baleen::PrintTargets::WriteLine(Tag::Ok, "The kernel image buffer is allocated");
                 // —— 装载：整幅读进中转缓冲；固定装载地址等退出启动服务后再写入 ——
                 Baleen::PrintTargets::WriteLine(Tag::Info, "Loading the kernel image");
-                stagingImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(staging));
-                if (const Diagnostic reason = Baleen::Core::LoadKernelImageTo(s_ext4, s_selected.kernelPath, stagingImage, kernelFacts.imageBytes); reason.code != nullptr) {
+                if (const Diagnostic reason = Baleen::Core::LoadKernelImageTo(s_ext4, s_selected.kernelPath, stagingSpan.data, kernelFacts.imageBytes); reason.code != nullptr) {
                     failure = reason;
-                    bootServices->freePages(staging, stagingPages);
-                    staging = 0;
+                    // 失败路径归还中转缓冲这一段：此时预装还没开始
+                    s_handoffAllocator.Release(stagingSpan);
+                    stagingSpan = Baleen::Core::PreloadSpan{};
                 } else {
                     Baleen::PrintTargets::WriteLine(Tag::Ok, "The kernel image is loaded into the firmware buffer");
                     Baleen::PrintTargets::WriteTag(Tag::Continue);
@@ -651,14 +657,15 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
                     if (preloadReason.code == nullptr) break;
                     failure = preloadReason;
                     preloadFailed = true;
-                    bootServices->freePages(staging, stagingPages);
-                    staging = 0;
+                    // 预装失败：中转缓冲逐段归还，预装缓冲由循环末尾的 ReleaseAll 统一回收
+                    s_handoffAllocator.Release(stagingSpan);
+                    stagingSpan = Baleen::Core::PreloadSpan{};
                 }
             }
         }
 
         // —— 回退：候选集的装载 / 预装失败由选择器改选已知良好集或上一修订 ——
-        // 本次已分配的交接缓冲先整体归还；中转缓冲在上面各失败分支里已单独归还
+        // 本次已分配的预装缓冲先整体归还；中转缓冲在上面各失败分支里已单独归还
         s_handoffAllocator.ReleaseAll();
         Baleen::Core::SelectedSet fallback;
         const Diagnostic next = Baleen::Core::SelectAfterLoadFailure(s_ext4, *s_medium, stateOffset, stateBytes, s_kernelPath, Get32(s_layoutBlock + Baleen::LayoutDescriptor::kFieldFlags), s_selected, preloadFailed, failure, fallback);
@@ -709,8 +716,8 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     if (static_cast<uint64_t>(kernelFacts.loadAddress) < s_loaderBegin + s_loaderBytes && s_loaderBegin < kernelEnd)
         Fail(kFailKernelSpanAfterExit);
     uint8_t* const kernelImage = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(kernelFacts.loadAddress));
-    // 中转缓冲与目标可能落在同一段归系统的内存里，用重叠安全的搬运
-    MoveBytes(kernelImage, stagingImage, kernelFacts.imageBytes);
+    // 中转缓冲已避开内核装载跨度，正常不会与目标重叠；这里仍用重叠安全的搬运，不依赖这个前提
+    MoveBytes(kernelImage, stagingSpan.data, kernelFacts.imageBytes);
     if (kernelFacts.memoryBytes > kernelFacts.imageBytes)
         memset(kernelImage + kernelFacts.imageBytes, 0, kernelFacts.memoryBytes - kernelFacts.imageBytes);
     // 8254 此时归本阶段使用：CPUID 没给出频率时用它实测一次，好把耗时换算成毫秒
@@ -731,24 +738,31 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Print::WriteHex64(reinterpret_cast<uint64_t>(&s_bootInfo));
     Print::Write(" Mmap=");
     Print::WriteHex(s_bootInfo.memoryMapCount);
-    Print::Write(" Firmware=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Tag::Continue);
+    Print::Write("Firmware=");
     Print::WriteHex(s_bootInfo.firmware);
     Print::Write(" Channels=");
     Print::WriteHex(s_bootInfo.channels);
     Print::Write("\r\n");
     // 启动来源：内核与运行期更新据此知道“从哪个介质、哪个卷、哪条路径起来的”
+    // 字段按用途分组分行：卷、状态、介质与路径各自成行；路径本身长度不定，单独占一行
     Baleen::PrintTargets::WriteTag(Tag::Continue);
     Print::Write("Boot=Volume=");
     Print::WriteHex64(s_bootInfo.volumeOffset);
     Print::Write(" Bytes=");
     Print::WriteHex64(s_bootInfo.volumeBytes);
-    Print::Write(" State=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Tag::Continue);
+    Print::Write("State=");
     Print::WriteHex64(s_bootInfo.stateOffset);
     Print::Write(" Kind=");
     Print::WriteHex(s_bootInfo.deviceKind);
     Print::Write(" Clue=");
     Print::WriteHex(s_bootInfo.devicePathBytes);
-    Print::Write(" Medium=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Tag::Continue);
+    Print::Write("Medium=");
     Print::WriteHex64(s_bootInfo.mediumBytes);
     Print::Write("\r\n");
     Baleen::PrintTargets::WriteTag(Tag::Continue);
@@ -766,7 +780,9 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Print::WriteHex(static_cast<uint32_t>(s_bootInfo.bootList));
     Print::Write("/");
     Print::WriteHex(s_bootInfo.bootListBytes);
-    Print::Write(" Records=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Tag::Continue);
+    Print::Write("Records=");
     Print::WriteHex(static_cast<uint32_t>(s_bootInfo.bootModules));
     Print::Write(" Count=");
     WriteDecimal(s_preloadResult.recordCount);
@@ -780,7 +796,9 @@ extern "C" BALEEN_EFIAPI Baleen::Uefi::EfiStatus efi_main(void* imageHandle, Bal
     Print::WriteHex(s_bootInfo.screenWidth);
     Print::Write("x");
     Print::WriteHex(s_bootInfo.screenHeight);
-    Print::Write(" Stride=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Tag::Continue);
+    Print::Write("Stride=");
     Print::WriteHex(s_bootInfo.screenStride);
     Print::Write(" Bytes=");
     Print::WriteHex(s_bootInfo.screenBytes);

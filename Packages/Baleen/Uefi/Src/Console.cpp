@@ -5,7 +5,8 @@
     QEMU 给的串口上，因此这时不直接写 COM1，否则每行会重复一遍
     第二阶段（已退出启动服务）：COM1 + 0xE9；固件控制台不再合法，串口由本阶段直接驱动，
     内核随后按 BootInfo 的通道位继续写它，日志因此是连续的一份
-    固件控制台没有 VGA 那样的属性字节：标签只写 "[ 名字 ] " 前缀，不设颜色
+    固件控制台的显示属性经简单文本输出协议的 SetAttribute 设置，属性编码与 VGA 一致：
+    标签按等级着色，写完恢复缺省属性；直接驱动的串口与调试口忽略属性、只收纯文本
 */
 
 #include <Console.hpp>
@@ -17,7 +18,9 @@ namespace Baleen {
     namespace PrintTargets {
         void WriteTag(Tag tag) {
             Print::Write("[ ");
+            Print::SetAttribute(TagAttribute(tag));
             Print::Write(TagName(tag));
+            Print::SetAttribute(Devices::Vga::kDefaultAttribute);
             Print::Write(" ] ");
         }
 

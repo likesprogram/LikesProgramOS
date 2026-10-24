@@ -14,6 +14,7 @@
 #include <Paging.hpp>
 #include <Print.hpp>
 #include <Reset.hpp>
+#include <Tags.hpp>
 
 namespace {
     // 内核核心服务绑定：未绑定时相关槽按“未就绪”返回空值或零
@@ -32,11 +33,15 @@ namespace {
     // —— Core.Log ——
     // 槽 0：写文本；槽 1：写 [ tag ] text 一行；槽 2：写 16 位十六进制
     // 槽 3：写模块诊断行 [ tag ] text (code=0x… detail)，code 是模块命名空间内的审计码
+    // 标签按等级名着色（与 Kernel::Tags 同一张属性表），模块名按缺省属性；流式通道忽略属性
     void CoreLogWrite(const char* text) { Print::Write(text); }
 
     void CoreLogLine(const char* tag, const char* text) {
+        const char* const label = tag != nullptr ? tag : "INFO";
         Print::Write("[ ");
-        Print::Write(tag != nullptr ? tag : "INFO");
+        Print::SetAttribute(Kernel::Tags::TagAttributeByName(label));
+        Print::Write(label);
+        Print::SetAttribute(Kernel::Tags::kDefaultAttribute);
         Print::Write(" ] ");
         Print::Write(text != nullptr ? text : "");
         Print::Write("\r\n");
@@ -45,8 +50,11 @@ namespace {
     void CoreLogHex(uint64_t value) { Print::WriteHex64(value); }
 
     void CoreLogCode(const char* tag, uint32_t code, const char* text, const char* detail) {
+        const char* const label = tag != nullptr ? tag : "INFO";
         Print::Write("[ ");
-        Print::Write(tag != nullptr ? tag : "INFO");
+        Print::SetAttribute(Kernel::Tags::TagAttributeByName(label));
+        Print::Write(label);
+        Print::SetAttribute(Kernel::Tags::kDefaultAttribute);
         Print::Write(" ] ");
         Print::Write(text != nullptr ? text : "");
         Print::Write(" (code=");
@@ -192,8 +200,7 @@ namespace {
 // 定义不带 extern "C" 也不带 const：生成头已用 extern "C" 声明同名符号并继承 C 链接性，
 // 定义再加 extern "C" 会被 -Werror 判成 “initialized and declared 'extern'”；
 // 槽表按模块侧约定是非 const（允许落在可写段），两侧用同一份声明，避免同一符号两处类型不一致
-CoreAbiSlotsV1 _Contract_Export_CoreAbi_v1 = {
-    &_Contract_CoreAbi_Version, &CoreAbiBuildId64, &_Contract_CoreAbi_DriveSdkVersion};
+CoreAbiSlotsV1 _Contract_Export_CoreAbi_v1 = {&_Contract_CoreAbi_Version, &CoreAbiBuildId64, &_Contract_CoreAbi_DriveSdkVersion};
 
 CoreBootSlotsV1 _Contract_Export_CoreBoot_v1 = {&CoreBootInfo, &CoreBootPhysical};
 

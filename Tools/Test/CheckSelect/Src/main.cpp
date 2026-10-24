@@ -15,6 +15,7 @@
 */
 
 #include <BootState.hpp>
+#include <LayoutCheck.hpp>
 #include <LayoutDescriptor.hpp>
 #include <ManifestVerify.hpp>
 #include <SelectSet.hpp>
@@ -50,7 +51,7 @@ namespace {
     // 选版启用前的扁平落点：不再是可直启形态，选择器必须拒绝
     constexpr const char* kFlatKernelPath = "/LikesProgram/System/LikesProgram.os";
     // 用例总数：末尾与实跑数核对，防止用例被误删
-    constexpr unsigned kCaseCount = 74;
+    constexpr unsigned kCaseCount = 75;
     // 已跑用例数
     unsigned g_ran = 0;
 
@@ -98,6 +99,36 @@ namespace {
     std::string ArtifactPath(const uint8_t* buildId, const std::string& relative) { return SetDirectory(buildId) + "/" + relative; }
     // 集内内核镜像路径（清单登记在集目录根上的默认形态）
     std::string KernelPath(const uint8_t* buildId) { return ArtifactPath(buildId, kKernelName); }
+    // 宿主侧构造布局描述块：固定字段按 LayoutDescriptor 的字节表填，状态区域参数由调用方给
+    // 校验和按生产实现同一定义重算；改字段后必须重算，否则会先死在 kFailChecksum 而不是状态区判据
+    Bytes BuildLayoutBlock(uint64_t stateOffset, uint32_t stateBytes) {
+        const std::string kernelPath = KernelPath(Id(0x42).data());
+        Require(kernelPath.size() <= Baleen::LayoutDescriptor::kKernelPathMaxBytes, "夹具内核路径超过布局描述上限");
+        Bytes block(Baleen::LayoutDescriptor::kBytes, 0);
+        Put32(block, Baleen::LayoutDescriptor::kFieldMagic, Baleen::LayoutDescriptor::kMagic);
+        Put16(block, Baleen::LayoutDescriptor::kFieldVersion, Baleen::LayoutDescriptor::kVersion);
+        Put16(block, Baleen::LayoutDescriptor::kFieldHeaderBytes, Baleen::LayoutDescriptor::kHeaderBytes);
+        Put32(block, Baleen::LayoutDescriptor::kFieldLayoutBytes, Baleen::LayoutDescriptor::kLayoutBytes);
+        Put32(block, Baleen::LayoutDescriptor::kFieldFlags, 0);
+        for (unsigned i = 0; i < 16; ++i) block[Baleen::LayoutDescriptor::kFieldVolumeUuid + i] = static_cast<uint8_t>(0x30 + i);
+        Put64(block, Baleen::LayoutDescriptor::kFieldVolumeOffset, 0x100000);
+        Put64(block, Baleen::LayoutDescriptor::kFieldVolumeBytes, 0x100000);
+        Put64(block, Baleen::LayoutDescriptor::kFieldStateOffset, stateOffset);
+        Put32(block, Baleen::LayoutDescriptor::kFieldStateBytes, stateBytes);
+        Put16(block, Baleen::LayoutDescriptor::kFieldKernelPathBytes, static_cast<uint16_t>(kernelPath.size()));
+        std::memcpy(block.data() + Baleen::LayoutDescriptor::kFieldKernelPath, kernelPath.data(), kernelPath.size());
+        Put32(block, Baleen::LayoutDescriptor::kFieldChecksum, Baleen::LayoutDescriptor::Checksum(block.data()));
+        return block;
+    }
+    // 布局描述状态区域判据的结论：构造一份带指定状态区域参数的块后交给共享 LayoutCheck
+    Baleen::Diagnostic CheckLayoutStateArea(uint64_t stateOffset, uint32_t stateBytes) {
+        const Bytes block = BuildLayoutBlock(stateOffset, stateBytes);
+        return Baleen::Core::LayoutCheck::Check(block.data());
+    }
+    // 核对布局校验以状态区编号拒绝：编号与 SelectSet 共用同一份
+    void RequireStateAreaRejected(const Baleen::Diagnostic& reason, const std::string& what) {
+        Require(reason.code != nullptr && std::string(reason.code) == Baleen::Core::LayoutCheck::kFailStateArea.code, what + "必须以状态区编号拒绝：" + Text(reason));
+    }
     // 旧修订快照的清单文件名：Manifest.<rev>.mft
     std::string SnapshotManifestName(uint64_t revision) { return "Manifest." + std::to_string(revision) + ".mft"; }
     // 旧修订快照的列表文件名：Modules.<rev>.list
@@ -643,7 +674,29 @@ namespace {
         Require(fixture.Calls().empty(), "读失败时不得进入清单验证");
     }
 
-    // 状态区域参数非法按致命原因停机：长度不足或起点未按块对齐都在读写介质之前拒绝
+    // 布局描述的状态区域判据：StateOffset / StateBytes 的形态在布局校验阶段就按共用编号拒绝
+    // 只构造宿主布局块并核对结论，判据由共享 LayoutCheck 提供，编号与选版侧的运行期判断共用
+    void CaseLayoutStateArea() {
+        using Baleen::LayoutDescriptor;
+        // 默认状态区域参数通过：4096 对齐、长度 4096、与三段保留区都不相交
+        Require(CheckLayoutStateArea(LayoutDescriptor::kStateOffset, LayoutDescriptor::kStateBytes).code == nullptr, "默认状态区域参数必须通过布局校验");
+        // 没有状态区域：StateOffset 为 0 时 StateBytes 忽略，长度 0 也合法
+        Require(CheckLayoutStateArea(0, 0).code == nullptr, "没有状态区域必须通过布局校验");
+        // 512 字节对齐但不是 4096 的整数倍：512e 上旧实现只按逻辑块对齐会接受
+        RequireStateAreaRejected(CheckLayoutStateArea(0x21200, LayoutDescriptor::kStateBytes), "512 对齐但非 4096 对齐的状态区域");
+        // 起点落在描述符区默认范围 [0x22000, 0x23000)：不能把描述符区当状态区
+        RequireStateAreaRejected(CheckLayoutStateArea(LayoutDescriptor::kDescriptorOffset, LayoutDescriptor::kStateBytes), "覆盖描述符区的状态区域");
+        // 起点落在布局描述自身 [0x20000, 0x21000)：状态区不能压住布局描述
+        RequireStateAreaRejected(CheckLayoutStateArea(LayoutDescriptor::kOffset, LayoutDescriptor::kStateBytes), "覆盖布局描述的状态区域");
+        // 长度不足一个区域：StateBytes 至少 4096
+        RequireStateAreaRejected(CheckLayoutStateArea(LayoutDescriptor::kStateOffset, LayoutDescriptor::kStateBytes / 2), "长度不足的状态区域");
+        // 端点回绕：StateOffset + StateBytes 溢出 64 位，按参数非法拒绝（4096 对齐下起点取最高段）
+        RequireStateAreaRejected(CheckLayoutStateArea(0xFFFFFFFFFFFFF000ull, LayoutDescriptor::kStateBytes), "端点回绕的状态区域");
+        // 起点落在系统卷 [0x100000, 0x200000) 跨度内：状态区属于引导区，写入不许落进系统卷
+        RequireStateAreaRejected(CheckLayoutStateArea(0x100000, LayoutDescriptor::kStateBytes), "落在系统卷内的状态区域");
+    }
+
+    // 状态区域参数非法按致命原因停机：长度不足或起点未按块 / 4096 对齐都在读写介质之前拒绝
     void CaseInvalidStateAreaStops() {
         Fixture fixture;
         const auto defaultId = Id(0x0D);
@@ -654,6 +707,10 @@ namespace {
         Require(selected.setDirectory[0] == '\0', "参数非法时不得定下目标集");
         const auto unalignedReason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected, 0, kStateOffset + BootState::kCopyBytes / 2);
         Require(unalignedReason.code != nullptr && std::string(unalignedReason.code) == "E-CORE-90", "起点未按块对齐的状态区域必须以 E-CORE-90 停机：" + Text(unalignedReason));
+        Require(selected.setDirectory[0] == '\0', "参数非法时不得定下目标集");
+        // 512 字节对齐但不是 4096 的整数倍：512e 上旧实现只按逻辑块对齐会接受，现在按布局契约拒绝
+        const auto areaUnalignedReason = fixture.Select(KernelPath(defaultId.data()).c_str(), selected, 0, kStateOffset + BootState::kCopyBytes);
+        Require(areaUnalignedReason.code != nullptr && std::string(areaUnalignedReason.code) == "E-CORE-90", "512 对齐但非 4096 对齐的状态区域必须以 E-CORE-90 停机：" + Text(areaUnalignedReason));
         Require(selected.setDirectory[0] == '\0', "参数非法时不得定下目标集");
         Require(fixture.Medium().Writes() == 0 && fixture.Medium().Reads() == 0, "参数检查必须发生在读写介质之前");
     }
@@ -2201,6 +2258,7 @@ namespace {
         Case("没有状态区域按无记录处理", CaseNoStateArea);
         Case("读状态区域失败按致命原因停机", CaseStateReadFailure);
         Case("状态区域参数非法按致命原因停机", CaseInvalidStateAreaStops);
+        Case("布局描述的状态区域参数判据", CaseLayoutStateArea);
         Case("吊销记录打开失败报持久化边界", CaseRevocationOpenFailureWarns);
         Case("首次写入落槽位 A", CaseFirstWriteLandsInCopyA);
         Case("第二次写入落槽位 B", CaseSecondWriteRotatesToCopyB);

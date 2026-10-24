@@ -65,12 +65,14 @@ namespace {
     }
 
     // 打印控制器与设备的标识行：端口、型号、扇区数、逻辑扇区大小，供集成阶段断言
+    // 型号串长度不定，单独占一行；扇区数与逻辑块大小另起一行
     void LogDevice() {
         LogText("ahci: port=");
         LogHex(g_controller.port);
         LogText(" ");
         LogText(g_controller.model);
-        LogText(" sectors=");
+        LogText("\r\n");
+        LogText("ahci: sectors=");
         LogHex(g_controller.sectors);
         LogText(" block=");
         LogHex(g_controller.sectorBytes);

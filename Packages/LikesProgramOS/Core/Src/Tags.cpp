@@ -1,7 +1,7 @@
 /* Tags.cpp
-    内核诊断标签与带编号诊断行的实现：纯文本的 "[ 标签 ] " 前缀、整行写入与 E-KRN 行写法
+    内核诊断标签与带编号诊断行的实现：带颜色的 "[ 标签 ] " 前缀、整行写入与 E-KRN 行写法
 
-    与引导期的差别只有一处：内核侧没有支持显示属性的目标，前缀不着色
+    标签文本与属性表与引导期一致：屏幕目标按属性字节着色，串口与调试口忽略属性、只收到纯文本
     带编号行按 Baleen 的同一写法组行：标签 + 编号 + 文本 + 可选 detail，见 Diagnostics.hpp
 */
 
@@ -15,7 +15,9 @@ namespace Kernel {
     namespace Tags {
         void WriteTag(Tag tag) {
             Print::Write("[ ");
+            Print::SetAttribute(TagAttribute(tag));
             Print::Write(TagName(tag));
+            Print::SetAttribute(kDefaultAttribute);
             Print::Write(" ] ");
         }
 

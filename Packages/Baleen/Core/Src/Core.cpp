@@ -765,6 +765,7 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Print::Write("\r\n");
     // 引导闭包交接包与屏幕事实：内核入口按这些地址读三类缓冲，屏幕只报形态与等待配置
     // 地址都在低 4GiB，长度与记录数按预装结果给出；屏幕事实不成立时 Kind=0
+    // 字段按用途分组分行：缓冲地址、记录数与屏幕事实各自成行；路径本身长度不定，单独占一行
     Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
     Print::Write("Closure=Manifest=");
     Print::WriteHex(static_cast<uint32_t>(s_bootInfo.kernelSetManifest));
@@ -774,7 +775,9 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Print::WriteHex(static_cast<uint32_t>(s_bootInfo.bootList));
     Print::Write("/");
     Print::WriteHex(s_bootInfo.bootListBytes);
-    Print::Write(" Records=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Records=");
     Print::WriteHex(static_cast<uint32_t>(s_bootInfo.bootModules));
     Print::Write(" Count=");
     WriteDecimal(s_preloadResult.recordCount);
@@ -788,7 +791,9 @@ extern "C" void _Core_Main(const Baleen::CoreHandoff* handoff) {
     Print::WriteHex(s_bootInfo.screenWidth);
     Print::Write("x");
     Print::WriteHex(s_bootInfo.screenHeight);
-    Print::Write(" Stride=");
+    Print::Write("\r\n");
+    Baleen::PrintTargets::WriteTag(Baleen::PrintTargets::Tag::Continue);
+    Print::Write("Stride=");
     Print::WriteHex(s_bootInfo.screenStride);
     Print::Write(" Bytes=");
     Print::WriteHex(s_bootInfo.screenBytes);

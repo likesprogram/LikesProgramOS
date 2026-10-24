@@ -7,13 +7,18 @@
 #    CheckPreload、CheckRevision、CheckHandoff、CheckScreen、CheckObjects、CheckContainer、
 #    CheckRegistry、CheckDependency、CheckRelocation、CheckLoader、CheckDevModel、CheckVfs、
 #    CheckExt4Module、CheckNvme、CheckUsbCore、CheckXhci、CheckIso9660、CheckFat32、
-#    CheckUsbHub、CheckUsbStorage），逐个报告通过或失败与用例计数
+#    CheckUsbHub、CheckUsbStorage），逐个报告通过或失败与用例计数；
+#    工具数与用例数有固定门禁（30 个工具 / 1000 例）：少一个工具、少一例都判失败，
+#    用例数变化必须同步修改门禁，静默删例视为失败（顶层 README 写的 1000 例即此口径）
+#    布局几何（布局块与状态区在介质上的位置）从镜像同名 JSON 读取，脚本不再写死偏移
 #    扩展验证（--accept，隐含 --with-boot）：在启动矩阵与状态演练之外再跑失败注入、
 #    介质与控制器、吊销与防回滚、只读介质与状态写入、引导状态机多轮；各段按期望停机或进内核核对
 #      · 失败注入：整链逐层弄坏一次（描述符区 / Stub 摘要 / BaleanCore 头与摘要 / 布局描述魔数与校验和），
 #        每层的期望是“按哪个编号停机、且绝不进内核”；另有两档篡改布局描述的内核路径并重算校验和
 #        （布局本身仍合法），指向扁平落点或与清单产物不符时必须拒绝启动（E-CORE-84 / E-CORE-85）；
-#        还有一档把布局的 StateBytes 改成不足一个区域（布局仍然合法），状态区参数非法必须停机（E-CORE-90）；
+#        还有一档把布局的 StateBytes 改成不足一个区域并重算校验和：共享 LayoutCheck 在布局校验阶段
+#        就按状态区判据以 E-CORE-90 停机，不等到选版、也不把它当成“无记录”按零事实启动；
+#        0x21200（512 对齐但非 4096）与覆盖 0x22000 描述符区两档由 CheckSelect 的宿主负例覆盖；
 #        以及一档把内核路径改成含空分量的非法语法，布局校验必须在选版前拒绝（E-CORE-93）
 #      · 介质与控制器：NVMe 控制器（BIOS / UEFI）与 4Kn 设备 + 按 4096 单位组装的镜像（两档）
 #      · 引导状态机多轮：候选连试三次未确认 → 用尽 → 稳态仍可启动；以及确认提交后走已确认集
@@ -22,6 +27,8 @@
 #        Init 失败（E-KRN-59）；每档断言 进内核 / FATAL 编号 / 复位循环 / 状态推进 四列
 #    扩展验证还包含 4Kn 介质上的状态推进（Pending→Trying、候选失败→Failed 真实落盘）、
 #    只读 ISO 上的状态写入降级（E-CORE-70）、吊销与防回滚三档（E-CORE-66 / 75 / 74）
+#    停机注入档不拿期望编号当停止标记：用 --stop-window 定长窗口跑满再核对日志，
+#    要求期望编号出现、不进内核、且全程不出现内核横幅与内核阶段行（编号之后继续启动也会被抓到）
 #
 #    启动矩阵（--with-boot）：十二档介质各起一次真实引导，每档抽九列——
 #    进内核（内核横幅 LikesProgramOS kernel）、刷新路径（Flush= 或“无刷新原语”）、
@@ -71,11 +78,13 @@
 #      --bin-dir <目录>     检查工具所在目录，默认 Tools/Bin
 #      --out <目录>         输出目录，默认 Out/check；不能指向项目根或根 Out（会删真实镜像）
 #      --evidence <目录>    证据目录，必须落在项目 Out 之外；结束时复制 summary、逐例日志与 metadata.txt
-#      --manifest-hdd <文件>  HDD 镜像的布局清单 JSON，默认 <image-hdd>.json；失败注入的偏移从它读
+#      --manifest-hdd <文件>  HDD 镜像的布局清单 JSON，默认 <image-hdd>.json；布局几何与失败注入的偏移从它读
 #      --manifest-iso <文件>  ISO 镜像的布局清单 JSON，默认 <image-iso>.json
 #      --image-iso <文件>   启动矩阵用的光盘镜像，默认 Out/LikesProgram.iso
 #      --image-hdd <文件>   启动矩阵用的磁盘镜像，默认 Out/LikesProgram.hdd
 #      --timeout <秒>       启动矩阵每例的上限，默认 60
+#      --stop-window <秒>   停机注入档的定长观察窗口，默认 20；跑满窗口再核对日志，
+#                           不是看到期望编号就停（那样只观察到编号之前，编号之后进内核也看不见）
 #      --help               打印本用法
 #    环境变量：QEMU / QEMU_MEM / QEMU32 / OVMF_CODE / OVMF_VARS / OVMF32_CODE / OVMF32_VARS /
 #    BOCHS / BOCHS_SHARE / BOCHS_ROM / BOCHS_VGAROM / BOCHS_ROM_ADDR / BOCHS_MEM / BOCHS_DISPLAY /
@@ -118,7 +127,7 @@ image_revision2=$root/Out/LikesProgram.rev2.hdd
 image_fault_baleen_prefix=$root/Out/LikesProgram.fault-
 image_fault_container=$root/Out/LikesProgram.fault-container.hdd
 image_fault_init=$root/Out/LikesProgram.fault-init.hdd
-# 布局清单 JSON：失败注入的偏移从这里读；空表示跟随 --image-hdd / --image-iso 的路径
+# 布局清单 JSON：布局几何（布局块 / 状态区位置）与失败注入的偏移从这里读；空表示跟随 --image-hdd / --image-iso 的路径
 manifest_hdd=
 manifest_iso=
 # 证据留存目录：空表示不留证据；给定后必须在项目 Out 之外，结束时复制汇总、日志与元数据
@@ -131,6 +140,9 @@ qemu_i386=${QEMU32:-qemu-system-i386}
 ovmf32_code=${OVMF32_CODE:-/usr/share/OVMF/OVMF32_CODE_4M.fd}
 ovmf32_vars=${OVMF32_VARS:-/usr/share/OVMF/OVMF32_VARS_4M.fd}
 timeout_s=60
+# 停机注入档的定长观察窗口：跑满这个秒数再收日志，覆盖“停机之后”的整个现场；
+# 以前用期望编号当停止标记，编号一出现就杀模拟器，只能观察到编号之前
+stop_window=20
 # 定长观察窗口：需要保留复位循环的档（运行期必需失败、故障注入）要跑满一段时间；
 # 窗口太短会在宿主负载下少看一轮，把复位循环误判成缺失
 reset_window_s=45
@@ -180,6 +192,7 @@ while [ $# -gt 0 ]; do
         --image-iso) [ $# -ge 2 ] || die "--image-iso 缺少参数"; image_iso=$2; shift 2 ;;
         --image-hdd) [ $# -ge 2 ] || die "--image-hdd 缺少参数"; image_hdd=$2; shift 2 ;;
         --timeout) [ $# -ge 2 ] || die "--timeout 缺少参数"; timeout_s=$2; shift 2 ;;
+        --stop-window) [ $# -ge 2 ] || die "--stop-window 缺少参数"; stop_window=$2; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) die "无法识别的参数 $1（--help 看用法）" ;;
     esac
@@ -187,10 +200,15 @@ done
 case "$timeout_s" in
     ''|*[!0-9]*|0) die "--timeout 必须是正整数秒" ;;
 esac
+case "$stop_window" in
+    ''|*[!0-9]*|0) die "--stop-window 必须是正整数秒" ;;
+esac
 
-# 清单默认跟随镜像路径：显式 --image-hdd / --image-iso 改了路径又没给 --manifest-* 时取 <镜像>.json
+# 清单默认跟随镜像路径：显式 --image-hdd / --image-iso / --image-4kn 改了路径时取 <镜像>.json
 [ -n "$manifest_hdd" ] || manifest_hdd=$image_hdd.json
 [ -n "$manifest_iso" ] || manifest_iso=$image_iso.json
+# 4Kn 镜像的布局清单：有就优先用它的布局几何，没有就沿用 HDD 的（两份镜像同批布局相同）
+manifest_4kn=$image_4kn.json
 
 # 项目根与输出/证据目录都规范成绝对物理路径：
 #   · 相对路径按调用时的工作目录展开，消灭 . / .. / 重复斜杠 / 末尾斜杠 / 符号链接，
@@ -219,9 +237,10 @@ if [ -n "$evidence_dir" ]; then
         "$out_dir"/*) die "--evidence 不能位于 --out 目录内：$evidence_dir" ;;
     esac
 fi
-# 失败注入的偏移来自布局清单 JSON：ACCEPT 一定需要它，缺了就在这里报错，
-# 不要等宿主检查与启动矩阵跑完几分钟才死在注入段
-if [ "$accept" -eq 1 ] && [ ! -r "$manifest_hdd" ]; then
+# 布局几何与失败注入点都从布局清单 JSON 读（布局块 / 状态区在介质上的位置、各载荷偏移）：
+# --with-boot 的状态演练与 --accept 的注入段都要它，缺了就在这里报错，
+# 不要等宿主检查与启动矩阵跑完几分钟才死在状态演练或注入段
+if [ "$with_boot" -eq 1 ] && [ ! -r "$manifest_hdd" ]; then
     die "缺少布局清单 $manifest_hdd；先跑 make（或用 --manifest-hdd 指定）"
 fi
 
@@ -234,6 +253,8 @@ mkdir -p "$host_dir"
 host_total=0
 host_passed=0
 host_cases=0
+# 宿主门禁：工具数与用例数固定，少一个工具或少一例都判失败（防静默删例）；"通过"表示未触发
+host_gate=通过
 boot_total=0
 boot_passed=0
 boot_skipped=0
@@ -284,6 +305,13 @@ case_count() {
     fi
     counted=$(grep -a -c -E '\[通过\]|: .* 通过$' "$1" || true)
     printf '%s' "$counted"
+}
+
+# 取布局清单 JSON 里 layout 对象的一个字段：layout_json_field <清单> <字段名>
+# 清单由 TestInstaller 生成，字段顺序稳定（layout: offset, bytes, state_offset, state_bytes, kernel_path），
+# 用 sed 提取即可，不引入 jq / python 依赖；提取不到时输出空串，由调用方统一报错
+layout_json_field() {
+    sed -n "s/.*\"layout\": {.*\"$2\": \([0-9][0-9]*\).*/\1/p" "$1" | head -n 1
 }
 
 # 跑宿主侧的一个工具：run_host <工具名>
@@ -397,8 +425,10 @@ run_boot_case() {
     else
         [ "$boot_reached" = 是 ] || boot_status=失败
     fi
-    # M5 主线四档的硬判定：闭包预装 13、闭包 Init 13 条、挂卷行与清单摘要行都在，且内核侧不得报错；
-    # 其余档只显示这四列，不据此判失败（USB / 4Kn / Bochs 档的驱动在 M6 才落地）
+    # 主线档的硬判定：闭包预装 13、闭包 Init 13 条、挂卷行与清单摘要行都在，且内核侧不得报错。
+    # 当前 UEFI 五档（HDD / ISO / USB / 4Kn U 盘 / NVMe 4Kn）与 Bochs 两档都设 boot_require_m5=1；
+    # 逐档附加要求由调用方设置：光盘档 boot_require_iso（ISO9660 第二来源行）、USB 两档与 NVMe 档
+    # boot_require_text（驱动报告的块大小）。没有设置这些开关的档只显示该四列。
     # 判据只看内核侧：E-KRN 编号与 FATAL 行一律失败；引导器自身的 WARN（如 E-UEFI-55 耗时预算）
     # 不改变内核观测，不算失败
     if [ "$boot_require_m5" -eq 1 ]; then
@@ -564,12 +594,22 @@ say ""
 say "宿主检查                                                          用例数"
 say "工具               结果   用例    日志"
 
+# 宿主门禁的期望值：30 = host_tools 列表里的检查工具数（RunBootCase 是辅助器，不算宿主工具；
+# 顶层 README 的“30 个检查工具”即此口径）；1000 = 各工具自报用例数之和（当前 CheckSelect 75、
+# CheckEfiBlockDevice 29、CheckVfs 52，其余按当前实现）。用例数增减必须同步这两个数字，静默删例视为失败
+expected_host_tools=30
+expected_host_cases=1000
+
 for tool in $host_tools; do
     [ -x "$bin_dir/$tool" ] || die "缺少检查工具 $bin_dir/$tool；先跑 make test-tools"
     run_host "$tool"
 done
 say ""
-say "宿主小计：通过 $host_passed/$host_total，用例合计 $host_cases"
+say "宿主小计：通过 $host_passed/$host_total，用例合计 $host_cases（门禁 $expected_host_tools 工具 / $expected_host_cases 例）"
+if [ "$host_total" -ne "$expected_host_tools" ] || [ "$host_cases" -ne "$expected_host_cases" ]; then
+    host_gate=失败
+    say "宿主门禁：失败（工具 $host_total/$expected_host_tools，用例 $host_cases/$expected_host_cases；用例数变化必须同步门禁，静默删例视为失败）"
+fi
 say ""
 
 # —— 启动矩阵 ——
@@ -578,6 +618,29 @@ if [ "$with_boot" -eq 1 ]; then
         [ -r "$image" ] || die "缺少镜像 $image；先跑 make（或用 --image-iso / --image-hdd 指定）"
     done
     [ -x "$helper" ] || die "缺少运行辅助工具 $helper；先跑 make -C Tools/Test/RunBootCase"
+    # —— 布局几何：从镜像同名 JSON 一次读齐 ——
+    # 布局块在介质上的位置（layout_offset / layout_bytes）与状态区（state_offset / state_bytes）由镜像
+    # 同名清单记录；以前这里把布局块与状态区的介质偏移写死，换模板布局或换镜像时会精确打到别的区还不报错。
+    # 清单字段顺序稳定，用 sed 提取；读不到（清单格式变了或没跑 make）就 die，
+    # 否则后面的状态演练与注入会往错误偏移上写，把验证变成破坏
+    layout_offset=$(layout_json_field "$manifest_hdd" offset)
+    layout_bytes=$(layout_json_field "$manifest_hdd" bytes)
+    state_offset=$(layout_json_field "$manifest_hdd" state_offset)
+    state_bytes=$(layout_json_field "$manifest_hdd" state_bytes)
+    if [ -z "$layout_offset" ] || [ -z "$layout_bytes" ] || [ -z "$state_offset" ] || [ -z "$state_bytes" ]; then
+        die "$manifest_hdd 里读不到 layout 的 offset/bytes/state_offset/state_bytes；格式不对，先跑 make 重新生成"
+    fi
+    # 布局块至少要放得下格式内部的校验和区（+0x140），否则 refresh_layout_checksum 会读到别的区
+    [ "$layout_bytes" -ge $((0x140)) ] ||
+        die "$manifest_hdd 里 layout.bytes=$layout_bytes 小于格式内部的校验和区 0x140；先跑 make 重新生成"
+    # 4Kn 镜像有自己的清单时优先用它的布局块起点（4Kn 的默认集 BuildId 从它自己的布局块读）；
+    # 没有就沿用 HDD 几何——两份镜像同批产物、布局位置相同，只是块大小与落盘单位不同。
+    # 4Kn 的状态区搬运走 FixBootState（按逻辑块），不按 512 字节扇区 dd，故只取 layout 起点
+    layout_offset_4kn=$layout_offset
+    if [ -r "$manifest_4kn" ]; then
+        layout_offset_4kn=$(layout_json_field "$manifest_4kn" offset)
+        [ -n "$layout_offset_4kn" ] || die "$manifest_4kn 里读不到 layout.offset；格式不对，先跑 make 重新生成"
+    fi
     say "启动矩阵                                                          九列"
     say "介质档                进内核   刷新路径 诊断编号       预装   闭包Init 挂卷   清单   ISO源  运行期 结果"
     mkdir -p "$boot_dir"
@@ -881,15 +944,15 @@ if [ "$with_boot" -eq 1 ]; then
     # 每一档都在 Out/check/state/ 下用独立副本，不动构建产物；写盘不经 snapshot，好让引导期的写回可见
     fixboot=$root/Tools/Bin/FixBootState
     state_dir=$out_dir/state
-    # 状态区的扇区位置：布局描述约定偏移 0x21000，按 512 字节扇区取整
-    state_sector=$((0x21000 / 512))
+    # 状态区的扇区位置：布局清单给出的 state_offset，按 512 字节扇区取整
+    state_sector=$((state_offset / 512))
     # 假候选：不存在的 BuildId 与摘要，用于逼出“候选验证失败 → 回退”这条路径
     bogus_build_id=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
     bogus_digest=0badc0de0badc0de0badc0de0badc0de0badc0de0badc0de0badc0de0badc0de
 
-    # 缺省集的 BuildId：从镜像的布局描述里取（端到端，不依赖构建产物）
+    # 缺省集的 BuildId：从镜像布局块的内核路径读（路径在布局块 +0x40，端到端，不依赖构建产物）
     # 状态演练与验证都要用它造“能通过验证的候选”，因此在这里定义一次
-    default_build_id=$(dd if="$image_hdd" bs=1 skip=$((0x20000 + 0x40)) count=255 2>/dev/null | tr -d '\000' |
+    default_build_id=$(dd if="$image_hdd" bs=1 skip=$((layout_offset + 0x40)) count=255 2>/dev/null | tr -d '\000' |
         sed -n 's#.*/KernelSets/\([0-9a-f]\{64\}\)/.*#\1#p')
 
     # 把状态区的若干扇区写成不可验证的字节：有写入痕迹但没有有效记录
@@ -1025,7 +1088,7 @@ if [ "$with_boot" -eq 1 ]; then
         cp "$image_hdd" "$case_dir/image.hdd"
         "$fixboot" --image "$case_dir/image.hdd" --publish --build-id "$bogus_build_id" --digest "$bogus_digest" > "$case_dir/prepare-1.log" 2>&1
         "$fixboot" --image "$case_dir/image.hdd" --publish --build-id "$bogus_build_id" --digest "$bogus_digest" > "$case_dir/prepare-2.log" 2>&1
-        printf '\003\000\000\000\000\000\000\000' | dd bs=1 seek=$((0x21000 + 512 + 8)) conv=notrunc of="$case_dir/image.hdd" 2>/dev/null
+        printf '\003\000\000\000\000\000\000\000' | dd bs=1 seek=$((state_offset + 512 + 8)) conv=notrunc of="$case_dir/image.hdd" 2>/dev/null
         printf '撕裂后槽位：'; "$fixboot" --image "$case_dir/image.hdd" --report 2>/dev/null | sed -n 's/.*槽位：\(.*\)/\1/p'
         set -- "$qemu" -machine q35 -m "$qemu_mem" -monitor none -display none -no-reboot \
             -drive "file=$case_dir/image.hdd,format=raw,if=ide" -boot order=c \
@@ -1040,10 +1103,10 @@ if [ "$with_boot" -eq 1 ]; then
             "$fixboot" --image "$case_dir/image.hdd" --publish --build-id "$bogus_build_id" --digest "$bogus_digest" > "$case_dir/prepare-$i.log" 2>&1
         done
         # 八个槽位此时都有效；取最后一个槽位的头部当"新记录的头"，覆盖到前七个上并把代次抬高
-        dd if="$case_dir/image.hdd" of="$case_dir/head.bin" bs=1 skip=$((0x21000 + 7 * 512)) count=32 2>/dev/null
+        dd if="$case_dir/image.hdd" of="$case_dir/head.bin" bs=1 skip=$((state_offset + 7 * 512)) count=32 2>/dev/null
         slot=0
         while [ "$slot" -lt 7 ]; do
-            seek=$((0x21000 + slot * 512))
+            seek=$((state_offset + slot * 512))
             dd if="$case_dir/head.bin" of="$case_dir/image.hdd" bs=1 seek=$seek conv=notrunc 2>/dev/null
             oct=$(printf '%03o' $((20 + slot)))
             printf "\\$oct\000\000\000\000\000\000\000" | dd bs=1 seek=$((seek + 8)) conv=notrunc of="$case_dir/image.hdd" 2>/dev/null
@@ -1227,7 +1290,8 @@ if [ "$with_boot" -eq 1 ]; then
             if [ ! -r "$image_4kn" ]; then
                 boot_missing "4Kn 状态推进（五档）" "缺少 $image_4kn；先跑 make 的 4Kn 依赖或用 --image-4kn 指定"
             else
-                build_id_4kn=$(dd if="$image_4kn" bs=1 skip=$((0x20000 + 0x40)) count=255 2>/dev/null | tr -d '\000' |
+                # 用 4Kn 镜像自己的布局块起点读它自己的默认集 BuildId
+                build_id_4kn=$(dd if="$image_4kn" bs=1 skip=$((layout_offset_4kn + 0x40)) count=255 2>/dev/null | tr -d '\000' |
                     sed -n 's#.*/KernelSets/\([0-9a-f]\{64\}\)/.*#\1#p')
                 if [ -z "$build_id_4kn" ]; then
                     boot_missing "4Kn 状态推进（五档）" "读不到 $image_4kn 的缺省集 BuildId"
@@ -1268,7 +1332,7 @@ if [ "$with_boot" -eq 1 ]; then
         # 步骤：① 修订 2 镜像正常启动，内核打印 Rev=2；
         #      ② 修订 1 镜像启动一次，把状态区（含 Confirmed 的 ModuleRevision=1）搬到修订 2 副本；
         #      ③ 修订 2 副本上发布假候选 → 候选验证失败 → 回退到记录里的回退目标修订 1 → 内核打印 Rev=1。
-        # 状态区偏移/长度取布局约定（0x21000 / 4096）；两份镜像几何相同，按 512 字节扇区 dd 搬运
+        # 状态区偏移/长度取布局清单给出的 state_offset / state_bytes；两份镜像几何相同，按 512 字节扇区 dd 搬运
         if [ -r "$image_revision2" ]; then
             rev_dir=$state_dir/revisions
             mkdir -p "$rev_dir"
@@ -1309,7 +1373,7 @@ if [ "$with_boot" -eq 1 ]; then
             mkdir -p "$rev_dir/fallback"
             cp "$image_revision2" "$rev_dir/fallback/image.hdd"
             dd if="$rev_dir/rev1/image.hdd" of="$rev_dir/fallback/image.hdd" bs=512 \
-                skip=$((0x21000 / 512)) seek=$((0x21000 / 512)) count=$((4096 / 512)) conv=notrunc 2>/dev/null
+                skip=$((state_offset / 512)) seek=$((state_offset / 512)) count=$((state_bytes / 512)) conv=notrunc 2>/dev/null
             "$fixboot" --image "$rev_dir/fallback/image.hdd" --publish --build-id "$bogus_build_id" --digest "$bogus_digest" > "$rev_dir/fallback/prepare.log" 2>&1 || true
             rev_boot "$rev_dir/fallback/image.hdd" "$rev_dir/fallback" 'Rev=0x0000000000000001' "两修订 候选失败回退修订1"
         else
@@ -1354,43 +1418,44 @@ if [ "$with_boot" -eq 1 ]; then
         }
 
         # 重算布局描述的校验和，让改过的布局本身仍然合法
-        # 布局块在 0x20000，校验和在 +0x140（4 字节小端，覆盖 [0x20000, 0x200140) 逐字节无符号和取低 32 位）
+        # 布局块起点取布局清单的 layout_offset；校验和在 +0x140（格式内部偏移，4 字节小端，
+        # 覆盖 [layout_offset, layout_offset+0x140) 逐字节无符号和取低 32 位）
         refresh_layout_checksum() {
             refresh_image=$1
-            refresh_sum=$(od -An -tu1 -v -j $((0x20000)) -N $((0x140)) "$refresh_image" | tr -s ' ' '\n' |
+            refresh_sum=$(od -An -tu1 -v -j "$layout_offset" -N $((0x140)) "$refresh_image" | tr -s ' ' '\n' |
                 awk '{ sum += $1 } END { printf "%d", sum }')
             refresh_byte0=$(octal_escape $((refresh_sum % 256)))
             refresh_byte1=$(octal_escape $(((refresh_sum / 256) % 256)))
             refresh_byte2=$(octal_escape $(((refresh_sum / 65536) % 256)))
             refresh_byte3=$(octal_escape $((refresh_sum / 16777216)))
-            inject_bytes "$refresh_image" "$((0x20000 + 0x140))" "$refresh_byte0$refresh_byte1$refresh_byte2$refresh_byte3"
+            inject_bytes "$refresh_image" "$((layout_offset + 0x140))" "$refresh_byte0$refresh_byte1$refresh_byte2$refresh_byte3"
         }
 
         # 改写镜像布局描述的内核路径，并重算布局校验和让布局本身仍然合法
-        # 路径字节数在 +0x3C（2 字节小端）、路径在 +0x40（256 字节）
+        # 路径字节数在布局块 +0x3C（格式内部偏移，2 字节小端）、路径在 +0x40（256 字节）
         patch_layout_kernel_path() {
             patch_image=$1
             patch_path=$2
             # 路径区先整段清零再写新路径：残留的旧尾巴会被读方当成路径的一部分
-            dd if=/dev/zero of="$patch_image" bs=1 count=256 seek=$((0x20000 + 0x40)) conv=notrunc 2>/dev/null
-            printf '%s' "$patch_path" | dd of="$patch_image" bs=1 seek=$((0x20000 + 0x40)) conv=notrunc 2>/dev/null
+            dd if=/dev/zero of="$patch_image" bs=1 count=256 seek=$((layout_offset + 0x40)) conv=notrunc 2>/dev/null
+            printf '%s' "$patch_path" | dd of="$patch_image" bs=1 seek=$((layout_offset + 0x40)) conv=notrunc 2>/dev/null
             # 路径字节数按 2 字节小端写回：上限 255，高字节恒为 0
             patch_bytes=$(printf '%s' "$patch_path" | wc -c | tr -d '[:space:]')
-            inject_bytes "$patch_image" "$((0x20000 + 0x3C))" \
+            inject_bytes "$patch_image" "$((layout_offset + 0x3C))" \
                 "$(octal_escape $((patch_bytes % 256)))$(octal_escape $((patch_bytes / 256)))"
             refresh_layout_checksum "$patch_image"
         }
 
-        # 改写布局描述的状态区域长度（StateBytes，+0x38，4 字节小端），并重算校验和
+        # 改写布局描述的状态区域长度（StateBytes，格式内部偏移 +0x38，4 字节小端），并重算校验和
         patch_layout_state_bytes() {
             patch_image=$1
             patch_bytes=$2
-            inject_bytes "$patch_image" "$((0x20000 + 0x38))" \
+            inject_bytes "$patch_image" "$((layout_offset + 0x38))" \
                 "$(octal_escape $((patch_bytes % 256)))$(octal_escape $(((patch_bytes / 256) % 256)))$(octal_escape $(((patch_bytes / 65536) % 256)))$(octal_escape $((patch_bytes / 16777216)))"
             refresh_layout_checksum "$patch_image"
         }
 
-        # 扩展验证的一档：expect 为 code:E-XXX-nn（日志里必须出现该编号且不进内核）
+        # 扩展验证的一档：expect 为 code:E-XXX-nn（日志里必须出现该编号、绝不进内核）
         # 或 ipl:N（IPL 只输出一位十六进制码到 0xE9，且绝不进内核）
         run_accept_case() {
             name=$1
@@ -1404,12 +1469,12 @@ if [ "$with_boot" -eq 1 ]; then
             accept_status=通过
             case "$expect" in
                 code:*)
-                    # 期望停机的档以期望编号为标记：日志里出现它就停模拟器
-                    if ! "$helper" --timeout "$timeout_s" --marker "${expect#code:}" \
-                            --cwd "$case_dir" --console "$case_dir/console.log" \
-                            --log "$case_dir/serial.log" --log "$case_dir/debug.log" -- "$@" > "$case_dir/runner.log" 2>&1; then
-                        accept_status=失败
-                    fi
+                    # 停机注入档用定长窗口（与 IPL 档同型）：让模拟器跑满 stop_window 秒再收日志。
+                    # 不能再拿期望编号当停止标记——编号一出现就杀 QEMU，只观察到编号之前；
+                    # 若注入没停住、只报一句 WARN 又继续启动，编号之后的日志（含进内核）根本没被监视。
+                    # 定长窗口覆盖整个停机现场：注入必须“停住”，而不是“报一句继续跑”。
+                    # timeout 到点杀 QEMU 返回非 0 属预期，用 || true 兜住；日志在 kill 后仍然完整
+                    timeout "$stop_window" "$@" > "$case_dir/runner.log" 2>&1 || true
                     ;;
                 *)
                     # IPL 档没有可等的文本标记（它只往 0xE9 写一位十六进制码），用固定上限跑完再看日志
@@ -1422,6 +1487,12 @@ if [ "$with_boot" -eq 1 ]; then
                     want=${expect#code:}
                     [ "$boot_reached" = 否 ] || accept_status=失败
                     printf '%s' "$boot_codes" | grep -q -- "$want" || accept_status=失败
+                    # 定长窗口下的追加断言：全程不得出现内核阶段标记。
+                    # 只查横幅不够——有的现场先打阶段行（进内核之后才打横幅），两条都查才算“没进内核”
+                    if grep -a -q -F -e "$kernel_marker" -e 'kernel core stage ends here' \
+                            "$case_dir/serial.log" "$case_dir/debug.log" 2>/dev/null; then
+                        accept_status=失败
+                    fi
                     ;;
                 ipl:*)
                     want=${expect#ipl:}
@@ -1544,18 +1615,18 @@ if [ "$with_boot" -eq 1 ]; then
             printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$boot_reached" "$boot_codes" "进内核+$want_code" "$accept_status" >> "$summary"
         }
 
-        # 失败注入的偏移来自构建产物的布局清单 JSON：产物布局一变，硬编码偏移就会打到别的区
-        # 只取需要的四个区起点（TestInstaller / MakeImage 写出的稳定格式），并逐点按镜像大小校验
-        [ -r "$manifest_hdd" ] || die "缺少布局清单 $manifest_hdd；先跑 make（或用 --manifest-hdd 指定）"
-        layout_offset=$(sed -n 's/.*"layout": {"offset": \([0-9][0-9]*\).*/\1/p' "$manifest_hdd" | head -n 1)
+        # 失败注入的偏移来自构建产物的布局清单 JSON：产物布局一变，写死偏移就会打到别的区。
+        # 布局块起点（layout_offset / layout_bytes）已在进入启动段时统一读过并校验；
+        # 这里再取 descriptor_area / stub / core 三个区起点（TestInstaller / MakeImage 写出的稳定格式），
+        # 并逐点按镜像大小校验
         descriptor_offset=$(sed -n 's/.*"descriptor_area": {"offset": \([0-9][0-9]*\).*/\1/p' "$manifest_hdd" | head -n 1)
         stub_offset=$(sed -n 's/.*"stub": {"offset": \([0-9][0-9]*\), "bytes": \([0-9][0-9]*\).*/\1/p' "$manifest_hdd" | head -n 1)
         stub_region_bytes=$(sed -n 's/.*"stub": {"offset": \([0-9][0-9]*\), "bytes": \([0-9][0-9]*\).*/\2/p' "$manifest_hdd" | head -n 1)
         core_offset=$(sed -n 's/.*"core": {"offset": \([0-9][0-9]*\), "bytes": \([0-9][0-9]*\).*/\1/p' "$manifest_hdd" | head -n 1)
         core_region_bytes=$(sed -n 's/.*"core": {"offset": \([0-9][0-9]*\), "bytes": \([0-9][0-9]*\).*/\2/p' "$manifest_hdd" | head -n 1)
-        if [ -z "$layout_offset" ] || [ -z "$descriptor_offset" ] || [ -z "$stub_offset" ] || [ -z "$stub_region_bytes" ] ||
+        if [ -z "$descriptor_offset" ] || [ -z "$stub_offset" ] || [ -z "$stub_region_bytes" ] ||
            [ -z "$core_offset" ] || [ -z "$core_region_bytes" ]; then
-            die "$manifest_hdd 里读不到 layout / descriptor_area / stub / core 偏移；格式不对，先跑 make 重新生成"
+            die "$manifest_hdd 里读不到 descriptor_area / stub / core 偏移；格式不对，先跑 make 重新生成"
         fi
         image_hdd_bytes=$(wc -c < "$image_hdd" | tr -d '[:space:]')
         # 摘要注入点取载荷区中段：优先 +8192，超出本区范围时退到半程；最后统一按文件大小兜底
@@ -1619,7 +1690,7 @@ if [ "$with_boot" -eq 1 ]; then
 
             # 档二：保留集目录、只把产物名换成清单没登记的 Other.os：
             # 清单验签通过之后，布局路径与登记产物比对不符 → E-CORE-85
-            layout_path=$(dd if="$image_hdd" bs=1 skip=$((0x20000 + 0x40)) count=255 2>/dev/null | tr -d '\000')
+            layout_path=$(dd if="$image_hdd" bs=1 skip=$((layout_offset + 0x40)) count=255 2>/dev/null | tr -d '\000')
             case_dir=$accept_dir/inject-layout-artifact
             mkdir -p "$case_dir"
             cp "$image_hdd" "$case_dir/image.hdd"
@@ -1646,8 +1717,9 @@ if [ "$with_boot" -eq 1 ]; then
             boot_missing "注入 layout-path-syntax" "找不到 QEMU：$qemu"
         fi
 
-        # 状态区域参数非法档：把布局描述的 StateBytes 改成 2048（不足一个区域）并重算校验和，
-        # 布局本身合法；选版不能把“参数非法”当成“无记录”按零事实启动，必须以 E-CORE-90 停机
+        # 状态区域参数非法档：把布局描述的 StateBytes 改成 2048（不足一个区域）并重算校验和。
+        # 判据在共享 LayoutCheck：读布局描述那一步就以 E-CORE-90 停机，不进入挂卷与选版——
+        # 选版不能把“参数非法”当成“无记录”按零事实启动
         if command -v "$qemu" >/dev/null 2>&1; then
             case_dir=$accept_dir/inject-state-area
             mkdir -p "$case_dir"
@@ -2000,7 +2072,7 @@ if [ "$with_boot" -eq 1 ]; then
     fi
     say ""
     say "G7 验证总计（$(if [ "$accept" -eq 1 ]; then printf -- '--accept'; else printf -- '--with-boot'; fi)）"
-    say "  宿主检查：$host_passed/$host_total 工具，用例合计 $host_cases"
+    say "  宿主检查：$host_passed/$host_total 工具，用例合计 $host_cases（门禁 $expected_host_tools 工具 / $expected_host_cases 例：$host_gate）"
     say "  启动矩阵：$matrix_passed/$matrix_total 档（含 NVMe 4Kn 与 4 个 xHCI USB 档）"
     say "  运行期模块：$runtime_passed/$runtime_total 档（含必需失败复位循环）"
     if [ "$state_4kn" -gt 0 ]; then
@@ -2030,7 +2102,8 @@ if [ -n "$evidence_dir" ]; then
 fi
 
 # 结论：有失败 exit 1；判定不了（基础设施缺失）exit 2；否则 0
-if [ "$host_passed" -ne "$host_total" ] || [ "$boot_failed" -ne 0 ]; then
+# 宿主门禁不通过也算失败：静默删例/删工具不能让整轮检查假绿
+if [ "$host_passed" -ne "$host_total" ] || [ "$boot_failed" -ne 0 ] || [ "$host_gate" = 失败 ]; then
     printf 'check-all: 有失败\n' >&2
     exit 1
 fi
